@@ -1806,7 +1806,7 @@ mod tests {
 
     #[test]
     fn addon_min_age_policy_prefers_project_over_env() {
-        let _guard = crate::util::env_test_lock().lock().unwrap();
+        let _guard = crate::util::env_test_guard();
         let dir = unique_test_dir("taida_test_min_age_project_env");
         let home = dir.join("home");
         fs::create_dir_all(&dir).unwrap();

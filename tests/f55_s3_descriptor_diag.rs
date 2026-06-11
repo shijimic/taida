@@ -71,8 +71,8 @@ fn e1532_rejects_descriptor_as_builtin_argument() {
     let output = run_interp(
         "f55_s3_builtin_arg",
         r#"serverMain <= "x"
-unit <= BuildUnit(name <= "u", target <= "native", entry <= serverMain)
-stdout(unit)
+webUnit <= BuildUnit(name <= "u", target <= "native", entry <= serverMain)
+stdout(webUnit)
 "#,
     );
     assert_e1532(&output, "builtin arg");
@@ -85,8 +85,8 @@ fn e1532_rejects_descriptor_as_user_function_argument() {
         "f55_s3_user_fn_arg",
         r#"serverMain <= "x"
 useIt u: @(name: Str) = u.name => :Str
-unit <= BuildUnit(name <= "u", target <= "native", entry <= serverMain)
-stdout(useIt(unit))
+webUnit <= BuildUnit(name <= "u", target <= "native", entry <= serverMain)
+stdout(useIt(webUnit))
 "#,
     );
     assert_e1532(&output, "user function arg");
@@ -99,8 +99,8 @@ fn e1532_rejects_descriptor_as_mold_argument() {
     let output = run_interp(
         "f55_s3_mold_arg",
         r#"serverMain <= "x"
-unit <= BuildUnit(name <= "u", target <= "native", entry <= serverMain)
-s <= Str[unit]()
+webUnit <= BuildUnit(name <= "u", target <= "native", entry <= serverMain)
+s <= Str[webUnit]()
 stdout(s)
 "#,
     );
@@ -108,7 +108,7 @@ stdout(s)
 }
 
 /// Invalid #4: descriptor used as an operator operand via field access.
-/// (`unit.name == "u"` constructs the descriptor inline in operand position.)
+/// (`webUnit.name == "u"` constructs the descriptor inline in operand position.)
 #[test]
 fn e1532_rejects_descriptor_in_operator_operand() {
     let output = run_interp(
@@ -129,8 +129,8 @@ fn e1532_allows_top_level_export_of_descriptor() {
     let output = run_interp(
         "f55_s3_export",
         r#"serverMain <= "x"
-unit <= BuildUnit(name <= "u", target <= "native", entry <= serverMain)
-<<< unit
+webUnit <= BuildUnit(name <= "u", target <= "native", entry <= serverMain)
+<<< webUnit
 "#,
     );
     assert_no_e1532(&output, "top-level export");
@@ -220,10 +220,10 @@ fn e1532_allows_function_param_shadowing_descriptor_name() {
     let output = run_interp(
         "f55_s3_param_shadow",
         r#"serverMain <= "x"
-unit <= BuildUnit(name <= "u", target <= "native", entry <= serverMain)
-useName unit: Str = unit => :Str
+webUnit <= BuildUnit(name <= "u", target <= "native", entry <= serverMain)
+useName webUnit: Str = webUnit => :Str
 stdout(useName("hello"))
-<<< unit
+<<< webUnit
 "#,
     );
     assert_no_e1532(&output, "function param shadow");
@@ -247,10 +247,10 @@ fn e1532_allows_lambda_param_shadowing_descriptor_name() {
     let output = run_interp(
         "f55_s3_lambda_shadow",
         r#"serverMain <= "x"
-unit <= BuildUnit(name <= "u", target <= "native", entry <= serverMain)
-shout <= _ unit: Str = unit + "!"
+webUnit <= BuildUnit(name <= "u", target <= "native", entry <= serverMain)
+shout <= _ webUnit: Str = webUnit + "!"
 stdout(shout("hey"))
-<<< unit
+<<< webUnit
 "#,
     );
     assert_no_e1532(&output, "lambda param shadow");
@@ -275,8 +275,8 @@ fn e1532_still_rejects_descriptor_use_inside_function_without_shadow() {
     let output = run_interp(
         "f55_s3_fn_body_no_shadow",
         r#"serverMain <= "x"
-unit <= BuildUnit(name <= "u", target <= "native", entry <= serverMain)
-leak x: Str = Str[unit]() => :Str
+webUnit <= BuildUnit(name <= "u", target <= "native", entry <= serverMain)
+leak x: Str = Str[webUnit]() => :Str
 stdout(leak("hi"))
 "#,
     );

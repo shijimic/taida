@@ -107,12 +107,9 @@ Int["abc"]().getOrDefault(-1)             // 変換失敗時は -1
 
 #### map による変換チェーン
 
-```taida
+```taida fragment
 // 成功時のみ変換を適用します。失敗時はそのまま空の Lax が伝播します
-Div[100, count]()
-  .map(_ x = x * taxRate)
-  .map(_ x = Round[x]().unmold())
-  >=> taxAmount
+Div[100, count]().map(_ x = x * taxRate).map(_ x = Round[x]().unmold()) >=> taxAmount
 ```
 
 Lax の詳細は [リスト操作](06_lists.md) および [`docs/api/prelude.md §8.6`](../api/prelude.md#86-lax-メソッド) を参照してください。
@@ -552,7 +549,7 @@ calculateAverage scores: @[Int] =
   Sum[scores]() >=> total
   Div[total, scores.length()]() >=> avg
   avg
-=> :Num
+=> :Int
 
 // 不要: ゼロ除算のためにエラー処理を書く必要はありません
 // | scores.isEmpty() |> Error(...).throw()  // これは過剰です

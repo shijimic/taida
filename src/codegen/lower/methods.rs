@@ -43,6 +43,19 @@ impl Lowering {
             }
         }
 
+        // Direct-form fusion: `Mold[...]().unmold()` constructs its
+        // receiver solely for this call — the same single-reference
+        // guarantee as `Mold[...]() >=> v` — so when the result is
+        // statically known the Lax is never materialised. This is the
+        // form lambda bodies use, where the materialised Lax otherwise
+        // dominates HOF loops.
+        if method == "unmold"
+            && args.is_empty()
+            && let Some(result) = self.try_lower_fused_unmold(func, obj)?
+        {
+            return Ok(result);
+        }
+
         let obj_var = self.lower_expr(func, obj)?;
 
         let mut arg_vars = vec![obj_var];

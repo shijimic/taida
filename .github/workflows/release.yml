@@ -70,6 +70,8 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: "22"
+      - name: Install ripgrep (secret scan)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep
       - name: Secret scan
         run: ./scripts/release/secret-scan.sh
       - run: cargo fmt --all -- --check

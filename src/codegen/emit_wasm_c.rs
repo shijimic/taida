@@ -288,11 +288,15 @@ fn c_string_literal(s: &str) -> String {
             '\0' => out.push_str("\\0"),
             c if c.is_ascii_graphic() || c == ' ' => out.push(c),
             c => {
-                // UTF-8 bytes as hex escapes
+                // UTF-8 bytes as OCTAL escapes: C's \x is greedy
+                // (unbounded digits), so "\xe3\x81\x82b" parses the
+                // trailing `b` into the last escape and fails with
+                // "hex escape sequence out of range". Octal stops at
+                // three digits, so any following character is safe.
                 let mut buf = [0u8; 4];
                 let encoded = c.encode_utf8(&mut buf);
                 for b in encoded.bytes() {
-                    write!(out, "\\x{:02x}", b).unwrap();
+                    write!(out, "\\{:03o}", b).unwrap();
                 }
             }
         }
@@ -383,6 +387,18 @@ pub fn emit_c(ir_module: &IrModule, profile: WasmProfile) -> Result<String, Wasm
 
     // W-3: f64 -> i64 bitcast helper (union-based, no libc dependency)
     writeln!(c, "static int64_t _d2l(double v) {{ union {{ int64_t l; double d; }} u; u.d = v; return u.l; }}").unwrap();
+    // Scalar-intrinsic float helpers: the runtime's `_to_double` twin.
+    // The +-2^20 small-int lift is part of the value semantics (an
+    // untyped Int operand entering a float operation), NOT an
+    // optimisation — dropping it breaks every dynamic mixed Int/Float
+    // comparison ("3 == 3.0"). Must stay in lockstep with
+    // runtime_core_wasm `_to_double`.
+    writeln!(c, "static double _l2d(int64_t v) {{ union {{ int64_t l; double d; }} u; u.l = v; return u.d; }}").unwrap();
+    writeln!(c, "static double _to_double(int64_t v) {{ if (v >= -1048576 && v <= 1048576) return (double)v; return _l2d(v); }}").unwrap();
+    // The runtime's return-tag slot, accessed directly by the expanded
+    // taida_get/set_return_tag call sites (one call per user-function
+    // call otherwise).
+    writeln!(c, "extern int64_t __wasm_return_tag;").unwrap();
     writeln!(c).unwrap();
 
     // F-4: グローバル変数を名前ベースの C 変数として宣言
@@ -437,7 +453,14 @@ pub fn emit_c(ir_module: &IrModule, profile: WasmProfile) -> Result<String, Wasm
     // "silent undefined 禁止". Fail at compile time instead.
     validate_regex_api_for_wasm(&needed_funcs, profile)?;
 
-    for name in &needed_funcs {
+    // Sorted: HashSet iteration order is per-process random, and the
+    // prototype order perturbs clang's optimisation choices (loop
+    // peel/unroll shapes) — the same source must produce the same
+    // wasm byte-for-byte (collect_global_hashes already sorts for the
+    // same reason).
+    let mut needed_sorted: Vec<&String> = needed_funcs.iter().collect();
+    needed_sorted.sort();
+    for name in needed_sorted {
         writeln!(c, "{}", runtime_func_prototype(name, profile)?).unwrap();
     }
     if !needed_funcs.is_empty() {
@@ -1110,6 +1133,13 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_list_append" | "taida_list_prepend" => {
             format!("int64_t {}(int64_t list, int64_t item);", name)
         }
+        "taida_list_append_k" => {
+            "int64_t taida_list_append_k(int64_t list, int64_t item, int64_t item_ek);".to_string()
+        }
+        "taida_list_append_consume_k" => {
+            "int64_t taida_list_append_consume_k(int64_t list, int64_t item, int64_t item_ek, int64_t owned);"
+                .to_string()
+        }
         "taida_list_take" | "taida_list_drop" => {
             format!("int64_t {}(int64_t list, int64_t n);", name)
         }
@@ -1679,6 +1709,7 @@ struct FuncContext<'a> {
     global_map: &'a HashMap<i64, String>,
     func_user_arity: &'a HashMap<String, usize>,
     str_index: &'a HashMap<String, usize>,
+    append_consume_owned: bool,
 }
 
 /// 単一関数を C コードに変換
@@ -1718,7 +1749,12 @@ fn emit_function(
     for param_name in &func.params {
         named_vars.insert(param_name.clone());
     }
-    for name in &named_vars {
+    // Sorted: HashSet order is per-process random and the declaration
+    // order perturbs clang's optimisation shapes — same source must
+    // produce the same wasm byte-for-byte.
+    let mut named_sorted: Vec<&String> = named_vars.iter().collect();
+    named_sorted.sort();
+    for name in named_sorted {
         writeln!(c, "    int64_t nv_{} = 0;", sanitize_name(name)).unwrap();
     }
 
@@ -1732,11 +1768,19 @@ fn emit_function(
         global_map,
         func_user_arity,
         str_index,
+        append_consume_owned: func.append_consume_owned,
     };
 
     // 末尾再帰のサポート: TailCall を含む場合はループで囲む
     let has_tail_call = contains_tail_call(&func.body);
     if has_tail_call {
+        if func.append_consume_owned {
+            // Ownership bit for the consume-append rewrite: 0 on entry
+            // (the accumulator may alias the caller's list — detach via
+            // the copy path), set to 1 by every self tail-call. Lives
+            // OUTSIDE the loop: anything inside resets every iteration.
+            writeln!(c, "    int64_t __tco_owned = 0;").unwrap();
+        }
         writeln!(c, "    while (1) {{").unwrap();
         emit_insts(c, &func.body, "        ", &fctx)?;
         writeln!(c, "    }}").unwrap();
@@ -1789,6 +1833,83 @@ fn emit_insts(
     Ok(())
 }
 
+/// The wasm counterpart of the native `try_emit_intrinsic` table
+/// (emit.rs): returns the C expression that replaces a runtime call to
+/// a scalar operation, or None to keep the call. Only operations whose
+/// runtime body is a single C expression are listed — div/mod (throw on
+/// zero), float_to_int (UB domain on NaN/out-of-range, semantics not
+/// yet fixed across backends) and the poly_* family (the dynamic
+/// dispatch IS the body) stay as calls. The expansion changes emission
+/// only: the IR still carries the Call, so prototype collection and
+/// call-name validation are unaffected, and arguments are always
+/// already-evaluated `v_N` locals, so expressions cannot duplicate
+/// side effects.
+fn try_emit_scalar_intrinsic_c(name: &str, args: &[u32]) -> Option<String> {
+    let int_arith = |op: &str| {
+        format!(
+            "(int64_t)(((uint64_t)v_{}) {} ((uint64_t)v_{}))",
+            args[0], op, args[1]
+        )
+    };
+    let int_cmp = |op: &str| {
+        format!(
+            "((v_{} {} v_{}) ? (int64_t)1 : (int64_t)0)",
+            args[0], op, args[1]
+        )
+    };
+    let float_arith = |op: &str| {
+        format!(
+            "_d2l(_to_double(v_{}) {} _to_double(v_{}))",
+            args[0], op, args[1]
+        )
+    };
+    let float_cmp = |op: &str| {
+        format!(
+            "((_to_double(v_{}) {} _to_double(v_{})) ? (int64_t)1 : (int64_t)0)",
+            args[0], op, args[1]
+        )
+    };
+    Some(match (name, args.len()) {
+        // Integer arithmetic: wrapping through unsigned, exactly as the
+        // runtime body writes it (no signed-overflow UB).
+        ("taida_int_add", 2) => int_arith("+"),
+        ("taida_int_sub", 2) => int_arith("-"),
+        ("taida_int_mul", 2) => int_arith("*"),
+        ("taida_int_neg", 1) => format!("(int64_t)(0ULL - ((uint64_t)v_{}))", args[0]),
+        // Integer comparisons (i64-typed 0/1 results).
+        ("taida_int_eq", 2) => int_cmp("=="),
+        ("taida_int_neq", 2) => int_cmp("!="),
+        ("taida_int_lt", 2) => int_cmp("<"),
+        ("taida_int_gt", 2) => int_cmp(">"),
+        ("taida_int_gte", 2) => int_cmp(">="),
+        // Booleans: normalising forms (not bitwise), so the expansion
+        // does not depend on a 0/1 invariant of the operands.
+        ("taida_bool_and", 2) => format!(
+            "((v_{} && v_{}) ? (int64_t)1 : (int64_t)0)",
+            args[0], args[1]
+        ),
+        ("taida_bool_or", 2) => format!(
+            "((v_{} || v_{}) ? (int64_t)1 : (int64_t)0)",
+            args[0], args[1]
+        ),
+        ("taida_bool_not", 1) => format!("(v_{} ? (int64_t)0 : (int64_t)1)", args[0]),
+        // Float arithmetic and comparisons: through the small-int lift.
+        ("taida_float_add", 2) => float_arith("+"),
+        ("taida_float_sub", 2) => float_arith("-"),
+        ("taida_float_mul", 2) => float_arith("*"),
+        ("taida_float_neg", 1) => format!("_d2l(-_to_double(v_{}))", args[0]),
+        ("taida_float_eq", 2) => float_cmp("=="),
+        ("taida_float_neq", 2) => float_cmp("!="),
+        ("taida_float_lt", 2) => float_cmp("<"),
+        ("taida_float_gt", 2) => float_cmp(">"),
+        ("taida_float_gte", 2) => float_cmp(">="),
+        // Int -> Float conversion (exact for |v| < 2^53, ties-to-even
+        // above — identical to the runtime's `(double)a`).
+        ("taida_int_to_float", 1) => format!("_d2l((double)v_{})", args[0]),
+        _ => return None,
+    })
+}
+
 fn emit_inst(
     c: &mut String,
     inst: &IrInst,
@@ -1797,7 +1918,13 @@ fn emit_inst(
 ) -> Result<(), WasmCEmitError> {
     match inst {
         IrInst::ConstInt(dst, val) => {
-            writeln!(c, "{}v_{} = {}LL;", indent, dst, val).unwrap();
+            if *val == i64::MIN {
+                // `-9223372036854775808LL` parses as unary minus on an
+                // out-of-range literal in C; spell the value in-range.
+                writeln!(c, "{}v_{} = (-9223372036854775807LL - 1);", indent, dst).unwrap();
+            } else {
+                writeln!(c, "{}v_{} = {}LL;", indent, dst, val).unwrap();
+            }
         }
         IrInst::ConstFloat(dst, val) => {
             // W-3: Store f64 bits in int64_t via bitcast (same representation as native backend)
@@ -1829,6 +1956,41 @@ fn emit_inst(
             writeln!(c, "{}v_{} = nv_{};", indent, dst, sanitize_name(name)).unwrap();
         }
         IrInst::Call(dst, name, args) => {
+            // Scalar operations expand to C expressions instead of runtime
+            // calls: wasm engines do not inline across functions, so a
+            // one-instruction callee (i64.add) costs a call/return per
+            // operation inside hot loops. Each expression mirrors the
+            // runtime body exactly — the float ones go through the
+            // small-int lift (_to_double), which is value semantics.
+            if let Some(expr) = try_emit_scalar_intrinsic_c(name, args) {
+                writeln!(c, "{}v_{} = {};", indent, dst, expr).unwrap();
+                return Ok(());
+            }
+            // The consume-append's trailing ownership argument is loop
+            // machinery (see the __tco_owned declaration), not an IR value.
+            if name == "taida_list_append_consume_k" && args.len() == 3 {
+                writeln!(
+                    c,
+                    "{}v_{} = taida_list_append_consume_k(v_{}, v_{}, v_{}, __tco_owned);",
+                    indent, dst, args[0], args[1], args[2]
+                )
+                .unwrap();
+                return Ok(());
+            }
+            // Return-tag access: a plain swap on a module global,
+            // expanded for the same reason as the scalar table (one
+            // runtime call per user-function call otherwise). The
+            // runtime functions remain as the external ABI.
+            if name == "taida_get_return_tag" && args.is_empty() {
+                writeln!(c, "{}v_{} = __wasm_return_tag;", indent, dst).unwrap();
+                writeln!(c, "{}__wasm_return_tag = -1;", indent).unwrap();
+                return Ok(());
+            }
+            if name == "taida_set_return_tag" && args.len() == 1 {
+                writeln!(c, "{}__wasm_return_tag = v_{};", indent, args[0]).unwrap();
+                writeln!(c, "{}v_{} = 0;", indent, dst).unwrap();
+                return Ok(());
+            }
             // void-returning functions: RC no-ops + tag setters + gorilla (noreturn)
             if name == "taida_retain"
                 || name == "taida_release"
@@ -2078,6 +2240,10 @@ fn emit_inst(
                     .unwrap();
                 }
             }
+            if fctx.append_consume_owned {
+                // From here on the accumulator is this loop's own list.
+                writeln!(c, "{}__tco_owned = 1;", indent).unwrap();
+            }
             writeln!(c, "{}continue;", indent).unwrap();
         }
     }
@@ -2127,6 +2293,127 @@ fn sanitize_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every scalar operation in the intrinsic table expands, nothing
+    /// outside it does. This is the always-on layer of the expansion
+    /// guard — the WAT-level pin (tests/f59_w1_intrinsic_expansion.rs)
+    /// depends on wasm-tools and may skip on minimal CI.
+    #[test]
+    fn scalar_intrinsic_table_covers_exactly_the_designed_set() {
+        let binary: &[&str] = &[
+            "taida_int_add",
+            "taida_int_sub",
+            "taida_int_mul",
+            "taida_int_eq",
+            "taida_int_neq",
+            "taida_int_lt",
+            "taida_int_gt",
+            "taida_int_gte",
+            "taida_bool_and",
+            "taida_bool_or",
+            "taida_float_add",
+            "taida_float_sub",
+            "taida_float_mul",
+            "taida_float_eq",
+            "taida_float_neq",
+            "taida_float_lt",
+            "taida_float_gt",
+            "taida_float_gte",
+        ];
+        let unary: &[&str] = &[
+            "taida_int_neg",
+            "taida_bool_not",
+            "taida_float_neg",
+            "taida_int_to_float",
+        ];
+        for name in binary {
+            assert!(
+                try_emit_scalar_intrinsic_c(name, &[7, 8]).is_some(),
+                "{name} must expand at arity 2"
+            );
+            assert!(
+                try_emit_scalar_intrinsic_c(name, &[7]).is_none(),
+                "{name} must NOT expand at wrong arity"
+            );
+        }
+        for name in unary {
+            assert!(
+                try_emit_scalar_intrinsic_c(name, &[7]).is_some(),
+                "{name} must expand at arity 1"
+            );
+        }
+        // Deliberately excluded: throw-on-zero, UB-domain conversion,
+        // dynamic dispatch, dead names (no lowering generates lte).
+        for name in [
+            "taida_int_div",
+            "taida_int_mod",
+            "taida_float_to_int",
+            "taida_poly_add",
+            "taida_poly_eq",
+            "taida_int_lte",
+            "taida_float_lte",
+        ] {
+            assert!(
+                try_emit_scalar_intrinsic_c(name, &[7, 8]).is_none(),
+                "{name} must stay a runtime call"
+            );
+        }
+        // Semantics spot-checks: wrapping via unsigned, float through
+        // the small-int lift (NOT a bare bitcast), bool normalising.
+        assert_eq!(
+            try_emit_scalar_intrinsic_c("taida_int_add", &[1, 2]).unwrap(),
+            "(int64_t)(((uint64_t)v_1) + ((uint64_t)v_2))"
+        );
+        assert_eq!(
+            try_emit_scalar_intrinsic_c("taida_float_add", &[1, 2]).unwrap(),
+            "_d2l(_to_double(v_1) + _to_double(v_2))"
+        );
+        assert_eq!(
+            try_emit_scalar_intrinsic_c("taida_bool_and", &[1, 2]).unwrap(),
+            "((v_1 && v_2) ? (int64_t)1 : (int64_t)0)"
+        );
+    }
+
+    /// End-to-end emission: a runtime call in the IR comes out as an
+    /// expression, not a call, and the helpers/extern the expansions
+    /// rely on are present in the generated C.
+    #[test]
+    fn scalar_intrinsics_expand_in_generated_c() {
+        let mut f = IrFunction::new("intrinsic_probe".to_string());
+        f.body = vec![
+            IrInst::ConstInt(0, 41),
+            IrInst::ConstInt(1, 1),
+            IrInst::Call(2, "taida_int_add".to_string(), vec![0, 1]),
+            IrInst::Call(3, "taida_float_add".to_string(), vec![2, 0]),
+            IrInst::Call(4, "taida_get_return_tag".to_string(), vec![]),
+            IrInst::Call(5, "taida_set_return_tag".to_string(), vec![4]),
+            IrInst::Return(2),
+        ];
+        f.next_var = 6;
+        let mut m = IrModule::default();
+        m.functions.push(f);
+        let c = emit_c(&m, WasmProfile::Min).expect("emit_c");
+        // The prototypes legitimately remain (the IR still carries the
+        // Call, so the collector declares them) — what must disappear
+        // is the *call form* `= name(...)`.
+        for must_not_call in [
+            "= taida_int_add(",
+            "= taida_float_add(",
+            "= taida_get_return_tag(",
+            "= taida_set_return_tag(",
+            "taida_set_return_tag(v_",
+        ] {
+            assert!(
+                !c.contains(must_not_call),
+                "{must_not_call} must be expanded, generated C:\n{c}"
+            );
+        }
+        assert!(c.contains("(int64_t)(((uint64_t)v_0) + ((uint64_t)v_1))"));
+        assert!(c.contains("_d2l(_to_double(v_2) + _to_double(v_0))"));
+        assert!(c.contains("extern int64_t __wasm_return_tag;"));
+        assert!(c.contains("__wasm_return_tag = -1;"));
+        assert!(c.contains("static double _to_double(int64_t v)"));
+    }
 
     /// NET-6: All net HTTP runtime function names.
     const NET_RUNTIME_FUNCS: &[&str] = &[

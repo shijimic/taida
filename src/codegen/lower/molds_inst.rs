@@ -447,8 +447,12 @@ impl Lowering {
                     match self.lower_mold_field_expr(func, fields, "end")? {
                         Some(v) => v,
                         None => {
+                            // Omitted-end sentinel: i64::MIN is unreachable as a
+                            // user index, so the runtime can distinguish "to the
+                            // end" from an explicit negative end (which the
+                            // reference clamps to 0 — an empty slice).
                             let v = func.alloc_var();
-                            func.push(IrInst::ConstInt(v, -1));
+                            func.push(IrInst::ConstInt(v, i64::MIN));
                             v
                         }
                     }
@@ -1380,11 +1384,18 @@ impl Lowering {
                 }
                 let list = self.lower_expr(func, &type_args[0])?;
                 let val = self.lower_expr(func, &type_args[1])?;
+                // Value-tag track: supply the appended item's statically
+                // known kind so an empty / array-carrying list records the
+                // element identity (a Float pushed into `@[]` used to leave
+                // the list kindless and display as raw f64 bits). UNKNOWN
+                // keeps the legacy tag behaviour.
+                let ek_var = func.alloc_var();
+                func.push(IrInst::ConstInt(ek_var, self.expr_ekind(&type_args[1])));
                 let result = func.alloc_var();
                 func.push(IrInst::Call(
                     result,
-                    "taida_list_append".to_string(),
-                    vec![list, val],
+                    "taida_list_append_k".to_string(),
+                    vec![list, val, ek_var],
                 ));
                 Ok(result)
             }
@@ -1418,6 +1429,22 @@ impl Lowering {
                     "taida_list_join".to_string(),
                     vec![list, sep],
                 ));
+                Ok(result)
+            }
+            "Min" | "Max" => {
+                if type_args.is_empty() {
+                    return Err(LowerError {
+                        message: format!("{} requires 1 argument: {}[list]()", type_name, type_name),
+                    });
+                }
+                let list = self.lower_expr(func, &type_args[0])?;
+                let result = func.alloc_var();
+                let rt = if type_name == "Min" {
+                    "taida_list_min"
+                } else {
+                    "taida_list_max"
+                };
+                func.push(IrInst::Call(result, rt.to_string(), vec![list]));
                 Ok(result)
             }
             "Sum" => {

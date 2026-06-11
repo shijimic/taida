@@ -158,6 +158,54 @@ void *memset(void *dest, int c, unsigned long n) {
    this change has zero behavioral effect. */
 unsigned int bump_ptr = 0;  /* 0 = uninitialized */
 
+/* Loud failure exit shared by the slow path below. */
+__attribute__((cold, noinline, noreturn))
+static void wasm_alloc_fail(const char *msg, int32_t len) {
+    wasi_ciovec iov;
+    iov.buf = (int32_t)(intptr_t)msg;
+    iov.len = len;
+    int32_t nwritten;
+    __wasi_fd_write(2, &iov, 1, &nwritten);
+    __builtin_trap();
+}
+
+/* Slow path of wasm_alloc, kept out of line. Two jobs:
+ *
+ * 1. Hard heap ceiling at 2GB: pointers travel the value space as
+ *    int64_t via sign-EXTENDING (intptr_t) casts, so an address past
+ *    2^31 turns negative and every pointer-validity check rejects it
+ *    — results silently degrade to empty objects long before the
+ *    4GB linear-memory limit. Trap loudly at the real boundary
+ *    instead. (Lifting the ceiling means zero-extending every
+ *    pointer-to-value conversion — a representation-level change
+ *    tracked separately.)
+ * 2. Page growth, trapping loudly on exhaustion: returning NULL here
+ *    used to flow into list/pack constructors as an empty object and
+ *    silently corrupt results (a 10k-append loop run twice produced
+ *    an empty second list instead of failing).
+ *
+ * Both used to live inside wasm_alloc itself, which pushed the
+ * allocator past clang's inlining threshold; taida_list_push (which
+ * inlines the allocator) in turn stopped being inlined into the list
+ * runtime, and alloc-heavy benchmarks regressed ~20%. The hot path
+ * keeps a single combined unlikely-branch. */
+__attribute__((cold, noinline))
+static void wasm_alloc_slow(void) {
+    if (bump_ptr > 0x7FFF0000u) {
+        static const char ceil_msg[] = "taida: wasm heap ceiling reached (2GB address space for boxed values)\n";
+        wasm_alloc_fail(ceil_msg, (int32_t)(sizeof(ceil_msg) - 1));
+    }
+    unsigned int pages_needed = (bump_ptr + 65535) / 65536;
+    unsigned int current_pages = __builtin_wasm_memory_size(0);
+    if (pages_needed > current_pages) {
+        int grew = __builtin_wasm_memory_grow(0, pages_needed - current_pages);
+        if (grew == -1) {
+            static const char oom_msg[] = "taida: wasm linear memory exhausted (allocation failed)\n";
+            wasm_alloc_fail(oom_msg, (int32_t)(sizeof(oom_msg) - 1));
+        }
+    }
+}
+
 void *wasm_alloc(unsigned int size) {
     /* Align to 8 bytes */
     size = (size + 7) & ~7u;
@@ -171,20 +219,29 @@ void *wasm_alloc(unsigned int size) {
     }
 
     unsigned int result = bump_ptr;
-    bump_ptr += size;
+    unsigned int next = result + size; /* may wrap; tested below */
     WASM_PERF_INC(wasm_perf_alloc_calls);
     WASM_PERF_ADD(wasm_perf_alloc_bytes, size);
 
-    /* Check if we need to grow memory */
-    unsigned int pages_needed = (bump_ptr + 65535) / 65536;
-    unsigned int current_pages = __builtin_wasm_memory_size(0);
-    if (pages_needed > current_pages) {
-        int grew = __builtin_wasm_memory_grow(0, pages_needed - current_pages);
-        if (grew == -1) {
-            /* Out of memory — return NULL (will crash on use) */
-            return (void *)0;
-        }
+    /* Ceiling / wrap / page-growth check, one unlikely branch (see
+       wasm_alloc_slow). `next < result` detects the unsigned wrap a
+       huge size could take — a wrapped bump pointer would otherwise
+       slip back into the valid range. The ceiling is tested on every
+       allocation, not only when a grow is due:
+       TAIDA_WASM_INITIAL_PAGES can pre-size memory past 2GB, in which
+       case the bump pointer crosses the boundary without ever needing
+       a grow. */
+    unsigned int pages_needed = (next + 65535) / 65536;
+    if (__builtin_expect(next > 0x7FFF0000u || next < result
+                             || pages_needed > __builtin_wasm_memory_size(0),
+                         0)) {
+        /* Saturate on ceiling/wrap so the slow path's test fires (it
+           traps; only the page-growth case returns). */
+        bump_ptr = (next > 0x7FFF0000u || next < result) ? 0x7FFF0008u : next;
+        wasm_alloc_slow();
+        return (void *)(unsigned long)result;
     }
+    bump_ptr = next;
 
     return (void *)(unsigned long)result;
 }
@@ -205,11 +262,29 @@ void *wasm_alloc(unsigned int size) {
 #define WASM_STR_MAGIC        0x5441494453545200LL /* "TAIDSTR\0" */
 #define WASM_STR_STATIC_MAGIC 0x5441494453545300LL /* "TAIDSTS\0" */
 
+/* Header-carrying string literal for runtime code. Every string that
+   enters the Taida value space must carry the magic word — the
+   identification is positive-only (no byte heuristics), so a bare C
+   literal cast to int64_t is invisible to _wasm_is_string_ptr and
+   renders wrong. The statement expression creates one function-local
+   static per use site; sizeof(str) keeps the NUL. */
+#define WSTR(str) \
+    ({ \
+        static const struct { \
+            int64_t m; \
+            char s[sizeof(str)]; \
+        } _wstr_lit = {WASM_STR_STATIC_MAGIC, str}; \
+        (int64_t)(intptr_t)_wstr_lit.s; \
+    })
+
 /* Allocate a string buffer of `total` bytes (the caller's historical
  * request, NUL included by the caller's own accounting) behind a hidden
  * magic word. Returns the data pointer; wasm_alloc's 8-byte alignment
  * keeps both the header and the data aligned. */
-static char *_wasm_str_alloc(unsigned int total) {
+/* Non-static: the profile runtimes (edge host / wasi io / full / abi
+   web) build strings in their own translation units and must produce
+   header-carrying ones — identification is positive-only. */
+char *_wasm_str_alloc(unsigned int total) {
     int64_t *hdr = (int64_t *)wasm_alloc(total + 8);
     if (!hdr) return (char *)0;
     hdr[0] = WASM_STR_MAGIC;
@@ -386,15 +461,21 @@ static int _wf_strcmp(const char *a, const char *b) {
 }
 
 /// Find first occurrence of needle in haystack, or NULL.
+/// Terminator-driven: no up-front strlen of the haystack. The previous
+/// version measured the whole remaining haystack on every call, which
+/// turned every scan-forward caller (Split / Replace walk a cursor
+/// through the string calling this per occurrence) into O(n^2) — a
+/// 10KB string split into a thousand parts re-measured ~5MB of tail
+/// per pipeline pass.
 static const char *_wf_strstr(const char *haystack, const char *needle) {
     if (!haystack || !needle) return (const char *)0;
-    int nlen = _wf_strlen(needle);
-    if (nlen == 0) return haystack;
-    int hlen = _wf_strlen(haystack);
-    if (nlen > hlen) return (const char *)0;
-    for (int i = 0; i <= hlen - nlen; i++) {
-        if (_wf_strncmp(haystack + i, needle, nlen) == 0)
-            return haystack + i;
+    if (!needle[0]) return haystack;
+    for (const char *h = haystack; *h; h++) {
+        if (*h != needle[0]) continue;
+        const char *a = h + 1;
+        const char *b = needle + 1;
+        while (*a && *b && *a == *b) { a++; b++; }
+        if (!*b) return h;
     }
     return (const char *)0;
 }
@@ -696,10 +777,25 @@ int64_t taida_io_stdout(int64_t val_ptr) {
        contract and C12B-034 hardening.
 
    C12-5: returns bytes written (Int). */
+int64_t taida_int_to_str(int64_t a); /* fwd: early Int display path */
+
 int64_t taida_io_stdout_with_tag(int64_t val, int64_t tag) {
     if ((int)tag == WASM_TAG_BOOL) {
         int32_t len = val ? 4 : 5;
         if (val) { write_stdout("true", 4); } else { write_stdout("false", 5); }
+        write_stdout("\n", 1);
+        return (int64_t)len;
+    }
+    /* Statically-known Int: the value IS the integer — format it
+       directly, before any runtime re-detection. An Int whose value
+       coincides with a live string's data address carries a REAL magic
+       word at v-8, so the detection heuristics below cannot tell it
+       from a string and would print that string instead. */
+    if ((int)tag == WASM_TAG_INT) {
+        int64_t str_v = taida_int_to_str(val);
+        const char *si = (const char *)(intptr_t)str_v;
+        int32_t len = wasm_strlen(si);
+        write_stdout(si, len);
         write_stdout("\n", 1);
         return (int64_t)len;
     }
@@ -809,6 +905,22 @@ int64_t taida_io_stderr_with_tag(int64_t val, int64_t tag) {
         int32_t len = val ? 4 : 5;
         wasi_ciovec iov;
         iov.buf = (int32_t)(intptr_t)s;
+        iov.len = len;
+        int32_t nwritten;
+        __wasi_fd_write(2, &iov, 1, &nwritten);
+        iov.buf = (int32_t)(intptr_t)"\n";
+        iov.len = 1;
+        __wasi_fd_write(2, &iov, 1, &nwritten);
+        return (int64_t)len;
+    }
+    /* Statically-known Int: format directly, before runtime
+       re-detection — symmetric with taida_io_stdout_with_tag. */
+    if ((int)tag == WASM_TAG_INT) {
+        int64_t str_v = taida_int_to_str(val);
+        const char *si = (const char *)(intptr_t)str_v;
+        int32_t len = wasm_strlen(si);
+        wasi_ciovec iov;
+        iov.buf = (int32_t)(intptr_t)si;
         iov.len = len;
         int32_t nwritten;
         __wasi_fd_write(2, &iov, 1, &nwritten);
@@ -1083,8 +1195,8 @@ int64_t taida_generic_unmold(int64_t val) {
                     /* Predicate failed — throw the error */
                     if (taida_can_throw_payload(throw_val)) return taida_throw(throw_val);
                     int64_t error = taida_make_error(
-                        (int64_t)(intptr_t)"ResultError",
-                        (int64_t)(intptr_t)"Result predicate failed");
+                        WSTR("ResultError"),
+                        WSTR("Result predicate failed"));
                     return taida_throw(error);
                 }
                 /* Predicate passed even with throw set — return value */
@@ -1093,8 +1205,8 @@ int64_t taida_generic_unmold(int64_t val) {
             /* No predicate, throw is set — throw */
             if (taida_can_throw_payload(throw_val)) return taida_throw(throw_val);
             int64_t error = taida_make_error(
-                (int64_t)(intptr_t)"ResultError",
-                (int64_t)(intptr_t)"Result error");
+                WSTR("ResultError"),
+                WSTR("Result error"));
             return taida_throw(error);
         }
 
@@ -1104,8 +1216,8 @@ int64_t taida_generic_unmold(int64_t val) {
             if (pred_result) return value;  /* success */
             /* Predicate failed — throw default error */
             int64_t error = taida_make_error(
-                (int64_t)(intptr_t)"ResultError",
-                (int64_t)(intptr_t)"Result predicate failed");
+                WSTR("ResultError"),
+                WSTR("Result predicate failed"));
             return taida_throw(error);
         }
 
@@ -1118,8 +1230,8 @@ int64_t taida_generic_unmold(int64_t val) {
         int64_t error_val = taida_pack_get_idx(val, 2); /* __error */
         if (taida_can_throw_payload(error_val)) return taida_throw(error_val);
         int64_t err = taida_make_error(
-            (int64_t)(intptr_t)"GorillaxError",
-            (int64_t)(intptr_t)"Gorillax error");
+            WSTR("GorillaxError"),
+            WSTR("Gorillax error"));
         return taida_throw(err);
     }
     /* F58: the field-pack walks below trust slot 0 as a field count.
@@ -1160,8 +1272,8 @@ int64_t taida_generic_unmold(int64_t val) {
         if (type_ptr == (int64_t)(intptr_t)__wasm_moltenized_str
             || type_ptr == (int64_t)(intptr_t)__wasm_secret_str) {
             int64_t error = taida_make_error(
-                (int64_t)(intptr_t)"TypeError",
-                (int64_t)(intptr_t)"Cannot unmold a sealed carrier (Moltenized/Secret) directly. Use a secret-aware consumer.");
+                WSTR("TypeError"),
+                WSTR("Cannot unmold a sealed carrier (Moltenized/Secret) directly. Use a secret-aware consumer."));
             return taida_throw(error);
         }
         /* The __type slot must reference a string; the magic word
@@ -1191,8 +1303,8 @@ int64_t taida_generic_unmold(int64_t val) {
             type_str[2] == 'l' && type_str[3] == 't' && type_str[4] == 'e' &&
             type_str[5] == 'n' && type_str[6] == '\0') {
             int64_t error = taida_make_error(
-                (int64_t)(intptr_t)"TypeError",
-                (int64_t)(intptr_t)"Cannot unmold Molten directly. Molten can only be used inside Cage.");
+                WSTR("TypeError"),
+                WSTR("Cannot unmold Molten directly. Molten can only be used inside Cage."));
             return taida_throw(error);
         }
         /* Custom mold: pack with __type and __value fields */
@@ -1272,10 +1384,41 @@ int64_t taida_str_concat(int64_t a_ptr, int64_t b_ptr) {
     return (int64_t)(intptr_t)buf;
 }
 
+/* ── Unicode code-point string indexing (mirror of native) ──
+   Every index-taking Str API counts Unicode code points (the
+   reference iterates chars); these helpers walk UTF-8 lead bytes. */
+static int64_t _wasm_utf8_count(const char *s, int byte_len) {
+    int64_t n = 0;
+    for (int i = 0; i < byte_len; i++)
+        if (((unsigned char)s[i] & 0xC0) != 0x80) n++;
+    return n;
+}
+
+/* Byte offset where code point `cp` starts; byte_len when past the end. */
+static int _wasm_utf8_cp_to_byte(const char *s, int byte_len, int64_t cp) {
+    if (cp <= 0) return 0;
+    int64_t seen = 0;
+    for (int i = 0; i < byte_len; i++) {
+        if (((unsigned char)s[i] & 0xC0) != 0x80) {
+            if (seen == cp) return i;
+            seen++;
+        }
+    }
+    return byte_len;
+}
+
+/* Byte length of the code point starting at s[i]. */
+static int _wasm_utf8_cp_len_at(const char *s, int byte_len, int i) {
+    int j = i + 1;
+    while (j < byte_len && (((unsigned char)s[j]) & 0xC0) == 0x80) j++;
+    return j - i;
+}
+
 int64_t taida_str_length(int64_t s_ptr) {
     const char *s = (const char *)(intptr_t)s_ptr;
     if (!s) return 0;
-    return (int64_t)wasm_strlen(s);
+    /* Code points, not bytes — mirrors native taida_str_length. */
+    return _wasm_utf8_count(s, wasm_strlen(s));
 }
 
 int64_t taida_str_eq(int64_t a_ptr, int64_t b_ptr) {
@@ -1352,7 +1495,7 @@ int64_t taida_str_to_int(int64_t s_ptr) {
 
 int64_t taida_str_from_bool(int64_t v) {
     /* Returns static string "true" or "false" — no alloc needed */
-    return v ? (int64_t)(intptr_t)"true" : (int64_t)(intptr_t)"false";
+    return v ? WSTR("true") : WSTR("false");
 }
 
 /* ── W-3: Int methods ── */
@@ -1547,6 +1690,33 @@ static int fmt_g(double d, char *buf, int bufsize) {
     /* Zero: always "0.0" (or "-0.0") — matching Rust */
     if (d == 0.0) {
         buf[len++] = '0'; buf[len++] = '.'; buf[len++] = '0';
+        return len;
+    }
+
+    /* Large integer-valued f64: every finite f64 at or above 2^53 is an
+       integer, and past ~1e18/1e19 the i64/u64 casts below are UB — the
+       old path printed 1e20 as "0". Expand exactly: decompose into
+       mantissa * 2^exp and double out in decimal (cold path; <= ~310
+       digits for the largest finite f64). */
+    if (d >= 1e18) {
+        union { double d; uint64_t u; } um;
+        um.d = d;
+        uint64_t mant = (um.u & 0xFFFFFFFFFFFFFULL) | (1ULL << 52);
+        int exp2 = (int)((um.u >> 52) & 0x7FF) - 1023 - 52; /* >= 0 here */
+        unsigned char dig[340];
+        int n = 0;
+        while (mant > 0) { dig[n++] = (unsigned char)(mant % 10); mant /= 10; }
+        for (int k = 0; k < exp2; k++) {
+            int carry = 0;
+            for (int i = 0; i < n; i++) {
+                int v = dig[i] * 2 + carry;
+                dig[i] = (unsigned char)(v % 10);
+                carry = v / 10;
+            }
+            while (carry) { dig[n++] = (unsigned char)(carry % 10); carry /= 10; }
+        }
+        for (int i = n - 1; i >= 0 && len < bufsize; i--) buf[len++] = (char)('0' + dig[i]);
+        if (len + 2 <= bufsize) { buf[len++] = '.'; buf[len++] = '0'; }
         return len;
     }
 
@@ -1752,9 +1922,10 @@ int64_t taida_polymorphic_length(int64_t ptr) {
     if (_looks_like_list(ptr)) {
         return taida_list_length(ptr);
     }
-    /* Otherwise treat as string */
+    /* Otherwise treat as string: code points, not bytes (mirrors
+       native taida_polymorphic_length). */
     const char *s = (const char *)(intptr_t)ptr;
-    return (int64_t)wasm_strlen(s);
+    return _wasm_utf8_count(s, wasm_strlen(s));
 }
 
 /* ── W-3f/W-4f2: taida_polymorphic_to_string (full collection support) ── */
@@ -1771,26 +1942,7 @@ static int _looks_like_string(int64_t val) {
        producing a leading empty fragment used to render that fragment
        as its pointer value). The heuristic survives only as a fallback
        for the runtime's own bare C literals. */
-    if (_wasm_is_string_ptr(val)) return 1;
-    /* Zero is not a string (it's the integer 0 or null) */
-    if (val == 0) return 0;
-    /* Negative values or values > 32-bit range are not pointers on wasm32 */
-    if (val < 0 || val > 0xFFFFFFFF) return 0;
-    /* Check if it's within current WASM memory */
-    unsigned int pages = __builtin_wasm_memory_size(0);
-    unsigned int mem_size = pages * 65536;
-    unsigned int addr = (unsigned int)val;
-    if (addr >= mem_size) return 0;
-    /* Check if it starts with a printable/whitespace ASCII byte (not \0) */
-    const char *s = (const char *)(intptr_t)val;
-    if (s[0] == '\0') return 0;
-    /* Verify first few bytes are valid UTF-8/ASCII (not random garbage) */
-    for (int i = 0; i < 8 && s[i]; i++) {
-        unsigned char c = (unsigned char)s[i];
-        /* Accept printable ASCII, whitespace, and high bytes (UTF-8 continuation) */
-        if (c < 0x20 && c != '\t' && c != '\n' && c != '\r') return 0;
-    }
-    return 1;
+    return _wasm_is_string_ptr(val);
 }
 
 /* C23B-005 (2026-04-22): positive identification for non-empty
@@ -1810,8 +1962,11 @@ static int _looks_like_pack(int64_t val) {
     if ((addr & 7u) != 0) return 0;
     int64_t *data = (int64_t *)(intptr_t)val;
     int64_t fc = data[0];
-    /* fc must be strictly positive — empty pack is matched separately. */
-    if (fc < 1 || fc > 100) return 0;
+    /* fc must be strictly positive — empty pack is matched separately.
+       No upper cap: the tail sentinel below is the positive proof, and
+       a cap would silently reject legitimate wide packs (the in-bounds
+       check right after keeps the sentinel read safe for any fc). */
+    if (fc < 1 || fc > 0x0FFFFFFF) return 0;
     unsigned int mem_size = (unsigned int)__builtin_wasm_memory_size(0) * 65536u;
     /* Need slots [0..1+fc*3] inclusive, i.e. (2 + fc*3) int64_t = 16 + fc*24 bytes. */
     uint64_t need_bytes = (uint64_t)(2 + fc * 3) * 8ULL;
@@ -1900,8 +2055,6 @@ static int64_t _wasm_value_to_debug_string_full(int64_t val);
    to the existing structural detector. */
 static int64_t _wasm_render_elem_tagged_debug(int64_t val, int64_t tag);
 static int64_t _wasm_render_elem_tagged_debug_full(int64_t val, int64_t tag);
-static int64_t _wasm_hashmap_to_display_string_full(int64_t hm_ptr);
-static int64_t _wasm_set_to_display_string_full(int64_t set_ptr);
 static int64_t _wasm_pack_to_string_full(int64_t pack_ptr);
 static int _wasm_is_error(int64_t val);
 static int64_t _wasm_error_to_string(int64_t val);
@@ -1978,7 +2131,7 @@ static int64_t _wasm_hashmap_to_string(int64_t hm_ptr) {
     int64_t *hm = (int64_t *)(intptr_t)hm_ptr;
     int64_t cap = hm[0];
     /* C23B-005 / C23B-006 / C23B-007: `hm[2]` is reliable now — see the
-       `_wasm_hashmap_to_display_string_full` comment and the hardened
+       `_wasm_hashmap_to_string` comment and the hardened
        `taida_hashmap_set_value_tag` (HETEROGENEOUS latch). */
     int64_t value_tag = hm[2];
     _wasm_strbuf sb;
@@ -2058,8 +2211,8 @@ static int64_t _wasm_pack_to_string(int64_t pack_ptr) {
        reach stdout / Str[] / debug / nesting. */
     {
         int ck = _wasm_carrier_kind(pack_ptr);
-        if (ck == 1) return (int64_t)(intptr_t)"<Moltenized>";
-        if (ck == 2) return (int64_t)(intptr_t)"<Secret>";
+        if (ck == 1) return WSTR("<Moltenized>");
+        if (ck == 2) return WSTR("<Secret>");
     }
     int64_t *pack = (int64_t *)(intptr_t)pack_ptr;
     int64_t fc = pack[0];
@@ -2147,8 +2300,8 @@ static int64_t _wasm_pack_to_string_full(int64_t pack_ptr) {
        fields, so without this guard stdout(secret) would expose __value). */
     {
         int ck = _wasm_carrier_kind(pack_ptr);
-        if (ck == 1) return (int64_t)(intptr_t)"<Moltenized>";
-        if (ck == 2) return (int64_t)(intptr_t)"<Secret>";
+        if (ck == 1) return WSTR("<Moltenized>");
+        if (ck == 2) return WSTR("<Secret>");
     }
     int64_t *pack = (int64_t *)(intptr_t)pack_ptr;
     int64_t fc = pack[0];
@@ -2234,7 +2387,7 @@ static int64_t _wasm_pack_to_string_full(int64_t pack_ptr) {
 static int64_t _wasm_render_elem_tagged_debug(int64_t val, int64_t tag) {
     if (tag == WASM_TAG_INT) return taida_int_to_str(val);
     if (tag == WASM_TAG_FLOAT) return taida_float_to_str(val);
-    if (tag == WASM_TAG_BOOL) return val ? (int64_t)(intptr_t)"true" : (int64_t)(intptr_t)"false";
+    if (tag == WASM_TAG_BOOL) return val ? WSTR("true") : WSTR("false");
     if (tag == WASM_TAG_STR) {
         const char *s = (const char *)(intptr_t)val;
         int slen = s ? wasm_strlen(s) : 0;
@@ -2253,7 +2406,7 @@ static int64_t _wasm_render_elem_tagged_debug(int64_t val, int64_t tag) {
 static int64_t _wasm_render_elem_tagged_debug_full(int64_t val, int64_t tag) {
     if (tag == WASM_TAG_INT) return taida_int_to_str(val);
     if (tag == WASM_TAG_FLOAT) return taida_float_to_str(val);
-    if (tag == WASM_TAG_BOOL) return val ? (int64_t)(intptr_t)"true" : (int64_t)(intptr_t)"false";
+    if (tag == WASM_TAG_BOOL) return val ? WSTR("true") : WSTR("false");
     if (tag == WASM_TAG_STR) {
         const char *s = (const char *)(intptr_t)val;
         int slen = s ? wasm_strlen(s) : 0;
@@ -2271,19 +2424,21 @@ static int64_t _wasm_render_elem_tagged_debug_full(int64_t val, int64_t tag) {
 
 /* C23B-003 reopen 2: recursive debug-string variant for nested typed
    runtime objects. Mirrors native's `taida_value_to_debug_string_full`.
-   Must be defined BEFORE `_wasm_hashmap_to_display_string_full` /
-   `_wasm_set_to_display_string_full` / `_wasm_pack_to_string_full` call
+   Must be defined BEFORE `_wasm_pack_to_string_full` and the
+   container renderers call
    it — but each of those uses it from the function body, so forward
    declarations at the top of this fragment keep the ordering valid. */
 static int64_t _wasm_value_to_debug_string_full(int64_t val) {
-    if (val == 0) return (int64_t)(intptr_t)"0";
-    if (_is_wasm_hashmap(val)) return _wasm_hashmap_to_display_string_full(val);
-    if (_is_wasm_set(val)) return _wasm_set_to_display_string_full(val);
+    if (val == 0) return WSTR("0");
+    /* HashMap / Set always display the public `HashMap({...})` /
+       `Set({...})` shape — the carrier fields are compiler-internal. */
+    if (_is_wasm_hashmap(val)) return _wasm_hashmap_to_string(val);
+    if (_is_wasm_set(val)) return _wasm_set_to_string(val);
     /* C23B-003 reopen 3: render empty packs (`@()`) with their interpreter-
        parity string. Must be checked BEFORE `_looks_like_pack` (which
        requires `fc >= 1`) and BEFORE the int fallback which would otherwise
        emit the raw heap pointer of the `taida_pack_new(0)` allocation. */
-    if (_looks_like_empty_pack(val)) return (int64_t)(intptr_t)"@()";
+    if (_looks_like_empty_pack(val)) return WSTR("@()");
     /* List items recurse through the full-form helper so nested
        HashMap/Set/Pack inside a list keep their full shape. */
     if (_looks_like_list(val)) {
@@ -2330,88 +2485,6 @@ static int64_t _wasm_value_to_debug_string_full(int64_t val) {
     return taida_int_to_str(val);
 }
 
-/* C23B-003 reopen: HashMap / Set are not `BuchiPack` in the wasm runtime
-   (they carry dedicated header markers) but the interpreter represents them
-   as `BuchiPack(__entries <= ..., __type <= "HashMap")` /
-   `BuchiPack(__items <= ..., __type <= "Set")` (see
-   `src/interpreter/prelude.rs:618-621` and `:644-647`). For `Str[...]()` to
-   match the interpreter byte-for-byte we must therefore emit the synthetic
-   full-form pack shape, not the short-form `HashMap({...})` / `Set({...})`
-   that `_wasm_hashmap_to_string` / `_wasm_set_to_string` produce for
-   `.toString()`. Symmetric with native's
-   `taida_hashmap_to_display_string_full` / `taida_set_to_display_string_full`. */
-static int64_t _wasm_hashmap_to_display_string_full(int64_t hm_ptr) {
-    int64_t *hm = (int64_t *)(intptr_t)hm_ptr;
-    int64_t cap = hm[0];
-    /* C23B-005 / C23B-006 (2026-04-22): `hm[2]` is now reliable thanks
-       to the hardened `taida_hashmap_set_value_tag` (downgrades to
-       UNKNOWN(-1) on type conflict — C23B-007 promoted this further
-       to HETEROGENEOUS(-2) so a downgraded tag cannot re-promote on a
-       subsequent `.set()`). For homogeneous HashMaps the primitive tag
-       dispatches the tag-aware renderer which bypasses structural
-       detectors entirely. For heterogeneous HashMaps the tag is -2
-       (HETEROGENEOUS) or -1 (UNKNOWN) and the tagged renderer falls
-       back to `_wasm_value_to_debug_string_full` per element so mixed
-       value types each render through their own structural dispatch
-       (closes the `.set("a", 1).set("b", "x").set("c", 2)` regression
-       where the tag system would lose `"x"` to a raw pointer Int). */
-    int64_t value_tag = hm[2];
-    _wasm_strbuf sb;
-    _sb_init(&sb);
-    _sb_append(&sb, "@(__entries <= @[");
-    /* C23B-008 (2026-04-22): iterate via the insertion-order side-index
-       (`order_array[0..next_ord]`) instead of walking buckets, so the
-       emitted pair sequence matches interpreter / JS byte-for-byte. Each
-       `order_array[oi]` holds either a bucket slot (>= 0) or -1 (hole
-       from a subsequent `.remove()` call); skip holes and also
-       defensively skip slots whose buckets have since been tombstoned. */
-    int64_t next_ord = hm[WASM_HM_ORD_HEADER_SLOT(cap)];
-    int64_t count = 0;
-    for (int64_t oi = 0; oi < next_ord; oi++) {
-        int64_t slot = hm[WASM_HM_ORD_SLOT(cap, oi)];
-        if (slot < 0 || slot >= cap) continue;
-        int64_t sh = hm[WASM_HM_HEADER + slot * 3];
-        int64_t sk = hm[WASM_HM_HEADER + slot * 3 + 1];
-        if (WASM_HM_SLOT_OCCUPIED(sh, sk)) {
-            int64_t value = hm[WASM_HM_HEADER + slot * 3 + 2];
-            if (count > 0) _sb_append(&sb, ", ");
-            int64_t key_str = _wasm_value_to_debug_string_full(sk);
-            int64_t val_str = _wasm_render_elem_tagged_debug_full(value, value_tag);
-            _sb_append(&sb, "@(key <= ");
-            _sb_append(&sb, (const char *)(intptr_t)key_str);
-            _sb_append(&sb, ", value <= ");
-            _sb_append(&sb, (const char *)(intptr_t)val_str);
-            _sb_append(&sb, ")");
-            count++;
-        }
-    }
-    _sb_append(&sb, "], __type <= \"HashMap\")");
-    return _sb_finish(&sb);
-}
-
-static int64_t _wasm_set_to_display_string_full(int64_t set_ptr) {
-    int64_t *list = (int64_t *)(intptr_t)set_ptr;
-    int64_t len = list[1];
-    /* C23B-005: honour the set's elem_type_tag so primitive members
-       dispatch through the tag-aware renderer. Sets share the list
-       header layout. */
-    int64_t elem_tag = list[2];
-    _wasm_strbuf sb;
-    _sb_init(&sb);
-    _sb_append(&sb, "@(__items <= @[");
-    for (int64_t i = 0; i < len; i++) {
-        if (i > 0) _sb_append(&sb, ", ");
-        int64_t elem = list[WASM_LIST_ELEMS + i];
-        /* C23B-003 reopen 2 / C23B-005: prefer the tag-aware renderer;
-           for non-primitive members the fallback recurses through
-           `_wasm_value_to_debug_string_full`. */
-        int64_t elem_str = _wasm_render_elem_tagged_debug_full(elem, elem_tag);
-        _sb_append(&sb, (const char *)(intptr_t)elem_str);
-    }
-    _sb_append(&sb, "], __type <= \"Set\")");
-    return _sb_finish(&sb);
-}
-
 /* C21B-seed-07: stdout-display entry point for BuchiPack — matches the
    native `taida_stdout_display_string` contract. When the value is a pack
    (fc=4 Lax / fc=3 Result / user packs / Gorillax), the interpreter-parity
@@ -2424,19 +2497,18 @@ static int _wasm_is_stream_pack(int64_t obj);
 static int64_t _wasm_stream_to_display_string(int64_t stream_ptr);
 
 static int64_t _wasm_stdout_display_string(int64_t obj) {
-    if (obj == 0) return (int64_t)(intptr_t)"0";
+    if (obj == 0) return WSTR("0");
     /* C25B-001: Stream packs render as `Stream[completed: N items]`
        (matching the interpreter's `Value::Stream` display shape).
        Must precede the generic pack path so `Str[Stream[...]]()`
        doesn't stringify the internal `__stream_*` fields. */
     if (_wasm_is_stream_pack(obj)) return _wasm_stream_to_display_string(obj);
-    /* C23B-003 reopen: route HashMap / Set through their synthetic full-form
-       helpers so `Str[...]()` matches the interpreter's
-       `BuchiPack(__entries/__items, __type)` rendering instead of the
-       short-form `HashMap({...})` / `Set({...})` that
-       `_wasm_value_to_display_string` would produce for `.toString()`. */
-    if (_is_wasm_hashmap(obj)) return _wasm_hashmap_to_display_string_full(obj);
-    if (_is_wasm_set(obj)) return _wasm_set_to_display_string_full(obj);
+    /* HashMap / Set display the public `HashMap({...})` / `Set({...})`
+       shape everywhere — stdout, interpolation and `Str[...]()` alike.
+       The `__entries` / `__items` carrier fields are compiler-internal
+       and the reference no longer prints them from any path. */
+    if (_is_wasm_hashmap(obj)) return _wasm_hashmap_to_string(obj);
+    if (_is_wasm_set(obj)) return _wasm_set_to_string(obj);
     /* C23B-003 reopen 3: top-level `stdout(@())` / `Str[@()]()` must render
        as the interpreter's `Value::Unit.to_debug_string()` output `"@()"`
        rather than the raw heap pointer (the `taida_pack_new(0)` allocation
@@ -2446,7 +2518,7 @@ static int64_t _wasm_stdout_display_string(int64_t obj) {
        could be reached on an empty pack (it wouldn't — `_looks_like_list`
        needs `cap >= 8` — but keeping the ordering tight mirrors the other
        early-return checks and makes the intent explicit). */
-    if (_looks_like_empty_pack(obj)) return (int64_t)(intptr_t)"@()";
+    if (_looks_like_empty_pack(obj)) return WSTR("@()");
     /* C23B-003 reopen 2: Lists must render items through the full-form
        debug helper so nested HashMap/Set/Pack keep their interpreter
        shape. `_wasm_list_to_string` alone would dispatch those items
@@ -2556,7 +2628,7 @@ static int64_t _wasm_lax_value_display(int64_t val, int64_t tag) {
         return taida_float_to_str(val);
     }
     if (tag == WASM_TAG_BOOL) {
-        return val ? (int64_t)(intptr_t)"true" : (int64_t)(intptr_t)"false";
+        return val ? WSTR("true") : WSTR("false");
     }
     /* For INT, STR, PACK etc. — use generic display */
     return _wasm_value_to_display_string(val);
@@ -2591,7 +2663,7 @@ static int64_t _wasm_lax_to_string(int64_t lax_ptr) {
 /* Throw value to display string: extract "message" field from error BuchiPack,
    matching native's taida_throw_to_display_string. */
 static int64_t _wasm_throw_to_display_string(int64_t throw_val) {
-    if (throw_val == 0) return (int64_t)(intptr_t)"error";
+    if (throw_val == 0) return WSTR("error");
     /* If it's a BuchiPack, look for "message" field. Explicit empty
        messages render as "" instead of falling back to the type name. */
     if (_looks_like_pack(throw_val)) {
@@ -2601,15 +2673,15 @@ static int64_t _wasm_throw_to_display_string(int64_t throw_val) {
             if (p[1 + i * 3] == WASM_HASH_MESSAGE) {
                 int64_t tag = p[1 + i * 3 + 1];
                 int64_t msg = p[1 + i * 3 + 2];
-                if (msg == 0) return (int64_t)(intptr_t)"\"\"";
+                if (msg == 0) return WSTR("\"\"");
                 if (tag == WASM_TAG_STR) {
                     const char *ms = (const char *)(intptr_t)msg;
-                    if (ms[0] == '\0') return (int64_t)(intptr_t)"\"\"";
+                    if (ms[0] == '\0') return WSTR("\"\"");
                     return msg;
                 }
                 if (msg && _looks_like_string(msg)) {
                     const char *ms = (const char *)(intptr_t)msg;
-                    if (ms[0] == '\0') return (int64_t)(intptr_t)"\"\"";
+                    if (ms[0] == '\0') return WSTR("\"\"");
                     return msg;
                 }
                 break;
@@ -2648,7 +2720,7 @@ static int64_t _wasm_result_to_string(int64_t result) {
     /* Error case — throw_val == 0 means Unit (@()), matching interpreter */
     int64_t throw_val = taida_pack_get(result, WASM_HASH_THROW);
     if (throw_val == 0) {
-        return (int64_t)(intptr_t)"Result(throw <= @())";
+        return WSTR("Result(throw <= @())");
     }
     int64_t err_str = _wasm_throw_to_display_string(throw_val);
     _wasm_strbuf sb;
@@ -2724,12 +2796,12 @@ static int _wasm_is_async_task_pack(int64_t val) {
     if (!taida_pack_has_hash(val, WASM_HASH_TODO_TASK)) return 0;
     if (!taida_pack_has_hash(val, WASM_HASH___TYPE)) return 0;
     int64_t type_name = taida_pack_get(val, WASM_HASH___TYPE);
-    return taida_str_eq(type_name, (int64_t)(intptr_t)"AsyncTask") ? 1 : 0;
+    return taida_str_eq(type_name, WSTR("AsyncTask")) ? 1 : 0;
 }
 
 /* W-4f2: Convert value to display string (like native's taida_value_to_display_string) */
 static int64_t _wasm_value_to_display_string(int64_t val) {
-    if (val == 0) return (int64_t)(intptr_t)"0";
+    if (val == 0) return WSTR("0");
     /* Check HashMap first (has distinctive marker) */
     if (_is_wasm_hashmap(val)) return _wasm_hashmap_to_string(val);
     /* Check Set (has WASM_SET_MARKER_VAL marker) */
@@ -2744,13 +2816,13 @@ static int64_t _wasm_value_to_display_string(int64_t val) {
     if (_wasm_is_lax(val)) return _wasm_lax_to_string(val);
     /* Check Error before generic pack (Error is a pack with "type" field) */
     if (_wasm_is_error(val)) return _wasm_error_to_string(val);
-    if (_wasm_is_async_task_pack(val)) return (int64_t)(intptr_t)"AsyncTask[<task>]";
+    if (_wasm_is_async_task_pack(val)) return WSTR("AsyncTask[<task>]");
     /* Check Pack (field_count + hash pattern) */
     if (_looks_like_pack(val)) return _wasm_pack_to_string(val);
     /* C23B-003 reopen 3: empty packs (`@()`) have `fc == 0` and slip past
        `_looks_like_pack`. Without this branch, `stdout(@())` on wasm-wasi
        prints the raw heap pointer (e.g. `73040`) instead of `@()`. */
-    if (_looks_like_empty_pack(val)) return (int64_t)(intptr_t)"@()";
+    if (_looks_like_empty_pack(val)) return WSTR("@()");
     /* Check if it's a string */
     if (_looks_like_string(val)) return val;
     /* Fallback: integer */
@@ -2759,7 +2831,7 @@ static int64_t _wasm_value_to_display_string(int64_t val) {
 
 /* W-4f2: Convert value to debug string (strings are quoted, everything else like display) */
 static int64_t _wasm_value_to_debug_string(int64_t val) {
-    if (val == 0) return (int64_t)(intptr_t)"0";
+    if (val == 0) return WSTR("0");
     /* Check collection types first */
     if (_is_wasm_hashmap(val)) return _wasm_hashmap_to_string(val);
     if (_is_wasm_set(val)) return _wasm_set_to_string(val);
@@ -2776,7 +2848,7 @@ static int64_t _wasm_value_to_debug_string(int64_t val) {
     /* C23B-003 reopen 3: same empty-pack fallback as the display helper so
        `_wasm_list_to_string` / `_wasm_pack_to_string` rendering nested
        `@()` don't collapse to pointer integers in the short-form path. */
-    if (_looks_like_empty_pack(val)) return (int64_t)(intptr_t)"@()";
+    if (_looks_like_empty_pack(val)) return WSTR("@()");
     /* Check if it's a string — quote it for debug */
     if (_looks_like_string(val)) {
         const char *s = (const char *)(intptr_t)val;
@@ -3026,7 +3098,12 @@ int64_t taida_primitive_tag_match(int64_t tag, int64_t expected) {
 }
 
 // NB-14: Return type tag propagation (WASM mirror of native_runtime.c).
-static int64_t __wasm_return_tag = -1; // UNKNOWN
+/* Non-static: the generated C reads/writes this slot directly (the
+   call-site expansion of taida_get/set_return_tag — one runtime call
+   per user-function call showed up as half the remaining call
+   overhead in recursive hot loops). The two functions below stay as
+   the ABI for any caller outside the generated module. */
+int64_t __wasm_return_tag = -1; // UNKNOWN
 
 int64_t taida_set_return_tag(int64_t tag) {
     __wasm_return_tag = tag;
@@ -3570,6 +3647,9 @@ int64_t taida_hashmap_values(int64_t hm_ptr) {
     int64_t *hm = (int64_t *)(intptr_t)hm_ptr;
     int64_t cap = hm[0];
     int64_t list = taida_list_new();
+    /* Propagate the value tag onto the result list (native NO-1 twin) —
+       without it a uniform-Float map's values displayed as raw bits. */
+    ((int64_t *)(intptr_t)list)[2] = hm[2];
     int64_t next_ord = hm[WASM_HM_ORD_HEADER_SLOT(cap)];
     for (int64_t oi = 0; oi < next_ord; oi++) {
         int64_t slot = hm[WASM_HM_ORD_SLOT(cap, oi)];
@@ -3611,8 +3691,8 @@ int64_t taida_hashmap_entries(int64_t hm_ptr) {
     static int __wasm_entries_names_registered = 0;
     if (!__wasm_entries_names_registered) {
         __wasm_entries_names_registered = 1;
-        taida_register_field_name(WASM_HASH_KEY, (int64_t)(intptr_t)"key");
-        taida_register_field_name(WASM_HASH_VAL, (int64_t)(intptr_t)"value");
+        taida_register_field_name(WASM_HASH_KEY, WSTR("key"));
+        taida_register_field_name(WASM_HASH_VAL, WSTR("value"));
     }
     int64_t next_ord = hm[WASM_HM_ORD_HEADER_SLOT(cap)];
     for (int64_t oi = 0; oi < next_ord; oi++) {
@@ -4018,9 +4098,22 @@ static int _wasm_ekind_value_eq(int64_t a, uint32_t eka, int64_t b, uint32_t ekb
 static void _wasm_fp_accum_k(int64_t v, uint32_t ekind, uint64_t *h) {
     switch (WASM_EKIND_KIND(ekind)) {
         case WASM_TAG_INT:
-        case WASM_TAG_ENUM: {
+        case WASM_TAG_ENUM:
+        case WASM_TAG_FLOAT: {
+            /* Numeric kinds fingerprint their f64 image (mirror of
+               native): equality crosses Int/Enum/Float by widening to
+               f64, so the fingerprint must live in that domain too —
+               past 2^53, Int(2^60) == Float(2^60) == Int(2^60 + 1).
+               Same-kind Int collisions inside one f64 bucket are split
+               by the equality confirmation; -0.0 canonicalises to +0.0;
+               a NaN keeps its never-equal bits and inserts fresh. */
+            double d = (WASM_EKIND_KIND(ekind) == WASM_TAG_FLOAT)
+                ? _l2d(v)
+                : (double)(int64_t)v;
+            if (d == 0.0) d = 0.0; /* -0.0 -> +0.0 */
             unsigned char tag = 0; _wasm_fnv_bytes(h, &tag, 1);
-            int64_t s = (int64_t)v; _wasm_fnv_bytes(h, &s, sizeof(s));
+            int64_t bits; __builtin_memcpy(&bits, &d, sizeof(bits));
+            _wasm_fnv_bytes(h, &bits, sizeof(bits));
             break;
         }
         case WASM_TAG_BOOL: {
@@ -4034,18 +4127,18 @@ static void _wasm_fp_accum_k(int64_t v, uint32_t ekind, uint64_t *h) {
     }
 }
 
-/* Kind-aware hashability gate. Float is never hashable (interp parity:
-   NaN / ±0.0 / Int↔Float crossing force the linear path), and an unknown
-   kind also forces the linear path so legacy-fingerprint values and
-   kind-fingerprint values can never share one seen-set inconsistently. */
+/* Kind-aware hashability gate. Numeric kinds (Float included) are
+   hashable: the fingerprint is the f64 image of the value — exactly the
+   domain the kind-aware equality compares in. An unknown kind forces
+   the linear path so legacy-fingerprint values and kind-fingerprint
+   values never share one seen-set inconsistently. */
 static int _wasm_ekind_hashable(int64_t v, uint32_t ekind) {
     switch (WASM_EKIND_KIND(ekind)) {
         case WASM_TAG_INT:
         case WASM_TAG_BOOL:
         case WASM_TAG_ENUM:
-            return 1;
         case WASM_TAG_FLOAT:
-            return 0;
+            return 1;
         case WASM_EKIND_UNKNOWN:
             return 0;
         default:
@@ -4087,7 +4180,7 @@ static int _wasm_seen_contains(_wasm_seen *s, int64_t v) {
 /* Kind-aware seen-set (mirror of native taida_seen_k): entries carry
    (value, ekind) pairs so collision confirmation runs under
    _wasm_ekind_value_eq. Engaged only when every element kind passes
-   _wasm_ekind_hashable — Float or unknown kinds fall back to the linear
+   _wasm_ekind_hashable — unknown kinds fall back to the linear
    pair-equality scan, matching the interpreter's all-or-nothing ValueKey
    gating (and its complexity profile). Bump-allocated, no free needed. */
 typedef struct {
@@ -4238,7 +4331,8 @@ int64_t taida_set_add_tagged(int64_t set_ptr, int64_t item, int64_t ekind) {
 int64_t taida_set_from_list(int64_t list_ptr) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
-    if (_wasm_elem_slot_is_array(list[2])) {
+    if (_wasm_elem_slot_is_array(list[2])
+        || _wasm_elem_tag_for_propagation(list) == WASM_TAG_FLOAT) {
         /* Kind-aware dedup over (value, recorded kind) pairs (mirror of
            native taida_set_from_list). The resulting Set keeps per-element
            kinds so later membership tests stay exact. The hash path engages
@@ -4342,24 +4436,6 @@ static int _wasm_set_numeric_cross(int64_t tag_a, int64_t tag_b) {
     return tag_a != tag_b;
 }
 
-static int _wasm_tagged_scalar_eq(int64_t a, int64_t tag_a, int64_t b, int64_t tag_b) {
-    if ((tag_a == WASM_TAG_BOOL) != (tag_b == WASM_TAG_BOOL)) return 0;
-    if (tag_a == WASM_TAG_FLOAT || tag_b == WASM_TAG_FLOAT) {
-        double da = (tag_a == WASM_TAG_FLOAT) ? _l2d(a) : (double)a;
-        double db = (tag_b == WASM_TAG_FLOAT) ? _l2d(b) : (double)b;
-        return da == db ? 1 : 0;
-    }
-    return a == b ? 1 : 0;
-}
-
-static int _wasm_tagged_set_contains(const int64_t *container, int64_t container_tag,
-                                     int64_t item, int64_t item_tag) {
-    int64_t len = container[1];
-    for (int64_t i = 0; i < len; i++) {
-        if (_wasm_tagged_scalar_eq(container[WASM_LIST_ELEMS + i], container_tag, item, item_tag)) return 1;
-    }
-    return 0;
-}
 
 /* W-4f: Set.union(other) -> new Set with all elements from both */
 int64_t taida_set_union(int64_t set_a, int64_t set_b) {
@@ -4368,20 +4444,32 @@ int64_t taida_set_union(int64_t set_a, int64_t set_b) {
     int64_t a_len = a[1];
     int64_t b_len = b[1];
     if (_wasm_elem_slot_is_array(a[2]) || _wasm_elem_slot_is_array(b[2])
-        || _wasm_elem_tags_cross(a, b)) {
-        /* Kind-aware linear union (mirror of native). Array-carrying sets
-           are literal-sized, so the O(|a|·|b|) pair scan keeps exact
-           (value, kind) semantics without a hash path; the result rebuilds
-           its own kind entries. */
+        || _wasm_elem_tags_cross(a, b)
+        || _wasm_set_numeric_cross(_wasm_elem_tag_for_propagation(a),
+                                   _wasm_elem_tag_for_propagation(b))) {
+        /* Kind-aware union over (value, kind) pairs (mirror of native).
+           Numeric-crossing homogeneous sets (Float in play, or Int vs
+           Bool) route here too: the kind-aware seen-set keeps them
+           O(|a|+|b|); non-hashable kinds keep the exact linear scan. */
         int64_t result = taida_set_new();
+        _wasm_seen_k seen;
+        int all_h = 1;
+        for (int64_t i = 0; i < a_len && all_h; i++)
+            all_h = _wasm_ekind_hashable(a[WASM_LIST_ELEMS + i], _wasm_elem_kind_at(a, i));
+        for (int64_t i = 0; i < b_len && all_h; i++)
+            all_h = _wasm_ekind_hashable(b[WASM_LIST_ELEMS + i], _wasm_elem_kind_at(b, i));
+        int use_hash = all_h && _wasm_seen_k_init(&seen, a_len + b_len);
         for (int64_t i = 0; i < a_len; i++) {
             uint32_t ek = _wasm_elem_kind_at(a, i);
+            if (use_hash) _wasm_seen_k_add(&seen, a[WASM_LIST_ELEMS + i], ek);
             _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)result, ek);
             result = taida_list_push(result, a[WASM_LIST_ELEMS + i]);
         }
         for (int64_t i = 0; i < b_len; i++) {
             uint32_t ek = _wasm_elem_kind_at(b, i);
-            if (!_wasm_set_contains_k(result, b[WASM_LIST_ELEMS + i], ek)) {
+            int dup = use_hash ? !_wasm_seen_k_add(&seen, b[WASM_LIST_ELEMS + i], ek)
+                               : _wasm_set_contains_k(result, b[WASM_LIST_ELEMS + i], ek);
+            if (!dup) {
                 _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)result, ek);
                 result = taida_list_push(result, b[WASM_LIST_ELEMS + i]);
             }
@@ -4390,30 +4478,21 @@ int64_t taida_set_union(int64_t set_a, int64_t set_b) {
     }
     int64_t tag_a = _wasm_elem_tag_for_propagation(a);
     int64_t tag_b = _wasm_elem_tag_for_propagation(b);
-    /* F54 tier 2: b is a Set (already unique), so under a numeric-domain
-     * cross the dup test only needs "is b[i] in a", compared in the
-     * numeric domain. The result starts with the a-side tag; only a b
-     * element that actually lands in the result can make it mixed-domain
-     * (per-add latch below, mirroring native taida_set_union). */
-    int numeric_cross = _wasm_set_numeric_cross(tag_a, tag_b);
+    /* Same-domain homogeneous fast path: the numeric-crossing cases
+       (and every Float-bearing set) are owned by the kind-aware branch
+       above (mirrors native taida_set_union). */
     int64_t result = taida_set_new();
     taida_list_set_elem_tag(result, tag_a);
     _wasm_seen seen;
-    int use_hash = !numeric_cross && _wasm_list_all_hashable(a) && _wasm_list_all_hashable(b)
+    int use_hash = _wasm_list_all_hashable(a) && _wasm_list_all_hashable(b)
                    && _wasm_seen_init(&seen, a_len + b_len);
     for (int64_t i = 0; i < a_len; i++) {
         if (use_hash) _wasm_seen_add(&seen, a[WASM_LIST_ELEMS + i]);
         result = taida_list_push(result, a[WASM_LIST_ELEMS + i]);
     }
     for (int64_t i = 0; i < b_len; i++) {
-        int dup;
-        if (numeric_cross) {
-            dup = _wasm_tagged_set_contains(a, tag_a, b[WASM_LIST_ELEMS + i], tag_b);
-        } else if (use_hash) {
-            dup = !_wasm_seen_add(&seen, b[WASM_LIST_ELEMS + i]);
-        } else {
-            dup = taida_set_has(result, b[WASM_LIST_ELEMS + i]);
-        }
+        int dup = use_hash ? !_wasm_seen_add(&seen, b[WASM_LIST_ELEMS + i])
+                           : (taida_set_has(result, b[WASM_LIST_ELEMS + i]) != 0);
         if (!dup) {
             /* F54 tier 2: every actually-added b element stamps its tag
                through the shared latch — BEFORE the push (the latch's
@@ -4435,14 +4514,30 @@ int64_t taida_set_intersect(int64_t set_a, int64_t set_b) {
     int64_t a_len = a[1];
     int64_t *b = (int64_t *)(intptr_t)set_b;
     if (_wasm_elem_slot_is_array(a[2]) || _wasm_elem_slot_is_array(b[2])
-        || _wasm_elem_tags_cross(a, b)) {
-        /* Kind-aware linear intersection (mirror of native; see union for
-           rationale). The result holds a-side elements only, projected with
-           their recorded kinds. */
+        || _wasm_elem_tags_cross(a, b)
+        || _wasm_set_numeric_cross(_wasm_elem_tag_for_propagation(a),
+                                   _wasm_elem_tag_for_propagation(b))) {
+        /* Kind-aware intersection (mirror of native; see union for the
+           hash-path rationale). The b side seeds the kind-aware
+           seen-set so each a-side membership test is O(1). The result
+           holds a-side elements only, with their recorded kinds. */
+        int64_t b_len = b[1];
         int64_t result = taida_set_new();
+        _wasm_seen_k seen;
+        int all_h = 1;
+        for (int64_t i = 0; i < a_len && all_h; i++)
+            all_h = _wasm_ekind_hashable(a[WASM_LIST_ELEMS + i], _wasm_elem_kind_at(a, i));
+        for (int64_t i = 0; i < b_len && all_h; i++)
+            all_h = _wasm_ekind_hashable(b[WASM_LIST_ELEMS + i], _wasm_elem_kind_at(b, i));
+        int use_hash = all_h && _wasm_seen_k_init(&seen, b_len);
+        if (use_hash)
+            for (int64_t i = 0; i < b_len; i++)
+                _wasm_seen_k_add(&seen, b[WASM_LIST_ELEMS + i], _wasm_elem_kind_at(b, i));
         for (int64_t i = 0; i < a_len; i++) {
             uint32_t ek = _wasm_elem_kind_at(a, i);
-            if (_wasm_set_contains_k(set_b, a[WASM_LIST_ELEMS + i], ek)) {
+            int in_b = use_hash ? !_wasm_seen_k_add(&seen, a[WASM_LIST_ELEMS + i], ek)
+                                : _wasm_set_contains_k(set_b, a[WASM_LIST_ELEMS + i], ek);
+            if (in_b) {
                 _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)result, ek);
                 result = taida_list_push(result, a[WASM_LIST_ELEMS + i]);
             }
@@ -4450,25 +4545,17 @@ int64_t taida_set_intersect(int64_t set_a, int64_t set_b) {
         return result;
     }
     int64_t tag_a = _wasm_elem_tag_for_propagation(a);
-    int64_t tag_b = _wasm_elem_tag_for_propagation(b);
-    int numeric_cross = _wasm_set_numeric_cross(tag_a, tag_b);
     int64_t result = taida_set_new();
-    /* F54 tier 2: the result holds a-side elements only, so the a tag
-       stays honest (mirrors native taida_set_intersect). */
+    /* Same-domain homogeneous fast path; the result holds a-side
+       elements only, so the a tag stays honest (mirrors native). */
     taida_list_set_elem_tag(result, tag_a);
     _wasm_seen seen;
-    int use_hash = !numeric_cross && _wasm_list_all_hashable(a) && _wasm_list_all_hashable(b)
+    int use_hash = _wasm_list_all_hashable(a) && _wasm_list_all_hashable(b)
                    && _wasm_seen_init(&seen, b[1]);
     if (use_hash) for (int64_t i = 0; i < b[1]; i++) _wasm_seen_add(&seen, b[WASM_LIST_ELEMS + i]);
     for (int64_t i = 0; i < a_len; i++) {
-        int in_b;
-        if (numeric_cross) {
-            in_b = _wasm_tagged_set_contains(b, tag_b, a[WASM_LIST_ELEMS + i], tag_a);
-        } else if (use_hash) {
-            in_b = _wasm_seen_contains(&seen, a[WASM_LIST_ELEMS + i]);
-        } else {
-            in_b = taida_set_has(set_b, a[WASM_LIST_ELEMS + i]);
-        }
+        int in_b = use_hash ? _wasm_seen_contains(&seen, a[WASM_LIST_ELEMS + i])
+                            : (taida_set_has(set_b, a[WASM_LIST_ELEMS + i]) != 0);
         if (in_b) result = taida_list_push(result, a[WASM_LIST_ELEMS + i]);
     }
     return result;
@@ -4480,13 +4567,28 @@ int64_t taida_set_diff(int64_t set_a, int64_t set_b) {
     int64_t a_len = a[1];
     int64_t *b = (int64_t *)(intptr_t)set_b;
     if (_wasm_elem_slot_is_array(a[2]) || _wasm_elem_slot_is_array(b[2])
-        || _wasm_elem_tags_cross(a, b)) {
-        /* Kind-aware linear difference (mirror of native; see union for
-           rationale). */
+        || _wasm_elem_tags_cross(a, b)
+        || _wasm_set_numeric_cross(_wasm_elem_tag_for_propagation(a),
+                                   _wasm_elem_tag_for_propagation(b))) {
+        /* Kind-aware difference (mirror of native; see union for the
+           hash-path rationale). */
+        int64_t b_len = b[1];
         int64_t result = taida_set_new();
+        _wasm_seen_k seen;
+        int all_h = 1;
+        for (int64_t i = 0; i < a_len && all_h; i++)
+            all_h = _wasm_ekind_hashable(a[WASM_LIST_ELEMS + i], _wasm_elem_kind_at(a, i));
+        for (int64_t i = 0; i < b_len && all_h; i++)
+            all_h = _wasm_ekind_hashable(b[WASM_LIST_ELEMS + i], _wasm_elem_kind_at(b, i));
+        int use_hash = all_h && _wasm_seen_k_init(&seen, b_len);
+        if (use_hash)
+            for (int64_t i = 0; i < b_len; i++)
+                _wasm_seen_k_add(&seen, b[WASM_LIST_ELEMS + i], _wasm_elem_kind_at(b, i));
         for (int64_t i = 0; i < a_len; i++) {
             uint32_t ek = _wasm_elem_kind_at(a, i);
-            if (!_wasm_set_contains_k(set_b, a[WASM_LIST_ELEMS + i], ek)) {
+            int in_b = use_hash ? !_wasm_seen_k_add(&seen, a[WASM_LIST_ELEMS + i], ek)
+                                : _wasm_set_contains_k(set_b, a[WASM_LIST_ELEMS + i], ek);
+            if (!in_b) {
                 _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)result, ek);
                 result = taida_list_push(result, a[WASM_LIST_ELEMS + i]);
             }
@@ -4494,25 +4596,16 @@ int64_t taida_set_diff(int64_t set_a, int64_t set_b) {
         return result;
     }
     int64_t tag_a = _wasm_elem_tag_for_propagation(a);
-    int64_t tag_b = _wasm_elem_tag_for_propagation(b);
-    int numeric_cross = _wasm_set_numeric_cross(tag_a, tag_b);
     int64_t result = taida_set_new();
-    /* F54 tier 2: the result holds a-side elements only, so the a tag
-       stays honest (mirrors native taida_set_diff). */
+    /* Same-domain homogeneous fast path (mirrors native). */
     taida_list_set_elem_tag(result, tag_a);
     _wasm_seen seen;
-    int use_hash = !numeric_cross && _wasm_list_all_hashable(a) && _wasm_list_all_hashable(b)
+    int use_hash = _wasm_list_all_hashable(a) && _wasm_list_all_hashable(b)
                    && _wasm_seen_init(&seen, b[1]);
     if (use_hash) for (int64_t i = 0; i < b[1]; i++) _wasm_seen_add(&seen, b[WASM_LIST_ELEMS + i]);
     for (int64_t i = 0; i < a_len; i++) {
-        int in_b;
-        if (numeric_cross) {
-            in_b = _wasm_tagged_set_contains(b, tag_b, a[WASM_LIST_ELEMS + i], tag_a);
-        } else if (use_hash) {
-            in_b = _wasm_seen_contains(&seen, a[WASM_LIST_ELEMS + i]);
-        } else {
-            in_b = taida_set_has(set_b, a[WASM_LIST_ELEMS + i]);
-        }
+        int in_b = use_hash ? _wasm_seen_contains(&seen, a[WASM_LIST_ELEMS + i])
+                            : (taida_set_has(set_b, a[WASM_LIST_ELEMS + i]) != 0);
         if (!in_b) result = taida_list_push(result, a[WASM_LIST_ELEMS + i]);
     }
     return result;
@@ -4878,7 +4971,7 @@ int64_t taida_pack_to_display_string(int64_t pack_ptr) {
 /* make_io_error(msg) -> Error BuchiPack */
 int64_t taida_make_io_error(int64_t msg) {
     return taida_make_error(
-        (int64_t)(intptr_t)"IOError",
+        WSTR("IOError"),
         msg);
 }
 

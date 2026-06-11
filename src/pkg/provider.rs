@@ -1244,7 +1244,7 @@ mod tests {
         // path: the remote SHA lookup fails, so the returned
         // `StaleOutcome::Refresh.sha` is `None`. The cached directory is
         // still present (no invalidation here); the caller owns the swap.
-        let _guard = crate::util::env_test_lock().lock().unwrap();
+        let _guard = crate::util::env_test_guard();
         let dir = PathBuf::from("/tmp/taida_test_force_refresh_outcome");
         let _ = std::fs::remove_dir_all(&dir);
         let pkg_dir = dir.join("alice").join("http").join("b.12");
@@ -1318,7 +1318,7 @@ mod tests {
         // pointing BOTH the archive base URL and the API URL at closed
         // ports, so the fetch errors out. The user's existing extracted
         // directory (.taida_installed marker + sidecar) must reappear.
-        let _guard = crate::util::env_test_lock().lock().unwrap();
+        let _guard = crate::util::env_test_guard();
         let dir = PathBuf::from("/tmp/taida_test_force_refresh_rollback");
         let _ = std::fs::remove_dir_all(&dir);
         let pkg_dir = dir.join("taida-lang").join("http").join("b.12");

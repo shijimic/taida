@@ -354,7 +354,12 @@ stdout(jsResult.name)
 stdout(\"\\n\")
 ";
     fs::write(tmp.join("caller.td"), caller).expect("write caller");
+    // --no-check: this pins the *runtime* overlay semantics. The
+    // checker now rejects the caller-scope `JSON[..., Schema]` up
+    // front ([E1541] — Schema is not imported here), which is correct
+    // but would stop the program before the leak probe runs.
     let out = Command::new(taida_bin())
+        .arg("--no-check")
         .arg(tmp.join("caller.td"))
         .output()
         .expect("spawn interp");
@@ -398,7 +403,24 @@ JSON[raw, ThisDoesNotExist]() >=> jsResult
 stdout(jsResult.x.toString())
 ";
     fs::write(tmp.join("prog.td"), src).expect("write prog");
+    // The checker rejects the undefined schema up front ([E1541]).
+    let checked = Command::new(taida_bin())
+        .arg(tmp.join("prog.td"))
+        .output()
+        .expect("spawn interp");
+    let checked_combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&checked.stdout),
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    assert!(
+        !checked.status.success() && checked_combined.contains("[E1541]"),
+        "undefined schema should be rejected at check time, got={}",
+        checked_combined
+    );
+    // Under --no-check the interpreter's own runtime guard still fires.
     let out = Command::new(taida_bin())
+        .arg("--no-check")
         .arg(tmp.join("prog.td"))
         .output()
         .expect("spawn interp");

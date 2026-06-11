@@ -51,7 +51,10 @@ impl Lowering {
                                 self.float_returning_funcs.insert(func_def.name.clone());
                             }
                             // NB-31: Track Int/Num-returning functions for callable_type_tag
-                            crate::parser::TypeExpr::Named(n) if n == "Int" || n == "Num" => {
+                            // Num is rejected as a value annotation by the
+                            // checker; registering it as Int here made a
+                            // --no-check Float body render as raw bits.
+                            crate::parser::TypeExpr::Named(n) if n == "Int" => {
                                 self.int_returning_funcs.insert(func_def.name.clone());
                             }
                             crate::parser::TypeExpr::List(_) => {
@@ -563,6 +566,20 @@ impl Lowering {
                 }
                 if self.expr_is_pack(&assign.value) {
                     self.pack_vars.insert(assign.target.clone());
+                    // Record per-field static kinds for pack literals so a
+                    // later `p.x` field read carries its element kind into
+                    // display dispatch (Float/Bool payloads are invisible
+                    // to the value heuristics).
+                    if let Expr::BuchiPack(fields, _) = &assign.value {
+                        let kinds: std::collections::HashMap<String, i64> = fields
+                            .iter()
+                            .filter(|f| !matches!(f.value, Expr::Placeholder(_)))
+                            .map(|f| (f.name.clone(), self.expr_type_tag(&f.value)))
+                            .collect();
+                        self.pack_field_kinds.insert(assign.target.clone(), kinds);
+                    } else {
+                        self.pack_field_kinds.remove(&assign.target);
+                    }
                 }
                 if self.expr_is_list(&assign.value) {
                     self.list_vars.insert(assign.target.clone());
@@ -604,6 +621,18 @@ impl Lowering {
                     self.var_type_names
                         .insert(assign.target.clone(), type_name.clone());
                 }
+            }
+            // `>=>` / `<=<` bindings are top-level variables too: the
+            // free-var collector filters on this set, so a name missing
+            // here never reaches globals_referenced — a function body
+            // referencing an unmold-bound top-level then reads 0 from
+            // the uninitialised global slot (silently, on native and
+            // wasm; the interpreter scopes it correctly).
+            if let Statement::UnmoldForward(uf) = stmt {
+                self.top_level_vars.insert(uf.target.clone());
+            }
+            if let Statement::UnmoldBackward(ub) = stmt {
+                self.top_level_vars.insert(ub.target.clone());
             }
         }
 
@@ -1188,6 +1217,7 @@ impl Lowering {
         // F58 P2-2: wrap provably escape-free tail-recursive loops in an
         // iteration-scope arena watermark (enter at entry, reset right
         // before each loop back-edge, exit before return).
+        Self::maybe_apply_append_consume(&mut ir_func, func_def);
         Self::maybe_insert_iter_scope(&mut ir_func, func_def);
 
         Ok(ir_func)
@@ -1384,6 +1414,484 @@ impl Lowering {
             // reset would otherwise dangle it.
             _ => true,
         })
+    }
+
+    /// A top-level binding that some function body references must
+    /// also land in the global table: function bodies restore their
+    /// free variables through GlobalGet, so a binding that only does
+    /// DefVar in `_taida_main` leaves the global slot at 0 and the
+    /// function silently reads the wrong value. The Assignment arm has
+    /// always done this; every other binding form (the `>=>` / `<=<`
+    /// unmolds) must apply the same rule.
+    fn maybe_globalize_toplevel_binding(&mut self, func: &mut IrFunction, name: &str, val: IrVar) {
+        if self.current_func_name.is_none() && self.globals_referenced.contains(name) {
+            let hash = self.global_var_hash(name);
+            func.push(IrInst::GlobalSet(hash, val));
+        }
+    }
+
+    /// Sequential-Append tail recursion (`f(n-1, Append[acc, x]())`)
+    /// copies the whole accumulator list per element — O(n^2), ~1.2GB
+    /// of traffic for a 10k build. When this pass can prove the
+    /// accumulator's ONLY use in the recursive arm is the Append's
+    /// first argument, it rewrites the call to the consume variant and
+    /// threads an ownership bit: 0 on entry (the list belongs to the
+    /// caller and may be aliased — the runtime detaches via the copy
+    /// path), set to 1 only by the tail-calls that actually consumed
+    /// (a pass-through tail-call keeps it unchanged, so a list that
+    /// arrived from outside can never be flagged owned). Everything
+    /// here is fail-closed: any condition miss keeps the copy variant.
+    fn maybe_apply_append_consume(ir_func: &mut IrFunction, func_def: &FuncDef) {
+        macro_rules! actrace {
+            ($($t:tt)*) => {
+                if std::env::var("TAIDA_DEBUG_APPEND_CONSUME").is_ok() {
+                    eprintln!("append-consume [{}]: {}", ir_func.name, format!($($t)*));
+                }
+            };
+        }
+        if func_def.params.is_empty() {
+            return;
+        }
+        // AST-side guards: default completion / ErrorCeiling / Lambda /
+        // unmodeled statement forms — all fail closed.
+        if Self::funcdef_blocks_append_consume(func_def) {
+            actrace!("AST guard blocked");
+            return;
+        }
+        // Body shape: optional prelude (condition evaluation), a single
+        // CondBranch, then the trailing Return of its result — the
+        // buildN shape.
+        let body_snapshot = ir_func.body.clone();
+        let n_body = body_snapshot.len();
+        if n_body < 2 {
+            return;
+        }
+        let IrInst::Return(_) = &body_snapshot[n_body - 1] else {
+            actrace!("body does not end in Return");
+            return;
+        };
+        let IrInst::CondBranch(_, arms) = &body_snapshot[n_body - 2] else {
+            actrace!("no CondBranch before the Return");
+            return;
+        };
+        let prelude = &body_snapshot[..n_body - 2];
+
+        let param_names: Vec<&str> = func_def.params.iter().map(|p| p.name.as_str()).collect();
+
+        // Pick the candidate param: appears in NO prelude instruction
+        // (conditions are evaluated eagerly every iteration), and in
+        // every tail-calling arm appears exactly once — as the first
+        // argument of a trailing `taida_list_append` whose result
+        // feeds that arm's TailCall at a consistent position.
+        let mut candidate: Option<(usize, &str)> = None;
+        'params: for (idx, pname) in param_names.iter().enumerate() {
+            if Self::insts_use_var(prelude, pname) {
+                actrace!("param {} used in prelude", pname);
+                continue;
+            }
+            let mut saw_consume_arm = false;
+            for arm in arms {
+                let has_tail = Self::ir_insts_contain_tail_call(&arm.body);
+                if !has_tail {
+                    continue; // non-recursive arms may use p freely
+                }
+                match Self::arm_append_consume_shape(&arm.body, pname, idx, &param_names) {
+                    Some(true) => saw_consume_arm = true,
+                    // A pass-through arm hands the CALLER's list to the
+                    // next iteration unchanged, but the emitters set the
+                    // ownership bit after EVERY self tail-call (the bit
+                    // is loop machinery, not per-arm) — a subsequent
+                    // consume would then mutate a list the caller still
+                    // owns. Fail closed on the whole param. (Today's
+                    // lowering also rejects this shape incidentally via
+                    // the param write-back plumbing; this arm makes the
+                    // invariant explicit rather than emergent.)
+                    Some(false) | None => {
+                        actrace!("param {} rejected by arm shape", pname);
+                        continue 'params;
+                    }
+                }
+            }
+            if saw_consume_arm {
+                candidate = Some((idx, pname));
+                break;
+            }
+        }
+        let Some((p_idx, p_name)) = candidate else {
+            actrace!("no candidate param");
+            return;
+        };
+        actrace!("APPLYING consume for param {}", p_name);
+        let param_names_again: Vec<&str> =
+            func_def.params.iter().map(|p| p.name.as_str()).collect();
+
+        // Rewrite: swap the append call for the consume variant in
+        // every consume-shaped arm. The ownership bit itself is loop
+        // machinery and is wired by the emitters (0 on entry, 1 after
+        // every self tail-call): a named IR variable cannot carry a
+        // loop-mutable value on native, where DefVar/UseVar resolve
+        // statically at emission time.
+        let ret_inst = ir_func.body[n_body - 1].clone();
+        let IrInst::CondBranch(result, arms) = ir_func.body[n_body - 2].clone() else {
+            unreachable!("checked above");
+        };
+        let mut new_body: Vec<IrInst> = prelude.to_vec();
+        let mut new_arms = Vec::with_capacity(arms.len());
+        for arm in arms {
+            let has_tail = Self::ir_insts_contain_tail_call(&arm.body);
+            if !has_tail {
+                new_arms.push(arm);
+                continue;
+            }
+            let consumes = matches!(
+                Self::arm_append_consume_shape(&arm.body, p_name, p_idx, &param_names_again),
+                Some(true)
+            );
+            if !consumes {
+                new_arms.push(arm);
+                continue;
+            }
+            let mut body = arm.body.clone();
+            let tail_pos = body
+                .iter()
+                .rposition(|i| matches!(i, IrInst::TailCall(_)))
+                .expect("shape-checked: TailCall present");
+            let append_pos = body[..tail_pos]
+                .iter()
+                .rposition(
+                    |i| matches!(i, IrInst::Call(_, name, _) if name == "taida_list_append_k"),
+                )
+                .expect("shape-checked: append present");
+            let IrInst::Call(dst, _, args) = body[append_pos].clone() else {
+                unreachable!("shape-checked");
+            };
+            body[append_pos] = IrInst::Call(dst, "taida_list_append_consume_k".to_string(), args);
+            new_arms.push(crate::codegen::ir::CondArm {
+                condition: arm.condition,
+                body,
+                result: arm.result,
+            });
+        }
+        new_body.push(IrInst::CondBranch(result, new_arms));
+        new_body.push(ret_inst);
+        ir_func.body = new_body;
+        ir_func.append_consume_owned = true;
+    }
+
+    /// AST guard for the consume rewrite: fail closed when any self
+    /// call omits arguments (default completion evaluates AFTER the
+    /// explicit args and may read the consumed list), when an
+    /// ErrorCeiling / Lambda opens a capture escape route, or when a
+    /// statement form we do not model appears.
+    fn funcdef_blocks_append_consume(func_def: &FuncDef) -> bool {
+        // Conservative expression scan: walks the variants that can
+        // syntactically appear inside a buildN-shaped body. Any
+        // variant outside this list fails closed.
+        fn scan(e: &Expr, fname: &str, arity: usize, blocked: &mut bool) {
+            if *blocked {
+                return;
+            }
+            match e {
+                Expr::Lambda(_, _, _) => *blocked = true,
+                Expr::FuncCall(callee, args, _) => {
+                    if let Expr::Ident(n, _) = callee.as_ref()
+                        && n == fname
+                        && args.len() < arity
+                    {
+                        *blocked = true;
+                    }
+                    scan(callee, fname, arity, blocked);
+                    for a in args {
+                        scan(a, fname, arity, blocked);
+                    }
+                }
+                Expr::BinaryOp(l, _, r, _) => {
+                    scan(l, fname, arity, blocked);
+                    scan(r, fname, arity, blocked);
+                }
+                Expr::UnaryOp(_, x, _) => scan(x, fname, arity, blocked),
+                Expr::MoldInst(_, targs, named, _) => {
+                    for t in targs {
+                        scan(t, fname, arity, blocked);
+                    }
+                    for field in named {
+                        scan(&field.value, fname, arity, blocked);
+                    }
+                }
+                Expr::Ident(_, _)
+                | Expr::IntLit(_, _)
+                | Expr::FloatLit(_, _)
+                | Expr::BoolLit(_, _)
+                | Expr::StringLit(_, _) => {}
+                Expr::CondBranch(arms, _) => {
+                    for arm in arms {
+                        if let Some(c) = &arm.condition {
+                            scan(c, fname, arity, blocked);
+                        }
+                        for st in &arm.body {
+                            scan_stmt(st, fname, arity, blocked);
+                        }
+                    }
+                }
+                _ => *blocked = true, // unmodeled expression: fail closed
+            }
+        }
+        fn scan_stmt(st: &Statement, fname: &str, arity: usize, blocked: &mut bool) {
+            if *blocked {
+                return;
+            }
+            match st {
+                Statement::ErrorCeiling(_) => *blocked = true,
+                Statement::Expr(e) => scan(e, fname, arity, blocked),
+                Statement::Assignment(a) => scan(&a.value, fname, arity, blocked),
+                Statement::UnmoldForward(u) => scan(&u.source, fname, arity, blocked),
+                Statement::UnmoldBackward(u) => scan(&u.source, fname, arity, blocked),
+                _ => *blocked = true,
+            }
+        }
+        let mut blocked = false;
+        for st in &func_def.body {
+            scan_stmt(st, &func_def.name, func_def.params.len(), &mut blocked);
+        }
+        blocked
+    }
+
+    /// Whether `insts` (recursively) contain `UseVar(_, name)`.
+    fn insts_use_var(insts: &[IrInst], name: &str) -> bool {
+        insts.iter().any(|inst| match inst {
+            IrInst::UseVar(_, n) => n == name,
+            IrInst::CondBranch(_, arms) => arms.iter().any(|a| Self::insts_use_var(&a.body, name)),
+            _ => false,
+        })
+    }
+
+    /// Classify a tail-calling arm for the consume rewrite.
+    /// Returns Some(true) = consume shape (trailing `append(p, item)`
+    /// feeding the TailCall at param position `p_idx`, single use of
+    /// `p`, safe instruction set), Some(false) = pass-through shape
+    /// (`p` travels unchanged at its own position, no other use),
+    /// None = anything else (fail closed).
+    fn arm_append_consume_shape(
+        body: &[IrInst],
+        p_name: &str,
+        p_idx: usize,
+        func_params: &[&str],
+    ) -> Option<bool> {
+        macro_rules! shtrace {
+            ($($t:tt)*) => {
+                if std::env::var("TAIDA_DEBUG_APPEND_CONSUME").is_ok() {
+                    eprintln!("  shape({}): {}", p_name, format!($($t)*));
+                }
+            };
+        }
+        // No nested branches inside recursive arms in v1.
+        if body.iter().any(|i| matches!(i, IrInst::CondBranch(_, _))) {
+            shtrace!("nested branch");
+            return None;
+        }
+        // The TailCall is followed by dead result plumbing (a ConstInt
+        // feeding the arm's never-reached result) — locate it instead
+        // of requiring it to be last, and only allow trivially dead
+        // instructions after it.
+        let tail_pos = body
+            .iter()
+            .rposition(|i| matches!(i, IrInst::TailCall(_)))
+            .or_else(|| {
+                shtrace!("no TailCall in arm");
+                None
+            })?;
+        for inst in &body[tail_pos + 1..] {
+            match inst {
+                IrInst::ConstInt(_, _) | IrInst::UseVar(_, _) | IrInst::DefVar(_, _) => {}
+                _ => {
+                    shtrace!("live instruction after TailCall");
+                    return None;
+                }
+            }
+        }
+        let n = tail_pos + 1; // analyse only up to and including the TailCall
+        let IrInst::TailCall(targs) = &body[n - 1] else {
+            unreachable!("located above");
+        };
+        // Instruction safety: only scalar-pure calls besides the append.
+        for inst in &body[..n - 1] {
+            match inst {
+                IrInst::Call(_, name, _) => {
+                    let ok = name == "taida_list_append_k"
+                        || name.starts_with("taida_int_")
+                        || name.starts_with("taida_float_")
+                        || name.starts_with("taida_bool_");
+                    if !ok {
+                        shtrace!("unsafe call {}", name);
+                        return None;
+                    }
+                }
+                IrInst::ConstInt(_, _)
+                | IrInst::ConstFloat(_, _)
+                | IrInst::ConstBool(_, _)
+                | IrInst::UseVar(_, _)
+                | IrInst::DefVar(_, _) => {}
+                other => {
+                    let what = match other {
+                        IrInst::CallUser(_, n, _) => format!("CallUser {}", n),
+                        IrInst::Retain(_) => "Retain".to_string(),
+                        IrInst::Release(_) => "Release".to_string(),
+                        IrInst::ReleaseAuto(_) => "ReleaseAuto".to_string(),
+                        IrInst::TailCall(_) => "TailCall".to_string(),
+                        _ => format!("{:?}", std::mem::discriminant(other)),
+                    };
+                    shtrace!("unsafe inst {}", what);
+                    return None;
+                }
+            }
+        }
+        // Collect every read of p, then discount the TCO machinery's
+        // save/restore noise: the lowering snapshots params around a
+        // tail call as `UseVar(v, p)` whose value is consumed ONLY by
+        // a `DefVar(p, v)` write-back — observationally a no-op, so
+        // such reads do not count as uses.
+        let mut substantive_reads: Vec<(usize, IrVar)> = Vec::new();
+        for (i, inst) in body.iter().enumerate() {
+            let IrInst::UseVar(v, n) = inst else {
+                continue;
+            };
+            if n != p_name {
+                continue;
+            }
+            let mut consumers = 0usize;
+            let mut writeback_only = true;
+            for other in body.iter() {
+                match other {
+                    IrInst::DefVar(dn, src) if *src == *v => {
+                        consumers += 1;
+                        if dn != p_name {
+                            writeback_only = false;
+                        }
+                    }
+                    _ if Self::inst_reads_var(other, *v)
+                        && !matches!(other, IrInst::DefVar(_, _)) =>
+                    {
+                        consumers += 1;
+                        writeback_only = false;
+                    }
+                    _ => {}
+                }
+            }
+            if consumers > 0 && writeback_only {
+                continue; // pure save/restore noise
+            }
+            substantive_reads.push((i, *v));
+        }
+        if substantive_reads.len() != 1 {
+            shtrace!("substantive reads = {}", substantive_reads.len());
+            return None;
+        }
+        let (p_read_pos, p_var) = substantive_reads[0];
+        // Pass-through shape: p's value travels directly at its slot.
+        if targs.get(p_idx) == Some(&p_var) {
+            // ... and is used nowhere else.
+            let other_use = body.iter().enumerate().any(|(i, inst)| {
+                i != n - 1 && i != p_read_pos && Self::inst_reads_var(inst, p_var)
+            }) || targs
+                .iter()
+                .enumerate()
+                .any(|(ai, v)| ai != p_idx && *v == p_var);
+            if other_use {
+                return None;
+            }
+            return Some(false);
+        }
+        // Consume shape: an append whose only successors before the
+        // tail call are the TCO save/restore machinery (UseVar /
+        // DefVar-to-params / consts) and the scalar-pure evaluation of
+        // LATER tail-call arguments (`f(Append[p, x](), n + 1)` puts
+        // the increment after the append). Those later calls are safe
+        // exactly when they touch neither p (the substantive-read
+        // check rejects that) nor the consumed result.
+        let append_pos = body[..n - 1].iter().rposition(
+            |i| matches!(i, IrInst::Call(_, name, _) if name == "taida_list_append_k"),
+        )?;
+        let IrInst::Call(append_dst, append_name, append_args) = &body[append_pos] else {
+            return None;
+        };
+        for inst in &body[append_pos + 1..n - 1] {
+            match inst {
+                IrInst::ConstInt(_, _)
+                | IrInst::ConstFloat(_, _)
+                | IrInst::ConstBool(_, _)
+                | IrInst::UseVar(_, _) => {}
+                // Between the append and the tail call only the TCO
+                // save/restore machinery runs: writes into the
+                // function's own param slots (including the new list
+                // into p — that IS the back-edge hand-off, and the
+                // momentary old-value restore is overwritten by the
+                // emitter's _tco_arg assignment). A write to any NEW
+                // name would be a real alias escaping the iteration —
+                // fail closed on those.
+                IrInst::DefVar(dn, _) => {
+                    if !func_params.iter().any(|pp| pp == dn) {
+                        shtrace!("non-param DefVar {} between append and tail", dn);
+                        return None;
+                    }
+                }
+                IrInst::Call(_, name, args) => {
+                    let pure = name.starts_with("taida_int_")
+                        || name.starts_with("taida_float_")
+                        || name.starts_with("taida_bool_");
+                    if !pure || args.contains(append_dst) {
+                        shtrace!("unsafe call {} between append and tail", name);
+                        return None;
+                    }
+                }
+                _ => {
+                    shtrace!("unsafe inst between append and tail");
+                    return None;
+                }
+            }
+        }
+        if append_name != "taida_list_append_k" || append_args.len() != 3 {
+            shtrace!("trailing call is not a 3-arg kind-supplying append");
+            return None;
+        }
+        if append_args[0] != p_var {
+            shtrace!("append arg0 is not p");
+            return None;
+        }
+        // p feeds ONLY the append's first slot.
+        if append_args[1] == p_var {
+            return None;
+        }
+        let other_use = body.iter().enumerate().any(|(i, inst)| {
+            i != append_pos && i != p_read_pos && Self::inst_reads_var(inst, p_var)
+        }) || targs.contains(&p_var);
+        if other_use {
+            shtrace!("p escapes beyond the append");
+            return None;
+        }
+        // The append result feeds the tail call at p's position only.
+        if targs.get(p_idx) != Some(append_dst) {
+            shtrace!("append result does not feed the tail call at p's slot");
+            return None;
+        }
+        if targs
+            .iter()
+            .enumerate()
+            .any(|(ai, v)| ai != p_idx && v == append_dst)
+        {
+            return None;
+        }
+        Some(true)
+    }
+
+    /// Whether an instruction reads the given IR var.
+    fn inst_reads_var(inst: &IrInst, var: IrVar) -> bool {
+        match inst {
+            IrInst::Call(_, _, args) | IrInst::CallUser(_, _, args) => args.contains(&var),
+            IrInst::TailCall(args) => args.contains(&var),
+            IrInst::DefVar(_, src) => *src == var,
+            IrInst::Return(v) => *v == var,
+            _ => false,
+        }
     }
 
     fn maybe_insert_iter_scope(ir_func: &mut IrFunction, func_def: &FuncDef) {
@@ -1775,12 +2283,7 @@ impl Lowering {
 
                 // トップレベル変数をグローバルテーブルにも格納
                 // （_taida_main 内で、かつ関数から参照されるトップレベル変数のみ）
-                if self.current_func_name.is_none()
-                    && self.globals_referenced.contains(&assign.target)
-                {
-                    let hash = self.global_var_hash(&assign.target);
-                    func.push(IrInst::GlobalSet(hash, val));
-                }
+                self.maybe_globalize_toplevel_binding(func, &assign.target, val);
 
                 // NB-31: int を返す式の結果を追跡（callable_type_tag 精度向上）
                 if self.expr_is_int(&assign.value) {
@@ -1801,6 +2304,20 @@ impl Lowering {
                 // F-58: BuchiPack/TypeInst を返す式の結果を追跡
                 if self.expr_is_pack(&assign.value) {
                     self.pack_vars.insert(assign.target.clone());
+                    // Record per-field static kinds for pack literals so a
+                    // later `p.x` field read carries its element kind into
+                    // display dispatch (Float/Bool payloads are invisible
+                    // to the value heuristics).
+                    if let Expr::BuchiPack(fields, _) = &assign.value {
+                        let kinds: std::collections::HashMap<String, i64> = fields
+                            .iter()
+                            .filter(|f| !matches!(f.value, Expr::Placeholder(_)))
+                            .map(|f| (f.name.clone(), self.expr_type_tag(&f.value)))
+                            .collect();
+                        self.pack_field_kinds.insert(assign.target.clone(), kinds);
+                    } else {
+                        self.pack_field_kinds.remove(&assign.target);
+                    }
                 }
                 // retain-on-store: List を返す式の結果を追跡
                 if self.expr_is_list(&assign.value) {
@@ -2043,6 +2560,7 @@ impl Lowering {
                 // has_value branch.
                 if let Some(result) = self.try_lower_fused_unmold(func, &uf.source)? {
                     func.push(IrInst::DefVar(uf.target.clone(), result));
+                    self.maybe_globalize_toplevel_binding(func, &uf.target, result);
                     self.track_unmold_type(&uf.target, &uf.source);
                     // A rebind invalidates any previous shadow kind for
                     // this name (mirrors maybe_capture_shadow_kind).
@@ -2060,6 +2578,7 @@ impl Lowering {
                     vec![source_var],
                 ));
                 func.push(IrInst::DefVar(uf.target.clone(), result));
+                self.maybe_globalize_toplevel_binding(func, &uf.target, result);
                 // Track type from mold source for debug display
                 self.track_unmold_type(&uf.target, &uf.source);
                 self.maybe_capture_shadow_kind(func, &uf.target, &uf.source, source_var);
@@ -2074,6 +2593,7 @@ impl Lowering {
                 // F58 P2-4: same direct-form fusion as UnmoldForward.
                 if let Some(result) = self.try_lower_fused_unmold(func, &ub.source)? {
                     func.push(IrInst::DefVar(ub.target.clone(), result));
+                    self.maybe_globalize_toplevel_binding(func, &ub.target, result);
                     self.track_unmold_type(&ub.target, &ub.source);
                     self.shadow_kind_vars.remove(&ub.target);
                     if Self::NET_BUILTIN_NAMES.contains(&ub.target.as_str()) {
@@ -2089,6 +2609,7 @@ impl Lowering {
                     vec![source_var],
                 ));
                 func.push(IrInst::DefVar(ub.target.clone(), result));
+                self.maybe_globalize_toplevel_binding(func, &ub.target, result);
                 // Track type from mold source for debug display
                 self.track_unmold_type(&ub.target, &ub.source);
                 self.maybe_capture_shadow_kind(func, &ub.target, &ub.source, source_var);
@@ -2118,7 +2639,7 @@ impl Lowering {
     ///
     /// Named arguments (an explicit default, etc.) keep the general
     /// materialised path.
-    fn try_lower_fused_unmold(
+    pub(super) fn try_lower_fused_unmold(
         &mut self,
         func: &mut IrFunction,
         source: &Expr,
@@ -2609,6 +3130,16 @@ impl Lowering {
         for stmt in body {
             if let Statement::Assignment(assign) = stmt {
                 bound.insert(assign.target.as_str());
+            }
+            // Unmold bindings are local definitions as well — without
+            // this, a body-local `... >=> v` whose name collides with a
+            // top-level variable would be misread as a global reference
+            // and the GlobalGet restore would clobber the local.
+            if let Statement::UnmoldForward(uf) = stmt {
+                bound.insert(uf.target.as_str());
+            }
+            if let Statement::UnmoldBackward(ub) = stmt {
+                bound.insert(ub.target.as_str());
             }
         }
         for stmt in body {

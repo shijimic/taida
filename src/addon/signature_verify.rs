@@ -522,10 +522,7 @@ mod tests {
             // against pkg::store::tests, upgrade::tests, auth::token::tests,
             // pkg::github_release::tests, etc. — every other suite that
             // touches process env vars during cargo test.
-            let lock = match crate::util::env_test_lock().lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
+            let lock = crate::util::env_test_guard();
             let prev = std::env::var(key).ok();
             // SAFETY: tests for SEC-011 env parsing; production code
             // never writes this env var.
@@ -540,10 +537,7 @@ mod tests {
         }
 
         fn unset(key: &'static str) -> Self {
-            let lock = match crate::util::env_test_lock().lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
+            let lock = crate::util::env_test_guard();
             let prev = std::env::var(key).ok();
             // SAFETY: as above.
             unsafe {

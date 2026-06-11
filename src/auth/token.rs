@@ -166,7 +166,7 @@ mod tests {
 
     #[test]
     fn test_auth_json_path_home() {
-        let _guard = crate::util::env_test_lock().lock().unwrap();
+        let _guard = crate::util::env_test_guard();
         // HOME が設定されている場合はそれを使う
         let path = auth_json_path().expect("auth_json_path should succeed when HOME is set");
         assert!(path.to_string_lossy().ends_with(".taida/auth.json"));
@@ -174,7 +174,7 @@ mod tests {
 
     #[test]
     fn test_auth_json_path_userprofile_fallback() {
-        let _guard = crate::util::env_test_lock().lock().unwrap();
+        let _guard = crate::util::env_test_guard();
 
         let original_home = env::var("HOME").ok();
         let tmp = env::temp_dir().join("taida_test_userprofile");
@@ -209,7 +209,7 @@ mod tests {
 
     #[test]
     fn test_auth_json_path_no_home_no_userprofile() {
-        let _guard = crate::util::env_test_lock().lock().unwrap();
+        let _guard = crate::util::env_test_guard();
 
         let original_home = env::var("HOME").ok();
         let original_userprofile = env::var("USERPROFILE").ok();
@@ -272,7 +272,7 @@ mod tests {
 
     #[test]
     fn test_save_token_sets_permissions() {
-        let _guard = crate::util::env_test_lock().lock().unwrap();
+        let _guard = crate::util::env_test_guard();
 
         let tmp = env::temp_dir().join("taida_test_auth_perms");
         let _ = fs::remove_dir_all(&tmp);

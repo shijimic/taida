@@ -9,6 +9,23 @@
 #include <stdint.h>
 
 extern void *wasm_alloc(unsigned int size);
+extern char *_wasm_str_alloc(unsigned int total); /* header-carrying */
+
+/* Header-carrying string literal — the profile-runtime twin of the
+   core runtime's WSTR. Every string entering the Taida value space
+   must carry the magic word: identification is positive-only (no byte
+   heuristics), so a bare C literal cast to int64_t is invisible to
+   _wasm_is_string_ptr and renders as a pointer-valued integer. */
+#define WSTR_MAGIC 0x5441494453545300LL /* "TAIDSTS\0" */
+#define WSTR(str) \
+    ({ \
+        static const struct { \
+            int64_t m; \
+            char s[sizeof(str)]; \
+        } _wstr_lit = {WSTR_MAGIC, str}; \
+        (int64_t)(intptr_t)_wstr_lit.s; \
+    })
+
 extern int32_t wasm_arena_enter(void);
 extern void wasm_arena_leave(int32_t saved);
 
@@ -111,7 +128,7 @@ static void abi_memcpy(void *dest, const void *src, int32_t n) {
 
 static char *abi_copy_bytes(const char *src, int32_t len) {
     if (len < 0) len = 0;
-    char *out = (char *)wasm_alloc((unsigned int)(len + 1));
+    char *out = (char *)_wasm_str_alloc((unsigned int)(len + 1));
     if (!out) return (char *)"";
     if (src && len > 0) abi_memcpy(out, src, len);
     out[len] = '\0';
@@ -369,7 +386,7 @@ int64_t taida_abi_response_header(int64_t name_ptr, int64_t value_ptr, int64_t r
 int32_t taida_abi_web_alloc(int32_t len) {
     if (len < 0 || len > TAIDA_ABI_WEB_MAX_REQUEST_BYTES) return 0;
     int32_t arena_mark = wasm_arena_enter();
-    char *buf = (char *)wasm_alloc((unsigned int)(len + 1));
+    char *buf = (char *)_wasm_str_alloc((unsigned int)(len + 1));
     if (!buf) {
         wasm_arena_leave(arena_mark);
         return 0;
@@ -552,7 +569,7 @@ static void abi_json_append_utf8(char *out, int32_t *out_len, int cp) {
 static char *abi_json_parse_string(const char *json, int32_t len, int32_t *p) {
     if (*p >= len || json[*p] != '"') return (char *)0;
     (*p)++;
-    char *out = (char *)wasm_alloc((unsigned int)(len - *p + 1));
+    char *out = (char *)_wasm_str_alloc((unsigned int)(len - *p + 1));
     int32_t out_len = 0;
     while (*p < len) {
         char c = json[*p];
@@ -865,7 +882,7 @@ static char *abi_base64_decode(const char *src, int32_t *out_len) {
         if (out_len) *out_len = 0;
         return abi_copy_cstr("");
     }
-    char *out = (char *)wasm_alloc((unsigned int)((len / 4) * 3 + 4));
+    char *out = (char *)_wasm_str_alloc((unsigned int)((len / 4) * 3 + 4));
     if (!out) {
         if (out_len) *out_len = 0;
         return abi_copy_cstr("");
@@ -935,7 +952,7 @@ int64_t taida_abi_web_make_request(int32_t ptr, int32_t len) {
 static void abi_jb_init(TaidaAbiJsonBuilder *jb, int32_t cap) {
     jb->cap = cap < 64 ? 64 : cap;
     jb->len = 0;
-    jb->buf = (char *)wasm_alloc((unsigned int)jb->cap);
+    jb->buf = (char *)_wasm_str_alloc((unsigned int)jb->cap);
     jb->buf[0] = '\0';
 }
 
@@ -943,7 +960,7 @@ static void abi_jb_reserve(TaidaAbiJsonBuilder *jb, int32_t extra) {
     if (jb->len + extra + 1 <= jb->cap) return;
     int32_t new_cap = jb->cap * 2;
     while (jb->len + extra + 1 > new_cap) new_cap *= 2;
-    char *next = (char *)wasm_alloc((unsigned int)new_cap);
+    char *next = (char *)_wasm_str_alloc((unsigned int)new_cap);
     abi_memcpy(next, jb->buf, jb->len);
     next[jb->len] = '\0';
     jb->buf = next;
@@ -1087,7 +1104,7 @@ static int abi_is_list_value(int64_t value) {
 
 static int64_t abi_host_error(const char *message) {
     return taida_make_error(
-        (int64_t)(intptr_t)"HostCapabilityError",
+        WSTR("HostCapabilityError"),
         (int64_t)(intptr_t)(message ? message : "host capability error"));
 }
 
@@ -1095,7 +1112,8 @@ int64_t taida_abi_host_capability(int64_t name, int64_t kind) {
     int64_t pack = taida_pack_new(3);
     taida_pack_set_hash(pack, 0, abi_hash_cstr("__type"));
     taida_pack_set_tag(pack, 0, ABI_TAG_STR);
-    taida_pack_set(pack, 0, (int64_t)(intptr_t)"HostCapability");
+    taida_pack_set(pack, 0, WSTR("HostCapability"));
+    taida_pack_set_tag(pack, 0, 3 /* STR */);
     taida_pack_set_hash(pack, 1, abi_hash_cstr("name"));
     taida_pack_set_tag(pack, 1, ABI_TAG_STR);
     taida_pack_set(pack, 1, name);
@@ -1109,7 +1127,8 @@ int64_t taida_abi_host_step(int64_t method, int64_t args, int64_t args_schema) {
     int64_t pack = taida_pack_new(4);
     taida_pack_set_hash(pack, 0, abi_hash_cstr("__type"));
     taida_pack_set_tag(pack, 0, ABI_TAG_STR);
-    taida_pack_set(pack, 0, (int64_t)(intptr_t)"HostStep");
+    taida_pack_set(pack, 0, WSTR("HostStep"));
+    taida_pack_set_tag(pack, 0, 3 /* STR */);
     taida_pack_set_hash(pack, 1, abi_hash_cstr("method"));
     taida_pack_set_tag(pack, 1, ABI_TAG_STR);
     taida_pack_set(pack, 1, method);
@@ -1126,7 +1145,8 @@ int64_t taida_abi_host_call(int64_t steps, int64_t schema) {
     int64_t pack = taida_pack_new(3);
     taida_pack_set_hash(pack, 0, abi_hash_cstr("__type"));
     taida_pack_set_tag(pack, 0, ABI_TAG_STR);
-    taida_pack_set(pack, 0, (int64_t)(intptr_t)"HostCall");
+    taida_pack_set(pack, 0, WSTR("HostCall"));
+    taida_pack_set_tag(pack, 0, 3 /* STR */);
     taida_pack_set_hash(pack, 1, abi_hash_cstr("steps"));
     taida_pack_set_tag(pack, 1, ABI_TAG_LIST);
     taida_pack_set(pack, 1, steps);
@@ -1230,7 +1250,7 @@ int64_t taida_abi_web_store_pending_host_call_json(int32_t request_ptr, int32_t 
     if (!abi_host_pending_json) {
         return taida_abi_web_store_error_response_json(
             500,
-            (int64_t)(intptr_t)"host call payload missing");
+            WSTR("host call payload missing"));
     }
     for (int32_t probe = 0; probe < TAIDA_ABI_WEB_OUT_TABLE_SIZE; probe++) {
         int32_t slot = (abi_web_out_next + probe) % TAIDA_ABI_WEB_OUT_TABLE_SIZE;
@@ -1253,7 +1273,7 @@ int64_t taida_abi_web_store_pending_host_call_json(int32_t request_ptr, int32_t 
     }
     return taida_abi_web_store_error_response_json(
         500,
-        (int64_t)(intptr_t)"host call output table full");
+        WSTR("host call output table full"));
 }
 
 int64_t taida_abi_web_store_response_json(int64_t response) {

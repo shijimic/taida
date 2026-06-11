@@ -7,6 +7,6 @@ sumSquares items: @[Int] =
   Map[items, squareLocal]() >=> squared
   Sum[squared]() >=> total
   total
-=> :Num
+=> :Int
 
 <<< @(sumSquares)

@@ -20,6 +20,14 @@ pub struct JsCodegen {
     enum_defs: std::collections::HashMap<String, Vec<String>>,
     /// Set of function names that need trampoline wrapping (self or mutual recursion)
     trampoline_funcs: std::collections::HashSet<String>,
+    /// `node_id`s of `Append[p, item]()` sites in the function being
+    /// generated that passed the shared consume analysis
+    /// (`parser::append_consume_plan`); these emit `AppendConsume`.
+    append_consume_sites: std::collections::HashSet<usize>,
+    /// The consumed accumulator's parameter index — a self tail call
+    /// whose argument at this slot is one of the sites above sets the
+    /// `__TaidaTailCall` owned flag.
+    append_consume_param_idx: Option<usize>,
     /// Set of function names that contain >=> (unmold) and need `async function` generation
     async_funcs: std::collections::HashSet<String>,
     /// Whether we are currently generating code inside an async context.
@@ -156,6 +164,8 @@ const PRELUDE_RESERVED_IDENTS: &[&str] = &[
     "Log2",
     "Lower",
     "Map",
+    "Max",
+    "Min",
     "Mod_mold",
     "None",
     "Ok",
@@ -283,6 +293,8 @@ impl JsCodegen {
             mold_field_registry: std::collections::HashMap::new(),
             enum_defs: std::collections::HashMap::new(),
             trampoline_funcs: std::collections::HashSet::new(),
+            append_consume_sites: std::collections::HashSet::new(),
+            append_consume_param_idx: None,
             async_funcs: std::collections::HashSet::new(),
             in_async_context: true, // top-level is async (ESM top-level await)
             source_file: None,
@@ -533,6 +545,15 @@ impl JsCodegen {
             // r` drifts to `debug(r)` → `String(0)` → `"0"`.
             Expr::MoldInst(name, type_args, _, _) if name == "Div" || name == "Mod" => {
                 type_args.iter().any(|a| self.is_float_origin_expr(a))
+            }
+            // getOrDefault's result type follows its default argument
+            // (the checker enforces that the Lax payload and the default
+            // agree), so a Float default propagates Float origin — this
+            // carries `Float["NaN"]().getOrDefault(0.0)` into the
+            // `__taida_float_render` path (`inf` / `-inf`, not JS'
+            // `Infinity`).
+            Expr::MethodCall(_, method, args, _) if method == "getOrDefault" => {
+                args.first().is_some_and(|a| self.is_float_origin_expr(a))
             }
             _ => false,
         }
@@ -1332,6 +1353,21 @@ impl JsCodegen {
         let is_async_fn = self.async_funcs.contains(&func_def.name);
         // Trampoline functions can be async if they call async functions
         let needs_async = is_async_fn;
+        // Append-consume: the owned flag lives in the synchronous
+        // trampoline loop, so only sync trampoline functions qualify
+        // (an `await` between the flag set and the consume site would
+        // let unrelated tasks interleave). The shape analysis is shared
+        // with the interpreter (parser::append_consume_plan).
+        let prev_consume_sites = std::mem::take(&mut self.append_consume_sites);
+        let prev_consume_idx = self.append_consume_param_idx.take();
+        if needs_trampoline
+            && !needs_async
+            && let Some(plan) =
+                crate::parser::append_consume_plan(&func_def.name, &func_def.params, &func_def.body)
+        {
+            self.append_consume_sites = plan.sites;
+            self.append_consume_param_idx = Some(plan.param_idx);
+        }
         let params: Vec<String> = func_def.params.iter().map(|p| p.name.clone()).collect();
 
         // Save async context — set to true for async functions so >=> generates `await`
@@ -1459,6 +1495,8 @@ impl JsCodegen {
 
         // Restore async context
         self.in_async_context = prev_async_context;
+        self.append_consume_sites = prev_consume_sites;
+        self.append_consume_param_idx = prev_consume_idx;
         Ok(())
     }
 
@@ -3018,6 +3056,16 @@ impl JsCodegen {
                     // user-func name when the Taida name collides with a
                     // prelude reserved identifier.
                     let inner_name = self.js_user_func_ident(name);
+                    // A tail call whose accumulator slot carries a
+                    // proven AppendConsume site hands the loop an owned
+                    // list — flag it so the trampoline lets the next
+                    // iteration push in place.
+                    let owned = self.append_consume_param_idx.is_some_and(|pi| {
+                        args.get(pi).is_some_and(|a| {
+                            matches!(a, Expr::MoldInst(_, _, _, s)
+                                if self.append_consume_sites.contains(&s.node_id))
+                        })
+                    });
                     self.write(&format!("new __TaidaTailCall(__inner_{}, [", inner_name));
                     for (i, arg) in args.iter().enumerate() {
                         if i > 0 {
@@ -3025,7 +3073,7 @@ impl JsCodegen {
                         }
                         self.gen_expr(arg)?;
                     }
-                    self.write("])");
+                    self.write(if owned { "], true)" } else { "])" });
                     return Ok(());
                 }
 
@@ -3374,8 +3422,23 @@ impl JsCodegen {
                 self.write(&format!("__taida_enumVal('{}', {})", enum_name, ordinal));
                 Ok(())
             }
-            Expr::MoldInst(name, type_args, fields, _) => {
+            Expr::MoldInst(name, type_args, fields, span) => {
                 // B5: MoldInst → function call with type args
+
+                // Append-consume site (shared shape analysis keyed by
+                // node_id): emit the consuming runtime variant. Sites
+                // outside the proven shape keep the copying `Append`.
+                if name == "Append"
+                    && type_args.len() == 2
+                    && self.append_consume_sites.contains(&span.node_id)
+                {
+                    self.write("AppendConsume(");
+                    self.gen_expr(&type_args[0])?;
+                    self.write(", ");
+                    self.gen_expr(&type_args[1])?;
+                    self.write(")");
+                    return Ok(());
+                }
 
                 if name == "TypeName" {
                     if type_args.len() != 1 {

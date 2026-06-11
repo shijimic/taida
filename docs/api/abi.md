@@ -83,7 +83,7 @@ WebResponse = @(
 
 handle req: WebRequest =
   header("x-taida", "ok", status(201, text("created: " + req.path)))
-  => :WebResponse
+=> :WebResponse
 ```
 
 ---
@@ -173,7 +173,7 @@ taida build wasm-edge --handler handle app.td -o app.wasm
 
 handle req: WebRequest =
   text(req.method + " " + req.path)
-  => :WebResponse
+=> :WebResponse
 ```
 
 handler mode は次の条件を満たさない場合、コンパイル時に拒否されます。

@@ -134,12 +134,12 @@ email <= pilot.contact.email  // "rei@nerv.jp"
 
 ## 関数を含むぶちパック
 
-ぶちパック内に関数を定義できます:
+ぶちパックのフィールドには lambda を束縛できます。フィールドは常に `name <= 値` の名前付き形なので、関数フィールドも `name <= _ 引数... = 本体` の lambda 束縛で書きます (`add x: Int ... = ...` のような関数定義構文をフィールド位置に直接書くことはできません — `[E1521]`):
 
 ```taida
 mathUtils <= @(
-  add x: Int y: Int = x + y => :Int,
-  subtract x: Int y: Int = x - y => :Int,
+  add <= _ x: Int y: Int = x + y,
+  subtract <= _ x: Int y: Int = x - y,
   PI <= 3.14159
 )
 
@@ -210,7 +210,7 @@ pilots: @[Pilot] <= @[
 
 の系「ふくろの中身が変わったら、別のふくろにしまいなおす」を参照してください。
 
-```taida
+```taida fragment
 // OK: 縮小型を明示
 removePrice item: @(name: Str, price: Int) = ... => :@(name: Str)
 

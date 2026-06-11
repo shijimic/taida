@@ -145,18 +145,21 @@ Point = @(x: Int, y: Int)
 <<< add
 ```
 
-### ワンライナー
+### 定義してからエクスポート
 
-```taida
-<<< double x: Int = x * 2 => :Int
+エクスポート文に関数定義を直接書くことはできません。定義と `<<<` は別の文に分けます。
+
+```taida fragment
+double x: Int = x * 2 => :Int
+<<< double
 ```
 
 ### 構造化エクスポート
 
 ```taida
 mathUtils <= @(
-  add x: Int y: Int = x + y => :Int,
-  subtract x: Int y: Int = x - y => :Int,
+  add <= _ x: Int y: Int = x + y,
+  subtract <= _ x: Int y: Int = x - y,
   PI <= 3.14159
 )
 

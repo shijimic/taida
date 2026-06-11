@@ -305,6 +305,13 @@ impl TypeChecker {
             Expr::StringLit(_, _) => Type::Str,
             Expr::TemplateLit(template, span) => {
                 self.check_comparison_errors_in_template(template, span);
+                // Interpolation bodies are full expressions at runtime —
+                // infer them so an undefined variable inside `${...}`
+                // gets its [E1542] here instead of failing only on the
+                // interpreter (the compiled backends would render 0).
+                for inner in super::check::template_interpolation_exprs(template) {
+                    self.infer_expr_type(&inner);
+                }
                 Type::Str
             }
             Expr::BoolLit(_, _) => Type::Bool,
@@ -347,7 +354,7 @@ impl TypeChecker {
                 } else {
                     self.errors.push(TypeError {
                         message: format!(
-                            "[E1502] Undefined variable '{}'. \
+                            "[E1542] Undefined variable '{}'. \
                              Hint: Check the variable name for typos, or define it before use.",
                             name
                         ),
@@ -1664,7 +1671,7 @@ impl TypeChecker {
                 // step is an `Expr::Ident(name)` and `name` is NOT already a
                 // known function / type / mold / builtin, we register it as
                 // a local binding carrying the current step's type rather
-                // than reporting `[E1502] Undefined variable`.
+                // than reporting `[E1542] Undefined variable`.
                 let old_in_pipeline = self.in_pipeline;
                 let last_idx = exprs.len().saturating_sub(1);
                 // A fresh scope holds any intermediate bind-and-forward bindings.
@@ -1769,6 +1776,33 @@ impl TypeChecker {
                     }
                     // JSON[raw, Schema]() returns Lax[Schema].
                     "JSON" => {
+                        // [E1541] An undefined schema name used to slip
+                        // through to a runtime error even though the JSON
+                        // guide promises compile-time rejection. Simple
+                        // names must resolve to a registered schema; list
+                        // and generic schema forms validate their inner
+                        // names through the same recursion at cast time.
+                        if let Some(Expr::Ident(n, sp) | Expr::TypeLiteral(n, None, sp)) =
+                            type_args.get(1)
+                        {
+                            let known = matches!(
+                                n.as_str(),
+                                "Int" | "Num" | "Float" | "Str" | "Bytes" | "Bool" | "JSON"
+                            ) || self.registry.type_defs.contains_key(n)
+                                || self.registry.mold_defs.contains_key(n)
+                                || self.registry.error_types.contains_key(n)
+                                || self.registry.enum_defs.contains_key(n)
+                                || self.declared_concrete_type_names.contains(n);
+                            if !known {
+                                self.errors.push(TypeError {
+                                    message: format!(
+                                        "[E1541] JSON schema '{}' is not defined. Define it (`{} = @(...)`) or import it before casting.",
+                                        n, n
+                                    ),
+                                    span: sp.clone(),
+                                });
+                            }
+                        }
                         let schema_ty = type_args
                             .get(1)
                             .map(|arg| self.type_arg_expr_to_type(arg))
@@ -2241,11 +2275,66 @@ impl TypeChecker {
                     "ToRadix" => Type::Generic("Lax".to_string(), vec![Type::Str]),
                     "ByteSet" => Type::Generic("Lax".to_string(), vec![Type::Bytes]),
                     "BytesToList" => Type::List(Box::new(Type::Int)),
-                    // HOF molds return the appropriate type
-                    // If input is Stream[T], output is also Stream[U]
-                    "Map" | "Filter" | "Sort" | "Unique" | "Flatten" | "Reverse" | "Take"
-                    | "TakeWhile" | "Drop" | "DropWhile" | "Append" | "Prepend" | "Zip"
-                    | "Enumerate" => {
+                    // Map transforms the element type: the callback's return
+                    // type IS the output element type. The old shape-preserving
+                    // read (input list type passed through) made every
+                    // type-changing map a phantom [E1506] downstream. The
+                    // callback is inferred WITH the expected function type
+                    // `(T) => ?` so an unannotated lambda picks its parameter
+                    // type up from the list — annotations stay "write them
+                    // when the context cannot supply the type".
+                    "Map" => {
+                        let arg_type = type_args
+                            .first()
+                            .map(|a| self.infer_expr_type(a))
+                            .unwrap_or(Type::Unknown);
+                        let elem = Self::mold_list_elem_type(&arg_type);
+                        let out_elem = self.infer_mold_callback_ret(
+                            type_args.get(1),
+                            vec![elem],
+                            Type::Unknown,
+                        );
+                        if matches!(arg_type, Type::Generic(ref n, _) if n == "Stream") {
+                            Type::Generic("Stream".to_string(), vec![out_elem])
+                        } else {
+                            Type::List(Box::new(out_elem))
+                        }
+                    }
+                    // Shape-preserving HOFs: the predicate's parameter type
+                    // flows from the list elements (same hint mechanism as
+                    // method-position lambdas), the container type passes
+                    // through unchanged.
+                    "Filter" | "TakeWhile" | "DropWhile" => {
+                        let arg_type = type_args
+                            .first()
+                            .map(|a| self.infer_expr_type(a))
+                            .unwrap_or(Type::Unknown);
+                        let elem = Self::mold_list_elem_type(&arg_type);
+                        let _ =
+                            self.infer_mold_callback_ret(type_args.get(1), vec![elem], Type::Bool);
+                        if matches!(arg_type, Type::Generic(ref n, _) if n == "Stream")
+                            || matches!(arg_type, Type::List(_))
+                        {
+                            arg_type
+                        } else {
+                            Type::List(Box::new(Type::Unknown))
+                        }
+                    }
+                    // Enumerate/Zip CHANGE the element type (index/value
+                    // pairs) — returning the input list type pushed a wrong
+                    // parameter hint into downstream Map callbacks and made
+                    // user annotations fail [E1528]. Until the pair pack has
+                    // a checker representation they answer honestly.
+                    "Enumerate" | "Zip" => Type::List(Box::new(Type::Unknown)),
+                    // Flatten peels one list layer.
+                    "Flatten" => match type_args.first().map(|a| self.infer_expr_type(a)) {
+                        Some(Type::List(inner)) => match *inner {
+                            Type::List(elem) => Type::List(elem),
+                            _ => Type::List(Box::new(Type::Unknown)),
+                        },
+                        _ => Type::List(Box::new(Type::Unknown)),
+                    },
+                    "Sort" | "Unique" | "Reverse" | "Take" | "Drop" | "Append" | "Prepend" => {
                         // These return a list or stream (same or transformed)
                         if let Some(first_arg) = type_args.first() {
                             let arg_type = self.infer_expr_type(first_arg);
@@ -2283,12 +2372,30 @@ impl TypeChecker {
                         }
                     }
                     "Fold" | "Foldr" | "Reduce" => {
-                        // Returns the accumulator type (first arg)
-                        if let Some(first_arg) = type_args.first() {
-                            self.infer_expr_type(first_arg)
+                        // Fold[list, init, fn]: returns the accumulator
+                        // type — the INIT argument at index 1, not the
+                        // list at index 0. The old first-arg read made
+                        // every function ending in an unmolded fold
+                        // fail [E1601] with "body returns @[T]".
+                        // The callback receives (Acc, T) and returns Acc —
+                        // hint it so unannotated lambda params resolve.
+                        let elem = Self::mold_list_elem_type(
+                            &type_args
+                                .first()
+                                .map(|a| self.infer_expr_type(a))
+                                .unwrap_or(Type::Unknown),
+                        );
+                        let acc = if let Some(init_arg) = type_args.get(1) {
+                            self.infer_expr_type(init_arg)
                         } else {
                             Type::Unknown
-                        }
+                        };
+                        let _ = self.infer_mold_callback_ret(
+                            type_args.get(2),
+                            vec![acc.clone(), elem],
+                            acc.clone(),
+                        );
+                        acc
                     }
                     // String / Bytes operation molds
                     // B11-5d: If[cond, then, else]() returns the type of the then branch
@@ -2399,9 +2506,59 @@ impl TypeChecker {
                         }
                     }
                     "Join" => Type::Str,
-                    "Sum" => Type::Num,
-                    "Find" => Type::Generic("Lax".to_string(), vec![Type::Unknown]),
-                    "FindIndex" | "Count" => Type::Int,
+                    // Sum of @[Int] is Int, of @[Float] is Float. Num is a
+                    // constraint marker (not annotatable as a value type),
+                    // so pinning Sum to Num forced every annotated caller
+                    // into the now-rejected `=> :Num`. Unknown element
+                    // types surface as Unknown (checker-permissive) so the
+                    // caller can still annotate the concrete type.
+                    "Sum" => match type_args.first().map(|a| self.infer_expr_type(a)) {
+                        Some(Type::List(inner)) if inner.is_numeric() => *inner,
+                        Some(Type::List(inner)) if *inner == Type::Unknown => Type::Unknown,
+                        Some(Type::Unknown) | None => Type::Unknown,
+                        _ => Type::Num,
+                    },
+                    // Min/Max molds: Lax of the element type (the spec table
+                    // registered them but no inference arm existed).
+                    "Min" | "Max" => {
+                        let elem = Self::mold_list_elem_type(
+                            &type_args
+                                .first()
+                                .map(|a| self.infer_expr_type(a))
+                                .unwrap_or(Type::Unknown),
+                        );
+                        Type::Generic("Lax".to_string(), vec![elem])
+                    }
+                    // Find[list, pred]: Lax of the ELEMENT type — the old
+                    // hardcoded Lax[Unknown] left every bare `>=>` unmold
+                    // unresolvable ([E1529] on the canonical docs form).
+                    // The predicate gets the `(T) => Bool` hint like the
+                    // other HOFs.
+                    "Find" => {
+                        let elem = Self::mold_list_elem_type(
+                            &type_args
+                                .first()
+                                .map(|a| self.infer_expr_type(a))
+                                .unwrap_or(Type::Unknown),
+                        );
+                        let _ = self.infer_mold_callback_ret(
+                            type_args.get(1),
+                            vec![elem.clone()],
+                            Type::Bool,
+                        );
+                        Type::Generic("Lax".to_string(), vec![elem])
+                    }
+                    "FindIndex" | "Count" => {
+                        let elem = Self::mold_list_elem_type(
+                            &type_args
+                                .first()
+                                .map(|a| self.infer_expr_type(a))
+                                .unwrap_or(Type::Unknown),
+                        );
+                        let _ =
+                            self.infer_mold_callback_ret(type_args.get(1), vec![elem], Type::Bool);
+                        Type::Int
+                    }
                     // E32B-022 (Lock-N): Lax[Int]-returning replacement for
                     // the legacy `-1`-sentinel `FindIndex`.
                     "FindIndexLax" => Type::Generic("Lax".to_string(), vec![Type::Int]),
@@ -2992,6 +3149,40 @@ impl TypeChecker {
 
     pub(super) fn infer_expr_type_with_expected(&mut self, expr: &Expr, expected: &Type) -> Type {
         self.infer_expr_type_with_expected_inner(expr, expected, FunctionHintDiagnostic::MethodArg)
+    }
+
+    /// Element type of a list/stream argument, for HOF-mold callback hints.
+    pub(super) fn mold_list_elem_type(arg_type: &Type) -> Type {
+        match arg_type {
+            Type::List(inner) => (**inner).clone(),
+            Type::Generic(n, params) if n == "Stream" => {
+                params.first().cloned().unwrap_or(Type::Unknown)
+            }
+            _ => Type::Unknown,
+        }
+    }
+
+    /// Infer a HOF-mold callback argument WITH the expected function type
+    /// `(param_hints...) => ret_hint`, so an unannotated lambda picks its
+    /// parameter types up from the container — the same hint mechanism
+    /// method-position lambdas already get (mold positions used to skip
+    /// it entirely, so `Map[xs, _ x = x * 2]()` always died on [E1527]).
+    /// Returns the callback's actual return type, Unknown when it cannot
+    /// be determined.
+    fn infer_mold_callback_ret(
+        &mut self,
+        cb: Option<&Expr>,
+        param_hints: Vec<Type>,
+        ret_hint: Type,
+    ) -> Type {
+        let Some(cb) = cb else {
+            return Type::Unknown;
+        };
+        let expected = Type::Function(param_hints, Box::new(ret_hint));
+        match self.infer_expr_type_with_expected(cb, &expected) {
+            Type::Function(_, ret) => *ret,
+            _ => Type::Unknown,
+        }
     }
 
     fn fill_unknowns_from_expected(inferred: &Type, expected: &Type) -> Type {

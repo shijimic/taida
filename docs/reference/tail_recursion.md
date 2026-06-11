@@ -169,7 +169,7 @@ factorial n: Int =
 
 ### After: 末尾再帰
 
-```taida
+```taida fragment
 // スタックは1回のみ（最適化される）
 factorial n: Int =
   factorialTail n 1
@@ -190,7 +190,7 @@ factorialTail n: Int acc: Int =
 ```taida
 // 末尾再帰版
 sum list: @[Int] =
-  sumTail list 0
+  sumTail(list, 0)
 => :Int
 
 sumTail list: @[Int] acc: Int =
@@ -204,7 +204,7 @@ sumTail list: @[Int] acc: Int =
 
 ### リストの反転
 
-```taida
+```taida fragment
 // 末尾再帰版
 reverse list: @[Int] =
   reverseTail list @[]
@@ -222,7 +222,7 @@ reverseTail list: @[Int] acc: @[Int] =
 
 ### フィボナッチ数列
 
-```taida
+```taida fragment
 // 末尾再帰版
 fibonacci n: Int =
   fibTail n 0 1
@@ -241,15 +241,15 @@ fibTail n: Int a: Int b: Int =
 
 ```taida
 binarySearch list: @[Int] target: Int =
-  searchTail list target 0 (list.length() - 1)
+  searchTail(list, target, 0, list.length() - 1)
 => :Lax[Int]
 
 searchTail list: @[Int] target: Int low: Int high: Int =
-  | low > high |> Lax[Int]()                           // 見つからなかった (has_value = false)
+  | low > high |> list.get(-1)                         // 範囲外 get = 空の Lax[Int] (見つからなかった)
   | _ |>
     Div[low + high, 2]() >=> mid
     list.get(mid) >=> value
-    | value == target |> Lax[Int](mid)                 // 見つかった
+    | value == target |> Lax[mid]()                    // 見つかった (has_value = true)
     | value < target |> searchTail(list, target, mid + 1, high)
     | _ |> searchTail(list, target, low, mid - 1)
 => :Lax[Int]
@@ -261,7 +261,7 @@ searchTail list: @[Int] target: Int low: Int high: Int =
 
 ```taida
 repeat str: Str n: Int =
-  repeatTail str n ""
+  repeatTail(str, n, "")
 => :Str
 
 repeatTail str: Str n: Int acc: Str =
@@ -435,7 +435,7 @@ factorial10 <= factorialCPS(10, _ x = x)
 
 大量のデータを処理する再帰関数では、末尾再帰パターンを使用することを推奨します。
 
-```taida
+```taida fragment
 // 良い例: 末尾再帰（大きなリストでも安全）
 sumTail list @[]
 

@@ -755,6 +755,14 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr, Val],
             returns: &[Ptr],
         },
+        "taida_list_append_k" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_list_append_consume_k" => RuntimeAbi {
+            params: &[Ptr, Val, Val, Val],
+            returns: &[Ptr],
+        },
         "taida_list_prepend" => RuntimeAbi {
             params: &[Ptr, Val],
             returns: &[Ptr],
@@ -2112,6 +2120,11 @@ struct EmitCtx {
     str_globals: HashMap<IrVar, clif::GlobalValue>,
     /// TCO: ループ先頭ブロック（末尾再帰用）
     tco_loop_block: Option<clif::Block>,
+    /// Ownership bit for the consume-append rewrite (loop machinery:
+    /// 0 on entry, 1 after every self tail-call). A Cranelift Variable
+    /// because it mutates across the loop back-edge — named IR vars
+    /// resolve statically here and cannot carry that.
+    tco_owned_var: Option<cranelift_frontend::Variable>,
     /// TCO: パラメータ Variable のリスト（引数の再代入用）
     tco_param_vars: Vec<cranelift_frontend::Variable>,
     /// ターゲットの呼出規約（CallIndirect 等で使用）
@@ -2651,6 +2664,7 @@ impl Emitter {
                 func_refs,
                 str_globals,
                 tco_loop_block: None,
+                tco_owned_var: None,
                 tco_param_vars: Vec::new(),
                 call_conv: self.abi.call_conv(),
                 value_ty: self.abi.value_ty(),
@@ -2669,6 +2683,13 @@ impl Emitter {
                     // IrVar のマッピングも設定
                     ectx.val_map.insert(i as IrVar, block_params[i]);
                     ectx.named_vars.insert(param_name.clone(), block_params[i]);
+                }
+
+                if ir_func.append_consume_owned {
+                    let owned = builder.declare_var(types::I64);
+                    let zero = builder.ins().iconst(types::I64, 0);
+                    builder.def_var(owned, zero);
+                    ectx.tco_owned_var = Some(owned);
                 }
 
                 // ループブロック（エントリから無条件ジャンプ）
@@ -2713,7 +2734,7 @@ impl Emitter {
         self.module
             .define_function(func_id, &mut self.ctx)
             .map_err(|e| EmitError {
-                message: format!("define_function failed: {}", e),
+                message: format!("define_function failed: {:?}", e),
             })?;
 
         self.module.clear_context(&mut self.ctx);
@@ -2842,6 +2863,20 @@ impl Emitter {
                 // ── Integer/Bool intrinsics: emit native instructions instead of call ──
                 if let Some(result) = Self::try_emit_intrinsic(builder, ectx, func_name, args) {
                     ectx.val_map.insert(*dst, result);
+                } else if func_name == "taida_list_append_consume_k" && args.len() == 3 {
+                    // The consume-append's trailing ownership argument is
+                    // loop machinery (see tco_owned_var), not an IR value.
+                    let owned_val = match ectx.tco_owned_var {
+                        Some(owned) => builder.use_var(owned),
+                        None => builder.ins().iconst(types::I64, 0),
+                    };
+                    let func_ref = ectx.func_refs[func_name.as_str()];
+                    let a = ectx.val_map[&args[0]];
+                    let b = ectx.val_map[&args[1]];
+                    let ek = ectx.val_map[&args[2]];
+                    let call = builder.ins().call(func_ref, &[a, b, ek, owned_val]);
+                    let result = builder.inst_results(call)[0];
+                    ectx.val_map.insert(*dst, result);
                 } else {
                     // W-0f: runtime_func_signature_for() で ectx.abi ベースの解決に統一
                     let func_ref = ectx.func_refs[func_name];
@@ -2909,6 +2944,20 @@ impl Emitter {
                                 || result_type == ectx.abi.fn_ptr_ty())
                         {
                             builder.ins().uextend(ectx.value_ty, result)
+                        } else if result_type == types::F64 && ectx.value_ty != types::F64 {
+                            // F64 return → boxed value. The val_map invariant
+                            // (every IrVar resolves to boxed value_ty — the
+                            // same one ConstFloat enforces) must hold here
+                            // too: specialised consumers like PackSet pass
+                            // values through untyped, and a raw f64 reaching
+                            // an i64 slot is a Cranelift verifier error
+                            // (e.g. a negative Float literal in a pack field,
+                            // whose value arrives via taida_float_neg).
+                            // F64-expecting params bitcast back on the way
+                            // in, so the round-trip is value-preserving.
+                            builder
+                                .ins()
+                                .bitcast(ectx.value_ty, clif::MemFlags::new(), result)
                         } else {
                             result
                         };
@@ -3063,6 +3112,13 @@ impl Emitter {
                         if i < ectx.tco_param_vars.len() {
                             builder.def_var(ectx.tco_param_vars[i], *val);
                         }
+                    }
+
+                    if let Some(owned) = ectx.tco_owned_var {
+                        // From here on the accumulator is this loop's
+                        // own list (consume-append machinery).
+                        let one = builder.ins().iconst(types::I64, 1);
+                        builder.def_var(owned, one);
                     }
 
                     builder.ins().jump(loop_block, &[]);
@@ -3234,6 +3290,13 @@ impl Emitter {
             "taida_int_neg" if args.len() == 1 => {
                 let a = ectx.val_map[&args[0]];
                 Some(builder.ins().ineg(a))
+            }
+
+            // ── Int → Float conversion (boxed f64 bits in I64) ──
+            "taida_int_to_float" if args.len() == 1 => {
+                let a = ectx.val_map[&args[0]];
+                let f = builder.ins().fcvt_from_sint(types::F64, a);
+                Some(builder.ins().bitcast(types::I64, clif::MemFlags::new(), f))
             }
 
             // ── Boolean operations ──

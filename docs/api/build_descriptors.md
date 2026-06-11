@@ -29,7 +29,7 @@
 
 > コンパイル成果物 (Native binary / `.wasm`) のディスクリプタ。
 
-```taida
+```taida fragment
 BuildUnit name: Str  target: Str  entry: Symbol  handler: Str  assets: @[RouteAsset]  before: @[BuildHook]
 ```
 
@@ -71,7 +71,7 @@ serverX <= BuildUnit(
 > 複数の `BuildUnit` をまとめるディスクリプタ。リリースゲートのルートを明示
 > したい場合や、複数 unit を一括ビルドしたい場合に使う。
 
-```taida
+```taida fragment
 BuildPlan name: Str  units: @[BuildUnit]  assets: @[AssetBundle]  before: @[BuildHook]
 ```
 
@@ -106,7 +106,7 @@ plan <= BuildPlan(
 > コピー専用の静的アセットディスクリプタ。minify / バンドル / トランスパイル
 > / 画像最適化は行わない。
 
-```taida
+```taida fragment
 AssetBundle name: Str  root: Str  files: @[Str]  output: Str  before: @[BuildHook]
 ```
 
@@ -145,7 +145,7 @@ frontendAssets <= AssetBundle(
 
 > `BuildUnit` から見た、別 unit の成果物または `AssetBundle` への経路メタデータ。
 
-```taida
+```taida fragment
 RouteAsset path: Str  unit: BuildUnit  asset: AssetBundle  name: Str
 ```
 
@@ -165,7 +165,7 @@ RouteAsset path: Str  unit: BuildUnit  asset: AssetBundle  name: Str
 
 **Example**:
 
-```taida
+```taida fragment
 RouteAsset(path <= "/a.wasm", unit <= frontendA)
 RouteAsset(path <= "/", asset <= frontendAssets)
 ```
@@ -176,7 +176,7 @@ RouteAsset(path <= "/", asset <= frontendAssets)
 
 > ビルド時前段ステップのディスクリプタ。
 
-```taida
+```taida fragment
 BuildHook name: Str  command: Str  cwd: Str  env: @[@(name: Str, value: Str)]
 ```
 

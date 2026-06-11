@@ -63,7 +63,7 @@ getDefaultPilot =
 
 ### generic function
 
-generic function は「計算手続きの抽象化」に限定します。`Mold` がデータ/solidify/unmold の抽象化を担うのに対し、generic function は inference-first で関数本体の型を共有するための仕組みです。
+generic function は「計算手続きの抽象化」に限定します。`Mold` がデータ/unmold の抽象化を担うのに対し、generic function は inference-first で関数本体の型を共有するための仕組みです。
 
 ```taida
 id[T] x: T =
@@ -168,9 +168,7 @@ safeDivide x: Int y: Int =
 
 ### 引数のデフォルト値
 
-関数引数のデフォルト値仕様は `docs/design/function_default_args.md` で固定されています。
-
-要点:
+関数引数のデフォルト値仕様の要点:
 
 1. 引数は `name: Type`（型注釈必須）
 2. `name: Type <= expr` で明示デフォルトを指定可能
@@ -194,7 +192,7 @@ sum3()         // 30
 
 関数型は `:引数型 => :戻り型` の形式です。
 
-```taida
+```taida fragment
 :Int => :Str        // Int から Str への関数
 :Int :Int => :Int   // Int, Int から Int への関数
 ```

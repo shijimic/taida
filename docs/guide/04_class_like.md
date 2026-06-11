@@ -126,7 +126,7 @@ staff.department  // "Science"
 
 親型に型引数がある場合、子側で **同じ数の型引数** を親型に渡す必要があります。
 
-```taida
+```taida fragment
 // 親型: 2 引数
 Result[T, P] = @(...)
 
@@ -220,7 +220,7 @@ ok <= Result[42, _ = true]()
 ok >=> value   // 42
 ```
 
-モールドは `solidify` / `unmold` フックで挙動が決まります。詳しくは [モールド](05_mold.md) を参照してください。
+モールドの取り出し挙動は `unmold` フックで決まります。詳しくは [モールド](05_mold.md) を参照してください。
 
 > `Mold[T] =>` は特別構文ではなく、標準ライブラリで提供される基底型 `Mold[T]` から継承しているだけです。一般化された継承構文として読みます。
 
@@ -385,7 +385,7 @@ shinji.contact.email   // "shinji@nerv.jp"
 ## 関連ドキュメント
 
 - [リテラル `@(...)` / `@[...]`](04_buchi_pack.md) — 値リテラル
-- [モールド (Mold)](05_mold.md) — `solidify` / `unmold` フック
+- [モールド (Mold)](05_mold.md) — `unmold` フック
 - [エラー処理](08_error_handling.md) — Lax / throw / `|==` / Gorillax
 - [関数](09_functions.md) — defaultFn 仕様
 - [診断コード](../reference/diagnostic_codes.md) — `[E1407]` / `[E1410]` 等

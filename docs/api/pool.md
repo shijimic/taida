@@ -23,7 +23,7 @@
 
 > プールを生成し、不透明ハンドルを返す。
 
-```taida
+```taida fragment
 poolCreate config: PoolConfig => :Result[@(pool: Pool), _]
 ```
 
@@ -69,7 +69,7 @@ pool <= created.pool
 > プールからスロットを 1 つ取得する非同期処理を返す。プールが満杯の
 > 場合は空きが出るまで (最大 `acquireTimeoutMs` まで) 待機します。
 
-```taida
+```taida fragment
 poolAcquire pool: Pool => :Async[Result[@(resource: Lax[Resource], token: Token), _]]
 poolAcquire pool: Pool  timeoutMs: Int => :Async[Result[@(resource: Lax[Resource], token: Token), _]]
 ```
@@ -109,7 +109,7 @@ poolAcquire pool: Pool  timeoutMs: Int => :Async[Result[@(resource: Lax[Resource
 
 **Example**:
 
-```taida
+```taida fragment
 |== error: Error =
   stderr("acquire failed: " + error.message)
 => :Int
@@ -130,7 +130,7 @@ poolRelease(pool, acquired.token, conn) >=> _
 
 > 取得済みのリソースをプールに返却する。
 
-```taida
+```taida fragment
 poolRelease pool: Pool  token: Token  resource: Resource => :Result[@(ok: Bool, reused: Bool), _]
 ```
 
@@ -152,7 +152,7 @@ poolRelease pool: Pool  token: Token  resource: Resource => :Result[@(ok: Bool, 
 
 **Example**:
 
-```taida
+```taida fragment
 // acquired は §2.1 の poolAcquire 成功結果 (@(resource, token)) を想定。
 poolRelease(pool, acquired.token, acquired.resource) >=> released
 | released.reused |> stdout("再利用キューへ戻った")
@@ -167,7 +167,7 @@ poolRelease(pool, acquired.token, acquired.resource) >=> released
 
 > プールを閉じ、保持しているすべてのアイドルリソースを破棄する。
 
-```taida
+```taida fragment
 poolClose pool: Pool => :Async[Result[@(ok: Bool), _]]
 ```
 
@@ -200,7 +200,7 @@ stdout("closed: " + closed.ok.toString())
 
 > プールの現在状態を観測する。
 
-```taida
+```taida fragment
 poolHealth pool: Pool => :@(open: Bool, idle: Int, inUse: Int, waiting: Int)
 ```
 

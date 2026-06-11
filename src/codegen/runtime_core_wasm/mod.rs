@@ -164,7 +164,84 @@ mod tests {
         //   _wasm_is_string_ptr. Plus the pack/list section headers now
         //   describe the trailing-magic layouts instead of "no magic".
         //   -> 466,461.
-        const EXPECTED_TOTAL_LEN: usize = 466_461;
+        // 2026-06-10 scalar-intrinsic expansion (01_core.inc.c): the
+        //   return-tag slot `__wasm_return_tag` goes non-static so the
+        //   generated C can expand taida_get/set_return_tag into a
+        //   direct slot swap (one runtime call per user-function call
+        //   otherwise), with a rationale comment. -> 466,785.
+        // 2026-06-10 positive-only identification: _looks_like_string
+        //   loses its printable-byte fallback (magic word required —
+        //   every string in the value space carries one now), the WSTR
+        //   macro wraps all 153 runtime literals entering the value
+        //   space in header-carrying statics, the _looks_like_pack
+        //   field-count cap is lifted (the tail sentinel is the proof),
+        //   and the JSON detectors (_wc_looks_like_*) delegate to the
+        //   positive 01_core implementations instead of their pre-magic
+        //   structural heuristics. _wasm_str_alloc goes non-static for
+        //   the profile runtimes. -> 464,735 (the removed fallback and
+        //   delegated duplicates outweigh the macro).
+        // 2026-06-10 early Int display paths (01_core.inc.c): stdout /
+        //   stderr _with_tag format a statically-known Int directly,
+        //   before any runtime re-detection — an Int whose value
+        //   coincides with a live string's data address carries that
+        //   string's real magic word, so detection cannot save it.
+        //   Plus the int_to_str forward declaration. -> 466,038.
+        // 2026-06-10 _wf_strstr complexity fix (01_core.inc.c): the
+        //   helper measured the whole remaining haystack on every call,
+        //   turning cursor-walking callers (Split / Replace) into
+        //   O(n^2) — a thousand-part split re-measured ~5MB of tail per
+        //   pipeline pass. Now terminator-driven. string_ops: 629ms ->
+        //   16ms. -> 466,389.
+        // 2026-06-10 empty-separator Split codepoint fix
+        //   (02_containers.inc.c): the per-byte walk tore multibyte UTF-8
+        //   apart, diverging from the locked chars-split semantics that
+        //   the interpreter / native / JS already implement. Fragments
+        //   stay empty-free per the B11 method lock. -> 467,164.
+        // 2026-06-10 loud allocation failure (01_core.inc.c): wasm_alloc
+        //   traps with a message at the 2GB heap ceiling (sign-extending
+        //   pointer-to-value casts make addresses past 2^31 negative and
+        //   silently reject as invalid — a 10k-append loop run twice
+        //   returned an empty second list) and on memory.grow failure
+        //   (used to return NULL into constructors). -> 468,580.
+        // 2026-06-10 consume-variant Append (03_typeof_list.inc.c):
+        //   taida_list_append_consume — see the native twin. -> 469,140.
+        // 2026-06-11 kind-aware hash path for Float-bearing Set ops /
+        //   unique (01_core / 03_typeof_list): Float fingerprint
+        //   canonicalisation + seen-set wiring in union/intersect/diff,
+        //   tagged linear helpers removed — see the native twin.
+        //   479,244 -> 481,465.
+        // 2026-06-11 unhandled-throw report unification
+        //   (02_containers.inc.c): the no-ceiling path writes the
+        //   interpreter's `Runtime error: Unhandled error: ...` line to
+        //   stderr and proc_exits(1) instead of trapping after a stdout
+        //   note. 481,465 -> 483,773.
+        // 2026-06-11 string-conversion parse parity
+        //   (02_containers.inc.c): the manual float parser accepts
+        //   nan / inf / infinity like the reference. 483,773 -> 484,806.
+        // 2026-06-11 code-point string indexing (01_core /
+        //   02_containers): length / get / CharAt / Slice / Reverse
+        //   walk UTF-8 lead bytes — see the native twin.
+        //   484,806 -> 486,760.
+        // 2026-06-11 public-shape container display (01_core): the
+        //   synthetic full-form renderers are removed — every display
+        //   path routes HashMap / Set through `HashMap({...})` /
+        //   `Set({...})`. 486,760 -> 482,417.
+        // 2026-06-11 throw-report DCE fix (02_containers.inc.c): the
+        //   unhandled report renders strings/scalars locally instead of
+        //   referencing the polymorphic display machinery, which pulled
+        //   ~16KB into every binary (wasm_min_size_gate caught it).
+        //   482,417 -> 483,119.
+        // 2026-06-11 edge-profile throw exit (02_containers.inc.c): the
+        //   edge handler host provides no WASI proc_exit, so the
+        //   unhandled report traps there (catchable RuntimeError) and
+        //   proc_exits(1) on the WASI profiles. 483,119 -> 483,445.
+        // 2026-06-11 Slice end-sentinel unification + list arm
+        //   (02_containers.inc.c): 483,445 -> 484,166.
+        // 2026-06-11 STR tags on str.get's Lax (02_containers.inc.c):
+        //   484,166 -> 484,517.
+        // 2026-06-11 numeric fingerprint = f64 image
+        //   (01_core.inc.c) — see the native twin. 484,517 -> 483,936.
+        const EXPECTED_TOTAL_LEN: usize = 483_936;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

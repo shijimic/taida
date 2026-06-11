@@ -2237,11 +2237,15 @@ c.relax() >=> value
 
     #[test]
     fn test_bt5_split_empty_string_empty_delimiter() {
-        // Split["",""]() — splits empty string by empty delimiter → ["", ""]
+        // Split["",""]() follows the locked `.split("")` method
+        // semantics: chars split, and the empty input gives the empty
+        // list. The mold path used to leak Rust's split("") (a
+        // ["", ""] pair here), contradicting the method lock and every
+        // compiled backend — this test pinned that divergence.
         let result = eval_ok(r#"Split["",""]() "#);
         assert!(
-            matches!(&result, Value::List(items) if items.len() == 2),
-            "Split[\"\",\"\"]() should return 2-element list, got: {:?}",
+            matches!(&result, Value::List(items) if items.is_empty()),
+            "Split[\"\",\"\"]() should return the empty list, got: {:?}",
             result
         );
     }

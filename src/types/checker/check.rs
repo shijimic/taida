@@ -635,6 +635,38 @@ impl TypeChecker {
                     }
                 }
 
+                // [E1537]: `Num` is a constraint marker, not a value type.
+                // The constraints reference states it is not an independent
+                // wire value type; allowing `=> :Num` / `x: Num` annotations
+                // made the lowering guess a representation (it registered the
+                // function as Int-returning), so a Float body rendered as a
+                // raw f64 bit pattern on the compiled backends. Constraint
+                // position (`[T <= :Num]`) and type-query position
+                // (`TypeIs[x, :Num]`) remain valid.
+                if fd.return_type.is_some() && Self::contains_constraint_marker_type(&ret_ty) {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1537] Function '{}' declares return type {}, but Num is a generic-constraint marker, not a value type. Annotate the concrete type instead (`:Int` or `:Float`), or make the function generic with `[T <= :Num] ... => :T`. See docs/reference/type_constraints.md and docs/reference/diagnostic_codes.md [E1537].",
+                            fd.name, ret_ty
+                        ),
+                        span: fd.span.clone(),
+                    });
+                }
+                for (idx, param) in fd.params.iter().enumerate() {
+                    if param.type_annotation.is_some()
+                        && let Some(pty) = param_types.get(idx)
+                        && Self::contains_constraint_marker_type(pty)
+                    {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1537] Function '{}' parameter '{}' has type annotation {}, but Num is a generic-constraint marker, not a value type. Annotate the concrete type instead (`:Int` or `:Float`), or make the function generic with `[T <= :Num] {}: T`. See docs/reference/type_constraints.md and docs/reference/diagnostic_codes.md [E1537].",
+                                fd.name, param.name, pty, param.name
+                            ),
+                            span: fd.span.clone(),
+                        });
+                    }
+                }
+
                 // Register the name in scope so duplicate detection still works.
                 // Invalid generic functions stay non-callable by using `Unknown`.
                 let function_value_ty = if self.invalid_func_defs.contains(&fd.name) {
@@ -715,8 +747,6 @@ impl TypeChecker {
                         if !(body_ty == Type::Unknown
                             || Self::contains_unknown(&body_ty)
                             || self.registry.is_subtype_of(&body_ty, &ret_ty)
-                            // Allow numeric narrowing: Num body is compatible with Int/Float/Num return
-                            || body_ty.is_numeric() && ret_ty.is_numeric()
                             // RCB-50: Named/List/BuchiPack are now properly checked
                             // via is_subtype_of. The previous blanket skip hid genuine
                             // return-type mismatches.
@@ -1280,4 +1310,382 @@ impl TypeChecker {
             _ => {}
         }
     }
+}
+
+impl TypeChecker {
+    /// [E1539] Top-level executable statements must not reference a
+    /// function that is only defined later in the file. The interpreter
+    /// executes statements in order — a forward call is an
+    /// undefined-variable error at runtime — while the compiled
+    /// backends hoist definitions and would silently succeed, so
+    /// program success would depend on the backend. References from
+    /// inside function and lambda bodies resolve at call time and stay
+    /// legal (that is how mutual recursion is written).
+    pub(super) fn check_toplevel_forward_function_references(&mut self, program: &Program) {
+        let mut later_funcs: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for stmt in &program.statements {
+            if let Statement::FuncDef(fd) = stmt {
+                later_funcs.insert(fd.name.as_str());
+            }
+        }
+        if later_funcs.is_empty() {
+            return;
+        }
+        let mut defined: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for stmt in &program.statements {
+            match stmt {
+                Statement::FuncDef(fd) => {
+                    defined.insert(fd.name.as_str());
+                }
+                Statement::Import(imp) => {
+                    // Imported names are bound when the import executes;
+                    // a same-named later FuncDef must not flag uses in
+                    // between.
+                    for sym in &imp.symbols {
+                        defined.insert(sym.alias.as_deref().unwrap_or(sym.name.as_str()));
+                    }
+                }
+                Statement::Assignment(a) => {
+                    self.scan_expr_forward_refs(&a.value, &later_funcs, &defined);
+                    // A top-level value binding shadows a later function
+                    // of the same name for subsequent statements.
+                    defined.insert(a.target.as_str());
+                }
+                Statement::Expr(e) => self.scan_expr_forward_refs(e, &later_funcs, &defined),
+                Statement::UnmoldForward(u) => {
+                    self.scan_expr_forward_refs(&u.source, &later_funcs, &defined);
+                    defined.insert(u.target.as_str());
+                }
+                Statement::UnmoldBackward(u) => {
+                    self.scan_expr_forward_refs(&u.source, &later_funcs, &defined);
+                    defined.insert(u.target.as_str());
+                }
+                // An ErrorCeiling handler runs whenever a LATER protected
+                // statement throws — at that moment only the functions
+                // defined up to the throw site exist on the interpreter.
+                // The throw site is not statically known, so the handler
+                // is conservatively checked against the definitions
+                // available at the ceiling itself; referencing a function
+                // defined further down would make the program's success
+                // depend on where the throw happens (and on the backend,
+                // since the compiled ones hoist).
+                Statement::ErrorCeiling(ec) => {
+                    for st in &ec.handler_body {
+                        match st {
+                            Statement::Expr(e) => {
+                                self.scan_expr_forward_refs(e, &later_funcs, &defined)
+                            }
+                            Statement::Assignment(a) => {
+                                self.scan_expr_forward_refs(&a.value, &later_funcs, &defined)
+                            }
+                            Statement::UnmoldForward(u) => {
+                                self.scan_expr_forward_refs(&u.source, &later_funcs, &defined)
+                            }
+                            Statement::UnmoldBackward(u) => {
+                                self.scan_expr_forward_refs(&u.source, &later_funcs, &defined)
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                // Definitions and module plumbing are not executable
+                // expressions.
+                _ => {}
+            }
+        }
+    }
+
+    fn scan_expr_forward_refs(
+        &mut self,
+        e: &Expr,
+        later_funcs: &std::collections::HashSet<&str>,
+        defined: &std::collections::HashSet<&str>,
+    ) {
+        match e {
+            Expr::Ident(name, span) => {
+                if later_funcs.contains(name.as_str()) && !defined.contains(name.as_str()) {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1539] Function '{}' is used before its definition. Top-level code runs in order, so move this statement below the definition of '{}' (references from inside function bodies resolve at call time and may stay).",
+                            name, name
+                        ),
+                        span: span.clone(),
+                    });
+                }
+            }
+            // Deferred-execution bodies: resolution happens at call time.
+            Expr::Lambda(..) => {}
+            // The interpreter parses and evaluates `${...}` bodies as
+            // expressions, so a forward reference inside one fails at
+            // runtime like any other — scan them.
+            Expr::TemplateLit(template, _) => {
+                for inner in template_interpolation_exprs(template) {
+                    self.scan_expr_forward_refs(&inner, later_funcs, defined);
+                }
+            }
+            Expr::IntLit(..)
+            | Expr::FloatLit(..)
+            | Expr::StringLit(..)
+            | Expr::BoolLit(..)
+            | Expr::Gorilla(..)
+            | Expr::Placeholder(..)
+            | Expr::Hole(..)
+            | Expr::TypeLiteral(..)
+            | Expr::EnumVariant(..) => {}
+            Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => {
+                for f in fields {
+                    self.scan_expr_forward_refs(&f.value, later_funcs, defined);
+                }
+            }
+            Expr::ListLit(items, _) | Expr::Pipeline(items, _) => {
+                for i in items {
+                    self.scan_expr_forward_refs(i, later_funcs, defined);
+                }
+            }
+            Expr::BinaryOp(l, _, r, _) => {
+                self.scan_expr_forward_refs(l, later_funcs, defined);
+                self.scan_expr_forward_refs(r, later_funcs, defined);
+            }
+            Expr::UnaryOp(_, x, _) | Expr::Unmold(x, _) | Expr::Throw(x, _) => {
+                self.scan_expr_forward_refs(x, later_funcs, defined);
+            }
+            Expr::FuncCall(callee, args, _) => {
+                self.scan_expr_forward_refs(callee, later_funcs, defined);
+                for a in args {
+                    self.scan_expr_forward_refs(a, later_funcs, defined);
+                }
+            }
+            Expr::MethodCall(recv, _, args, _) => {
+                self.scan_expr_forward_refs(recv, later_funcs, defined);
+                for a in args {
+                    self.scan_expr_forward_refs(a, later_funcs, defined);
+                }
+            }
+            Expr::FieldAccess(x, _, _) => self.scan_expr_forward_refs(x, later_funcs, defined),
+            Expr::CondBranch(arms, _) => {
+                for arm in arms {
+                    if let Some(c) = &arm.condition {
+                        self.scan_expr_forward_refs(c, later_funcs, defined);
+                    }
+                    for st in &arm.body {
+                        match st {
+                            Statement::Expr(e) => {
+                                self.scan_expr_forward_refs(e, later_funcs, defined)
+                            }
+                            Statement::Assignment(a) => {
+                                self.scan_expr_forward_refs(&a.value, later_funcs, defined)
+                            }
+                            Statement::UnmoldForward(u) => {
+                                self.scan_expr_forward_refs(&u.source, later_funcs, defined)
+                            }
+                            Statement::UnmoldBackward(u) => {
+                                self.scan_expr_forward_refs(&u.source, later_funcs, defined)
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            Expr::MoldInst(_, targs, fields, _) => {
+                for t in targs {
+                    self.scan_expr_forward_refs(t, later_funcs, defined);
+                }
+                for f in fields {
+                    self.scan_expr_forward_refs(&f.value, later_funcs, defined);
+                }
+            }
+        }
+    }
+}
+
+impl TypeChecker {
+    /// [E1540] The six value-absence words (`null` / `undefined` /
+    /// `none` / `nil` / `unit` / `void`) are reserved: they must not be
+    /// introduced as identifiers or type names. The lexer deliberately
+    /// keeps them plain identifiers (no keyword tokens — see the BT-2
+    /// lexer tests), so reads already fail as undefined variables; this
+    /// pass closes the remaining gap where a *binding* would succeed
+    /// (`null <= 42`) and resurrect the value-absence vocabulary.
+    pub(super) fn check_reserved_absence_words(&mut self, program: &Program) {
+        for stmt in &program.statements {
+            self.scan_stmt_reserved_words(stmt);
+        }
+    }
+
+    fn reserved_absence_word(name: &str) -> bool {
+        matches!(
+            name,
+            "null" | "undefined" | "none" | "nil" | "unit" | "void"
+        )
+    }
+
+    fn push_reserved_word_error(&mut self, name: &str, span: &Span) {
+        self.errors.push(TypeError {
+            message: format!(
+                "[E1540] '{}' is reserved as a value-absence word and cannot be used as an identifier or type name. Every Taida type has a default value — name the binding after what it holds instead.",
+                name
+            ),
+            span: span.clone(),
+        });
+    }
+
+    fn scan_stmt_reserved_words(&mut self, stmt: &Statement) {
+        match stmt {
+            Statement::Assignment(a) => {
+                if Self::reserved_absence_word(&a.target) {
+                    self.push_reserved_word_error(&a.target, &a.span);
+                }
+                self.scan_expr_reserved_words(&a.value);
+            }
+            Statement::UnmoldForward(u) => {
+                if Self::reserved_absence_word(&u.target) {
+                    self.push_reserved_word_error(&u.target, &u.span);
+                }
+                self.scan_expr_reserved_words(&u.source);
+            }
+            Statement::UnmoldBackward(u) => {
+                if Self::reserved_absence_word(&u.target) {
+                    self.push_reserved_word_error(&u.target, &u.span);
+                }
+                self.scan_expr_reserved_words(&u.source);
+            }
+            Statement::FuncDef(fd) => {
+                if Self::reserved_absence_word(&fd.name) {
+                    self.push_reserved_word_error(&fd.name, &fd.span);
+                }
+                for p in &fd.params {
+                    if Self::reserved_absence_word(&p.name) {
+                        self.push_reserved_word_error(&p.name, &p.span);
+                    }
+                }
+                for st in &fd.body {
+                    self.scan_stmt_reserved_words(st);
+                }
+            }
+            Statement::EnumDef(ed) => {
+                if Self::reserved_absence_word(&ed.name) {
+                    self.push_reserved_word_error(&ed.name, &ed.span);
+                }
+            }
+            Statement::ClassLikeDef(cl) => {
+                if Self::reserved_absence_word(&cl.name) {
+                    self.push_reserved_word_error(&cl.name, &cl.span);
+                }
+            }
+            Statement::Import(imp) => {
+                for sym in &imp.symbols {
+                    let bound = sym.alias.as_deref().unwrap_or(sym.name.as_str());
+                    if Self::reserved_absence_word(bound) {
+                        self.push_reserved_word_error(bound, &imp.span);
+                    }
+                }
+            }
+            Statement::Expr(e) => self.scan_expr_reserved_words(e),
+            Statement::ErrorCeiling(ec) => {
+                for st in &ec.handler_body {
+                    self.scan_stmt_reserved_words(st);
+                }
+            }
+            Statement::Export(_) => {}
+        }
+    }
+
+    fn scan_expr_reserved_words(&mut self, e: &Expr) {
+        match e {
+            Expr::Lambda(params, body, _) => {
+                for p in params {
+                    if Self::reserved_absence_word(&p.name) {
+                        self.push_reserved_word_error(&p.name, &p.span);
+                    }
+                }
+                self.scan_expr_reserved_words(body);
+            }
+            Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => {
+                for f in fields {
+                    self.scan_expr_reserved_words(&f.value);
+                }
+            }
+            Expr::ListLit(items, _) | Expr::Pipeline(items, _) => {
+                for i in items {
+                    self.scan_expr_reserved_words(i);
+                }
+            }
+            Expr::BinaryOp(l, _, r, _) => {
+                self.scan_expr_reserved_words(l);
+                self.scan_expr_reserved_words(r);
+            }
+            Expr::UnaryOp(_, x, _) | Expr::Unmold(x, _) | Expr::Throw(x, _) => {
+                self.scan_expr_reserved_words(x);
+            }
+            Expr::FuncCall(c, args, _) => {
+                self.scan_expr_reserved_words(c);
+                for a in args {
+                    self.scan_expr_reserved_words(a);
+                }
+            }
+            Expr::MethodCall(recv, _, args, _) => {
+                self.scan_expr_reserved_words(recv);
+                for a in args {
+                    self.scan_expr_reserved_words(a);
+                }
+            }
+            Expr::FieldAccess(x, _, _) => self.scan_expr_reserved_words(x),
+            Expr::CondBranch(arms, _) => {
+                for arm in arms {
+                    if let Some(c) = &arm.condition {
+                        self.scan_expr_reserved_words(c);
+                    }
+                    for st in &arm.body {
+                        self.scan_stmt_reserved_words(st);
+                    }
+                }
+            }
+            Expr::MoldInst(_, targs, fields, _) => {
+                for t in targs {
+                    self.scan_expr_reserved_words(t);
+                }
+                for f in fields {
+                    self.scan_expr_reserved_words(&f.value);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Extract the interpolation expressions of a template literal the way
+/// the interpreter's `eval_template_string` does: each `${...}` body is
+/// parsed as a standalone program whose first statement is the
+/// expression (unparseable bodies render verbatim at runtime and are
+/// skipped here too). Used by the order-sensitive checks ([E1539] /
+/// [E1540]) so a forward reference inside `${...}` does not slip
+/// through the scan.
+pub(super) fn template_interpolation_exprs(template: &str) -> Vec<Expr> {
+    let mut out = Vec::new();
+    let mut chars = template.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '$' && chars.peek() == Some(&'{') {
+            chars.next();
+            let mut expr_str = String::new();
+            let mut depth = 1;
+            for c in chars.by_ref() {
+                if c == '{' {
+                    depth += 1;
+                } else if c == '}' {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                expr_str.push(c);
+            }
+            let (program, errors) = crate::parser::parse(&expr_str);
+            if errors.is_empty()
+                && let Some(Statement::Expr(expr)) = program.statements.into_iter().next()
+            {
+                out.push(expr);
+            }
+        }
+    }
+    out
 }

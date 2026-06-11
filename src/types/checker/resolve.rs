@@ -205,9 +205,9 @@ impl TypeChecker {
 
     fn type_name_to_type(&self, name: &str) -> Type {
         match name {
-            "Int" => Type::Int,
+            "Int" | "Integer" => Type::Int,
             "Float" => Type::Float,
-            "Num" | "Number" => Type::Num,
+            "Num" => Type::Num,
             "Str" | "String" => Type::Str,
             "Bytes" => Type::Bytes,
             "Bool" | "Boolean" => Type::Bool,

@@ -161,19 +161,20 @@ stdout(v)
 /// A user mold may legitimately carry hundreds of fields; the unmold
 /// pack-shape validation must scale with the field count (it verifies
 /// the tail sentinel in-bounds) rather than capping it — a cap would
-/// silently skip the unmold on wasm only. The assertion goes through
-/// `v == 4242` because the *display* of an untagged Int still runs
-/// layout-dependent heuristics on WASM (containers carry magics that
-/// the display dispatch does not yet require — tracked separately).
+/// silently skip the unmold on wasm only. The value is displayed
+/// directly: wasm identification is positive-only (string magic
+/// required, no byte heuristics), so an untagged Int whose value lands
+/// in the data segment can no longer be mistaken for a pointer — this
+/// very fixture used to print "37" through that misclassification.
 #[test]
 fn large_field_count_mold_unmold_not_skipped() {
     let dir = unique_temp_dir("f58_p24_large_mold");
     let fields: Vec<String> = (1..=256).map(|i| format!("  f{i} <= {i}")).collect();
     let source = format!(
-        "Mold[T] => BigMold[T] = @(\n{}\n)\n\nboxed <= BigMold[4242]()\nboxed >=> v\nstdout(v == 4242)\n",
+        "Mold[T] => BigMold[T] = @(\n{}\n)\n\nboxed <= BigMold[4242]()\nboxed >=> v\nstdout(v)\n",
         fields.join(",\n")
     );
     let out = assert_parity(&dir, "large_mold", &source);
-    assert_eq!(out, "true");
+    assert_eq!(out, "4242");
     let _ = std::fs::remove_dir_all(&dir);
 }

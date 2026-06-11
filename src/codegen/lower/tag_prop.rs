@@ -255,6 +255,16 @@ impl Lowering {
                     if self.list_returning_funcs.contains(name.as_str()) {
                         return 5;
                     }
+                    // `=> :Int` annotated functions: every other return
+                    // kind was consulted here but Int fell through to
+                    // UNKNOWN. An untagged Int whose value coincides
+                    // with a live string's data address passes even the
+                    // magic-word identification (the header there is
+                    // real), so display routed `stdout(intFn(...))`
+                    // through the heuristics and printed that string.
+                    if self.int_returning_funcs.contains(name.as_str()) {
+                        return 0;
+                    }
                     // Builtin range() returns a List
                     if name == "range" {
                         return 5;
@@ -277,7 +287,17 @@ impl Lowering {
                     "indexOfLax" | "lastIndexOfLax" | "searchLax" => 4,
                     "map" | "filter" | "flatMap" | "sort" | "unique" | "flatten" | "reverse"
                     | "concat" | "append" | "prepend" | "zip" | "enumerate" => 5,
-                    _ => -1, // TAIDA_TAG_UNKNOWN
+                    // Whatever the static Float classifier can prove
+                    // (getOrDefault with a Float default, Float-returning
+                    // user methods, ...) routes through the Float stdout
+                    // path; everything else stays runtime-dispatched.
+                    _ => {
+                        if self.expr_returns_float(expr) {
+                            1 // TAIDA_TAG_FLOAT
+                        } else {
+                            -1 // TAIDA_TAG_UNKNOWN
+                        }
+                    }
                 }
             }
             // C12-1b (FB-27): MoldInst return-type tag dispatch now consults the
@@ -310,13 +330,20 @@ impl Lowering {
                         }
                         -1
                     }
-                    // Slice[str] → Str, Slice[bytes] → Bytes (tag as Str at wasm
-                    // level since bytes share the hidden-header str layout).
+                    // Slice[str] → Str, Slice[list] → List, Slice[bytes] →
+                    // Bytes (tag as Str at wasm level since bytes share the
+                    // hidden-header str layout). A list input must NOT take
+                    // the Str default — the Str stdout fast path would print
+                    // the list pointer as text (its magic header leaks as
+                    // "TSLDIAT").
                     "Slice" => {
-                        if let Some(arg) = type_args.first()
-                            && self.expr_is_string_full(arg)
-                        {
-                            return 3;
+                        if let Some(arg) = type_args.first() {
+                            if self.expr_is_string_full(arg) {
+                                return 3;
+                            }
+                            if self.expr_is_list(arg) {
+                                return 5; // TAIDA_TAG_LIST
+                            }
                         }
                         3 // default: Slice returns Str (checker agrees)
                     }

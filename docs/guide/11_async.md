@@ -79,8 +79,7 @@ fetchUserPosts userId: Int =
 `map` メソッドで、非同期値を同期的に変換できます。非同期操作自体は増えません。
 
 ```taida
-nameAsync <= fetchUser(1)
-  .map(_ user = Upper[user.name]())
+nameAsync <= fetchUser(1).map(_ user = Upper[user.name]())
 // nameAsync: Async[Str]
 
 nameAsync >=> name

@@ -79,12 +79,12 @@ Mold[T] => Pair[T, U] = @(second: U)
 
 `null` / `undefined` / `none` / `nil` / `unit` / `void` の 6 語は **値の不在を表す語** として予約されており、識別子としても型名としても使えません。
 
-- 変数 / 関数 / 定数 / 型 / Enum variant / モールドの型変数の **どの位置にも書けません**。書くと Parser が即時 reject します。
+- 変数 / 関数 / 引数 / 型 / Enum 名 / import 束縛の **定義位置に書けません**。書くと TypeChecker が `[E1540]` で reject します。読み取り位置は通常の未定義変数エラーになります (これらの語は keyword token ではなく plain identifier のまま — 字句レベルの特別扱いはありません)。
 - 既存言語の `null` / `undefined` / `none` / `nil` / `unit` / `void` の意図で Taida コードに登場することは仕様上ありません。これらは「値の不在」という発想自体を Taida から排除するための予約です。
-- 大文字始まり (`Null`, `None`, `Unit`, `Void`) も同じ意図で書かれることが多いため、型注釈位置 (`:Unit` / `:Void` / `:@()`) の場合は `[E1520]` で reject されます。識別子位置は lower-case 6 語の Parser reject、型位置は `:Unit` / `:Void` / `:@()` を TypeChecker が `[E1520]` で reject、というのが現行の検出範囲です。
+- 大文字始まり (`Null`, `None`, `Unit`, `Void`) も同じ意図で書かれることが多いため、型注釈位置 (`:Unit` / `:Void` / `:@()`) の場合は `[E1520]` で reject されます。識別子定義位置は lower-case 6 語を TypeChecker が `[E1540]` で、型位置は `:Unit` / `:Void` / `:@()` を TypeChecker が `[E1520]` で reject、というのが現行の検出範囲です。
 
-```taida
-// NG: 識別子位置 (Parser reject)
+```taida reject
+// NG: 識別子定義位置 ([E1540])
 null <= 42                       // `null` is reserved for value absence
 unit u: Int = u => :Int          // `unit` is reserved for value absence
 Enum => Status = :None :Ok       // `None` variant は `none` と同じ意図で書かれることが多いため非推奨 — 意味のある variant 名にする
@@ -99,7 +99,7 @@ config <= @(retry_after <= 3)
 
 ぶちパックフィールド名や JSON のキー名にこれらの語が **文字列として** 出てくることは禁止していません (たとえば外部 JSON が `{"unit": "kg"}` を持つ場合、Schema 側で `unit: Str` フィールドを定義できます)。あくまで **Taida の識別子 / 型としての使用** を禁止しています。
 
-ビルトイン型のメソッド名 (例: `List` の `.any(_)` / `.all(_)` / `.none(_)`) は別名前空間として共存します。`.none(_ x = x < 0)` は 「述語に一致する要素が 1 つもない」 を返す述語メソッドであり、 「値の不在」 を意味する binding `none` ではありません。`>>> ./m.td => @(none)` のような **ユーザー側の binding** は引き続き `[E1520]` 系の予約語チェックで reject されます。
+ビルトイン型のメソッド名 (例: `List` の `.any(_)` / `.all(_)` / `.none(_)`) は別名前空間として共存します。`.none(_ x = x < 0)` は 「述語に一致する要素が 1 つもない」 を返す述語メソッドであり、 「値の不在」 を意味する binding `none` ではありません。`>>> ./m.td => @(none)` のような **ユーザー側の binding** は `[E1540]` の予約語チェックで reject されます。
 
 「情報がない」「未知」「初期化されていない」を表現したい場合は、共通の Enum (`Enum => OpStatus = :Pending :Ready :Failed` のような意味のあるバリアント) を用意するか、`Lax[T]` / `Result[T, P]` のような明示的なモールドで包んでください。これは
 
@@ -348,7 +348,7 @@ x <= Filter[pilots, _ p = p.is_active]()
 
 ### 略語は避ける
 
-```taida
+```taida fragment
 // Good
 getPilotById id: Int = ...
 calculateTotalPrice items: @[Item] = ...

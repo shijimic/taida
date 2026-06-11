@@ -605,6 +605,30 @@ impl TypeChecker {
         }
     }
 
+    /// `Num` is a generic-constraint marker (`[T <= :Num]`), not a wire
+    /// value type — the constraints reference says so explicitly. A
+    /// value-position annotation (`=> :Num`, `x: Num`, nested forms)
+    /// must therefore be rejected: the lowering would have to guess a
+    /// concrete representation and silently picked Int, rendering Float
+    /// returns as raw bit patterns.
+    pub(super) fn contains_constraint_marker_type(ty: &Type) -> bool {
+        if matches!(ty, Type::Num) {
+            return true;
+        }
+        match ty {
+            Type::List(inner) => Self::contains_constraint_marker_type(inner),
+            Type::Generic(_, args) => args.iter().any(Self::contains_constraint_marker_type),
+            Type::Function(params, ret) => {
+                params.iter().any(Self::contains_constraint_marker_type)
+                    || Self::contains_constraint_marker_type(ret)
+            }
+            Type::BuchiPack(fields) => fields
+                .iter()
+                .any(|(_, field_ty)| Self::contains_constraint_marker_type(field_ty)),
+            _ => false,
+        }
+    }
+
     fn push_wired_constraint_error(&mut self, subject: &str, actual: &Type, span: &Span) {
         self.errors.push(TypeError {
             message: format!(
@@ -655,13 +679,38 @@ impl TypeChecker {
     /// - Built-in type constraints / molds: `Wired`, `HostCall`, `HostStep`,
     /// `HostCapability`, `Lax`, `Result`, `Async`,
     /// `Optional`, `Stream`, `Mold`, `TODO`, `Log`, `Slice`, `Concat`
+    /// The primitive value-type names protected by [E1538]: a user
+    /// redefinition of these can never be referenced (annotation
+    /// resolution always picks the built-in), so the definition site
+    /// rejects the shadowing. Container/mold names (Lax / Result /
+    /// Async / ...) are NOT in this set — the type guide legitimately
+    /// re-states their definitions as documentation examples and the
+    /// generic-inheritance tests build on user molds of those names;
+    /// their consistency is the mold-spec layer's concern.
+    pub(super) fn is_primitive_value_type_name(name: &str) -> bool {
+        matches!(
+            name,
+            "Int"
+                | "Integer"
+                | "Float"
+                | "Num"
+                | "Str"
+                | "String"
+                | "Bytes"
+                | "Bool"
+                | "Boolean"
+                | "Unit"
+                | "Void"
+        )
+    }
+
     pub(super) fn is_builtin_type_name(name: &str) -> bool {
         matches!(
             name,
             "Int"
+                | "Integer"
                 | "Float"
                 | "Num"
-                | "Number"
                 | "Str"
                 | "String"
                 | "Bytes"
@@ -845,10 +894,36 @@ impl TypeChecker {
         for stmt in &program.statements {
             match stmt {
                 Statement::EnumDef(ed) => {
+                    // [E1538]: a user definition under a built-in type name
+                    // would be registered but never referenced — annotation
+                    // resolution always picks the built-in, so the value is
+                    // definable yet unusable (and the resulting E1601 reads
+                    // as nonsense: "returns Num, expected Num"). Reject the
+                    // shadowing at the definition site instead.
+                    if Self::is_primitive_value_type_name(&ed.name) {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1538] Enum '{}' shadows a built-in type name. Built-in type names cannot be redefined — annotation positions always resolve to the built-in, so the definition would be unusable. Choose a different name. See docs/reference/diagnostic_codes.md [E1538].",
+                                ed.name
+                            ),
+                            span: ed.span.clone(),
+                        });
+                    }
                     self.declared_concrete_type_names.insert(ed.name.clone());
                 }
                 // (E30 Sub-step 2.1) ClassLikeDef 単一 variant + kind dispatch (旧 TypeDef/MoldDef/InheritanceDef を統合)
                 Statement::ClassLikeDef(cl) => {
+                    // [E1538]: same shadowing guard for BuchiPack / Mold /
+                    // Inheritance definitions.
+                    if Self::is_primitive_value_type_name(&cl.name) {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1538] Type definition '{}' shadows a built-in type name. Built-in type names cannot be redefined — annotation positions always resolve to the built-in, so the definition would be unusable. Choose a different name. See docs/reference/diagnostic_codes.md [E1538].",
+                                cl.name
+                            ),
+                            span: cl.span.clone(),
+                        });
+                    }
                     // BuchiPack / Mold / Inheritance いずれも子型名を登録
                     self.declared_concrete_type_names.insert(cl.name.clone());
                 }
@@ -948,6 +1023,19 @@ impl TypeChecker {
         // backend treats it as a regular call (see
         // docs/reference/tail_recursion.md).
         self.check_mutual_recursion_errors(program);
+
+        // [E1539]: top-level executable code must not reference a
+        // function defined later in the file. The interpreter executes
+        // statements in order (definition order is the language
+        // semantics), while the compiled backends hoist definitions —
+        // without this check the same program succeeds or fails
+        // depending on the backend. Function/lambda bodies defer
+        // resolution to call time and stay legal (mutual recursion).
+        self.check_toplevel_forward_function_references(program);
+
+        // [E1540]: the six value-absence words are reserved — reads
+        // already fail as undefined variables, this closes bindings.
+        self.check_reserved_absence_words(program);
 
         if self.typed_expr_table.has_residual_unknown() {
             let residuals = self

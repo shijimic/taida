@@ -132,14 +132,29 @@ function __taida_is_float(v) {
 // Always used when the codegen sees `Float[...]()` — this is purely a
 // display-side tag; arithmetic and equality paths stay untouched (no
 // deopt). Matches the interpreter's `Value::Float` tag.
+// Rust f64::from_str compatible parse: no surrounding whitespace, no
+// hex floats, no prefix-parse; nan / inf / infinity in any case with an
+// optional sign. Returns null on reject (NaN is a successful parse).
+function __taida_parse_f64(s) {
+  if (typeof s !== 'string'
+      || !/^[+-]?(?:[iI][nN][fF](?:[iI][nN][iI][tT][yY])?|[nN][aA][nN]|(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)$/.test(s)) {
+    return null;
+  }
+  const sign = s[0] === '-' ? -1 : 1;
+  const body = (s[0] === '+' || s[0] === '-') ? s.slice(1) : s;
+  const low = body.toLowerCase();
+  if (low === 'nan') return NaN;
+  if (low === 'inf' || low === 'infinity') return sign * Infinity;
+  return parseFloat(s);
+}
 function Float_mold_f(value) {
   let num;
   if (typeof value === 'number') num = value;
   else if (typeof value === 'bigint') num = Number(value);
   else if (typeof value === 'boolean') num = value ? 1.0 : 0.0;
   else if (typeof value === 'string') {
-    const f = parseFloat(value);
-    if (isNaN(f)) {
+    const f = __taida_parse_f64(value);
+    if (f === null) {
       return Lax(null, 0.0, true);
     }
     num = f;
@@ -321,6 +336,50 @@ class __TaidaError extends globalThis.Error {
 // Standalone throw function (no Object.prototype pollution)
 function __taida_throw(obj) {
   throw obj instanceof globalThis.Error ? obj : new __TaidaError(obj.type || 'Error', obj.message || '', obj);
+}
+
+// Unhandled-throw report: match the interpreter's single-line format
+// and exit code (`Runtime error: Unhandled error: ...`, packs as
+// `Error[type]: message` with AnonymousError/Unknown fallbacks) instead
+// of Node's raw stack + object dump.
+if (typeof process !== 'undefined' && typeof process.on === 'function') {
+  const __taida_report_unhandled = (e) => {
+    if (e instanceof __TaidaError) {
+      // Internal runtime panics (type 'RuntimeError', empty fields)
+      // report like the reference's RuntimeError — no Unhandled prefix.
+      if (e.type === 'RuntimeError') {
+        console.error(`Runtime error: ${e.message}`);
+        process.exit(1);
+      }
+      let detail;
+      const f = e.fields;
+      if (f === null || f === undefined) {
+        detail = e.message || 'error';
+      } else if (typeof f !== 'object') {
+        detail = String(f); // bare value throw: throw("boom") / throw(42)
+      } else if ((typeof f.type === 'string' && f.type)
+          || (typeof f.__type === 'string' && f.__type)
+          || (typeof f.message === 'string' && f.message)) {
+        const ty = (typeof f.type === 'string' && f.type)
+          || (typeof f.__type === 'string' && f.__type)
+          || 'AnonymousError';
+        const msg = (typeof f.message === 'string' && f.message) || 'Unknown';
+        detail = `Error[${ty}]: ${msg}`;
+      } else if (e.message) {
+        detail = e.message; // internal throw shapes with empty fields
+      } else {
+        detail = 'Error[AnonymousError]: Unknown';
+      }
+      console.error(`Runtime error: Unhandled error: ${detail}`);
+    } else if (e instanceof globalThis.Error) {
+      console.error(`Runtime error: ${e.message}`);
+    } else {
+      console.error(`Runtime error: ${String(e)}`);
+    }
+    process.exit(1);
+  };
+  process.on('uncaughtException', __taida_report_unhandled);
+  process.on('unhandledRejection', __taida_report_unhandled);
 }
 
 function __taida_error_info_default() {
@@ -1437,29 +1496,20 @@ function __taida_display_string(v) {
       if (status === 'rejected') return 'Async[rejected: ' + __taida_format(v.__error) + ']';
       return 'Async[pending]';
     }
-    // C23B-003 reopen — HashMap: interpreter represents HashMap as
-    // `BuchiPack(__entries <= @[@(key <= K, value <= V), ...], __type <= "HashMap")`
-    // (`src/interpreter/prelude.rs:618-621`). `Str[hm]()` therefore renders
-    // through `Value::BuchiPack.to_display_string()` = full-form pack.
-    // The JS runtime stores HashMap as a frozen object carrying method
-    // fields alongside `__entries`, so we must explicitly rebuild the
-    // synthetic pack shape instead of iterating the JS object's own keys
-    // (which would leak method source bodies as pack fields).
+    // HashMap / Set display the public `HashMap({...})` / `Set({...})`
+    // shape — the `__` carrier fields are compiler-internal and the
+    // reference renders the same shape from stdout, interpolation and
+    // `Str[...]()` alike.
     if (v.__type === 'HashMap') {
       const entries = Array.isArray(v.__entries) ? v.__entries : [];
-      const entryStrs = entries.map(e =>
-        '@(key <= ' + __taida_format(e.key)
-          + ', value <= ' + __taida_format(e.value) + ')'
+      const pairs = entries.map(e =>
+        __taida_format(e.key) + ': ' + __taida_format(e.value)
       );
-      return '@(__entries <= @[' + entryStrs.join(', ')
-        + '], __type <= "HashMap")';
+      return 'HashMap({' + pairs.join(', ') + '})';
     }
-    // C23B-003 reopen — Set: interpreter `BuchiPack(__items <= @[...], __type <= "Set")`
-    // (`src/interpreter/prelude.rs:644-647`).
     if (v.__type === 'Set') {
       const items = Array.isArray(v.__items) ? v.__items : [];
-      return '@(__items <= @[' + items.map(x => __taida_format(x)).join(', ')
-        + '], __type <= "Set")';
+      return 'Set({' + items.map(x => __taida_format(x)).join(', ') + '})';
     }
     // C23B-003 reopen — Stream: interpreter uses `Value::Stream` (not a
     // BuchiPack), so `to_display_string()` returns
@@ -1563,7 +1613,11 @@ function Int_mold(value, base) {
   if (typeof value === 'string') {
     if (!/^[+-]?\d+$/.test(value)) return Lax(null, 0);
     try {
-      return Lax(__taida_fromI64BigInt(BigInt(value)));
+      const b = BigInt(value);
+      // Out-of-range i64 is a parse failure (Rust parse::<i64> parity),
+      // not a two's-complement wrap.
+      if (b > 9223372036854775807n || b < -9223372036854775808n) return Lax(null, 0);
+      return Lax(__taida_fromI64BigInt(b));
     } catch (_) {
       return Lax(null, 0);
     }
@@ -1575,8 +1629,8 @@ function Float_mold(value) {
   if (typeof value === 'bigint') return Lax(Number(value));
   if (typeof value === 'boolean') return Lax(value ? 1.0 : 0.0);
   if (typeof value === 'string') {
-    const f = parseFloat(value);
-    if (isNaN(f)) return Lax(null, 0.0);
+    const f = __taida_parse_f64(value);
+    if (f === null) return Lax(null, 0.0);
     return Lax(f);
   }
   return Lax(null, 0.0);
@@ -2098,14 +2152,28 @@ function Slice(val, optsOrStart, maybeEnd) {
     if (__taida_isIntNumber(optsOrStart.end)) endOpt = optsOrStart.end;
   }
   if (typeof val === 'string') {
+    // Code-point slicing (String.prototype.slice cuts UTF-16 units and
+    // can split a surrogate pair). Negative indices are NOT
+    // tail-relative in Taida — the reference clamps them to 0, so
+    // start >= end yields the empty string.
+    const chars = Array.from(val);
+    const end = (endOpt !== undefined) ? endOpt : chars.length;
+    const s = Math.max(0, start);
+    const e = Math.max(0, Math.min(chars.length, end));
+    return s < e ? chars.slice(s, e).join('') : '';
+  }
+  if (Array.isArray(val)) {
     const end = (endOpt !== undefined) ? endOpt : val.length;
-    return val.slice(start, end);
+    const s = Math.max(0, start);
+    const e = Math.max(0, Math.min(val.length, end));
+    return Object.freeze(s < e ? val.slice(s, e) : []);
   }
   if (val instanceof Uint8Array) {
     const end = (endOpt !== undefined) ? endOpt : val.length;
     const s = Math.max(0, Math.min(val.length, start));
     const e = Math.max(0, Math.min(val.length, end));
-    const from = Math.min(s, e);
+    // Same clamp rule as Str: an inverted range is empty, not swapped.
+    const from = s;
     const to = Math.max(s, e);
     // D29B-004 / Track-ε: subarray is a zero-copy view sharing the
     // underlying ArrayBuffer (vs. .slice() which deep-copies). Matches
@@ -2115,7 +2183,11 @@ function Slice(val, optsOrStart, maybeEnd) {
   }
   return '';
 }
-function CharAt(str, idx) { return typeof str === 'string' && idx >= 0 && idx < str.length ? Lax(str[idx]) : Lax(null, ''); }
+function CharAt(str, idx) {
+  if (typeof str !== 'string' || idx < 0) return Lax(null, '');
+  const chars = Array.from(str); // code points, not UTF-16 units
+  return idx < chars.length ? Lax(chars[idx]) : Lax(null, '');
+}
 function Repeat(str, n) {
   if (typeof str !== 'string') return '';
   n = __taida_nonnegative_count(n);
@@ -2179,7 +2251,8 @@ function StringRepeatJoin(str, n, sep) {
   }
 }
 function Reverse(val) {
-  if (typeof val === 'string') return val.split('').reverse().join('');
+  // Array.from iterates code points; split('') would tear surrogate pairs.
+  if (typeof val === 'string') return Array.from(val).reverse().join('');
   if (Array.isArray(val)) { const copy = [...val]; copy.reverse(); return Object.freeze(copy); }
   return val;
 }
@@ -2273,9 +2346,35 @@ function BytesToList(bytes) {
   return Object.freeze(Array.from(bytes, x => Number(x)));
 }
 function Append(list, val) { return Object.freeze([...(list || []), val]); }
+// Consume variant for the proven-safe tail-recursive accumulator shape
+// (`f(n - 1, Append[acc, x]())`). The codegen emits this only for sites
+// that passed the shared shape analysis; `__taida_append_owned` is set
+// by the trampoline exactly while it runs an iteration whose arguments
+// were produced by such a site, so the push can never touch a list the
+// caller still aliases — the first iteration always detaches via the
+// copy path. The result is intentionally NOT frozen: Taida has no list
+// mutation surface, and the next iteration needs to push in place.
+let __taida_append_owned = false;
+function AppendConsume(list, val) {
+  if (__taida_append_owned && Array.isArray(list) && !Object.isFrozen(list)) {
+    list.push(val);
+    return list;
+  }
+  const next = [...(list || [])];
+  next.push(val);
+  return next;
+}
 function Prepend(list, val) { return Object.freeze([val, ...(list || [])]); }
 function Join(list, sep) { return (list || []).join(sep); }
 function Sum(list) { return (list || []).reduce((a, b) => a + b, 0); }
+function Min(list) {
+  if (!list || list.length === 0) return Lax(null);
+  return Lax(list.reduce((a, b) => (b < a ? b : a)));
+}
+function Max(list) {
+  if (!list || list.length === 0) return Lax(null);
+  return Lax(list.reduce((a, b) => (a < b ? b : a)));
+}
 function Sort(list, opts) {
   const copy = [...(list || [])];
   if (opts && opts.by) {
@@ -2355,16 +2454,27 @@ function Enumerate(list) {
 }
 
 // ── Trampoline for tail recursion (self + mutual) ────────
+// `owned` marks a tail call whose accumulator argument came from an
+// AppendConsume site: the list was either freshly detached or already
+// owned by the loop, so the next iteration may push in place. Calls
+// from anywhere else leave it false and the consume path detaches.
 class __TaidaTailCall {
-  constructor(fn, args) { this.fn = fn; this.args = args; }
+  constructor(fn, args, owned) { this.fn = fn; this.args = args; this.owned = owned === true; }
 }
 function __taida_trampoline(fn) {
   return function(...args) {
-    let result = fn(...args);
-    while (result instanceof __TaidaTailCall) {
-      result = result.fn(...result.args);
+    const __saved_owned = __taida_append_owned;
+    __taida_append_owned = false;
+    try {
+      let result = fn(...args);
+      while (result instanceof __TaidaTailCall) {
+        __taida_append_owned = result.owned;
+        result = result.fn(...result.args);
+      }
+      return result;
+    } finally {
+      __taida_append_owned = __saved_owned;
     }
-    return result;
   };
 }
 
@@ -3025,8 +3135,10 @@ if (!String.prototype.__taida_str_patched) {
   const __native_startsWith = String.prototype.startsWith;
   const __native_endsWith = String.prototype.endsWith;
   Object.defineProperty(String.prototype, '__taida_str_patched', { value: true, enumerable: false });
+  // Code points, not UTF-16 units — "a🎈b".length() is 3 on every
+  // backend (the reference iterates chars).
   Object.defineProperty(String.prototype, 'length_', {
-    value: function() { return this.length; }, enumerable: false
+    value: function() { return Array.from(this).length; }, enumerable: false
   });
   Object.defineProperty(String.prototype, 'contains', {
     value: function(v) { return this.includes(v); }, enumerable: false
@@ -3063,10 +3175,14 @@ if (!String.prototype.__taida_str_patched) {
       return Lax(Array.from(prefix).length);
     }, enumerable: false, configurable: true
   });
-  // get(index) — return Lax for string character access
+  // get(index) — return Lax for string character access. The index is
+  // a code point (an astral character is one element, not a surrogate
+  // pair).
   Object.defineProperty(String.prototype, 'get', {
     value: function(idx) {
-      if (idx >= 0 && idx < this.length) return Lax(this[idx]);
+      if (idx < 0) return Lax(null, '');
+      const chars = Array.from(this);
+      if (idx < chars.length) return Lax(chars[idx]);
       return Lax(null, '');
     }, enumerable: false
   });

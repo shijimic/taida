@@ -1131,7 +1131,7 @@ items <= @[10, 20, 30]
 sumItems =
   Sum[items]() >=> total
   total
-=> :Num
+=> :Int
 
 stdout(sumItems().toString())
 "#;

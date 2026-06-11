@@ -2769,8 +2769,11 @@ fn test_fl1_return_type_match_no_error() {
 }
 
 #[test]
-fn test_fl1_return_type_numeric_compatible_no_error() {
-    // Function declares :Int but body returns Float — allowed (numeric narrowing)
+fn test_fl1_return_type_numeric_narrowing_rejected() {
+    // Function declares :Int but body returns Float — rejected. The old
+    // numeric-narrowing relaxation silently accepted this and the
+    // compiled backends then rendered the Float as raw f64 bits
+    // through the Int-tagged display path.
     let source = "bad =\n  3.14\n=> :Int";
     let (_, errors) = check(source);
     let e1601: Vec<_> = errors
@@ -2778,9 +2781,9 @@ fn test_fl1_return_type_numeric_compatible_no_error() {
         .filter(|e| e.message.contains("[E1601]"))
         .collect();
     assert!(
-        e1601.is_empty(),
-        "Should not produce E1601 for numeric types (Int/Float/Num are compatible), got: {:?}",
-        e1601
+        !e1601.is_empty(),
+        "Float body under :Int must produce E1601, got: {:?}",
+        errors
     );
 }
 
@@ -3426,8 +3429,8 @@ fn test_bt2_null_rejected() {
     assert!(
         errors
             .iter()
-            .any(|e| e.message.contains("E1502") && e.message.contains("null")),
-        "Assignment from 'null' should produce E1502 undefined variable error, got: {:?}",
+            .any(|e| e.message.contains("E1542") && e.message.contains("null")),
+        "Assignment from 'null' should produce E1542 undefined variable error, got: {:?}",
         errors
     );
 }
@@ -3439,8 +3442,8 @@ fn test_bt2_undefined_rejected() {
     assert!(
         errors
             .iter()
-            .any(|e| e.message.contains("E1502") && e.message.contains("undefined")),
-        "Assignment from 'undefined' should produce E1502 undefined variable error, got: {:?}",
+            .any(|e| e.message.contains("E1542") && e.message.contains("undefined")),
+        "Assignment from 'undefined' should produce E1542 undefined variable error, got: {:?}",
         errors
     );
 }
@@ -3452,8 +3455,8 @@ fn test_bt2_none_rejected() {
     assert!(
         errors
             .iter()
-            .any(|e| e.message.contains("E1502") && e.message.contains("none")),
-        "Assignment from 'none' should produce E1502 undefined variable error, got: {:?}",
+            .any(|e| e.message.contains("E1542") && e.message.contains("none")),
+        "Assignment from 'none' should produce E1542 undefined variable error, got: {:?}",
         errors
     );
 }
@@ -3465,8 +3468,8 @@ fn test_bt2_nil_rejected() {
     assert!(
         errors
             .iter()
-            .any(|e| e.message.contains("E1502") && e.message.contains("nil")),
-        "Assignment from 'nil' should produce E1502 undefined variable error, got: {:?}",
+            .any(|e| e.message.contains("E1542") && e.message.contains("nil")),
+        "Assignment from 'nil' should produce E1542 undefined variable error, got: {:?}",
         errors
     );
 }

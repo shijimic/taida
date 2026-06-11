@@ -8,22 +8,22 @@ void taida_str_retain(int64_t val) { (void)val; }
 
 int64_t taida_typeof(int64_t val, int64_t tag) {
     if (val != 0 && val >= WASM_MIN_HEAP_ADDR) {
-        if (_is_wasm_hashmap(val)) return (int64_t)(intptr_t)"HashMap";
-        if (_is_wasm_set(val)) return (int64_t)(intptr_t)"Set";
-        if (_wasm_is_result(val)) return (int64_t)(intptr_t)"Result";
-        if (_wasm_is_lax(val)) return (int64_t)(intptr_t)"Lax";
-        if (_looks_like_pack(val)) return (int64_t)(intptr_t)"BuchiPack";
-        if (_looks_like_list(val)) return (int64_t)(intptr_t)"List";
-        if (_looks_like_string(val)) return (int64_t)(intptr_t)"Str";
+        if (_is_wasm_hashmap(val)) return WSTR("HashMap");
+        if (_is_wasm_set(val)) return WSTR("Set");
+        if (_wasm_is_result(val)) return WSTR("Result");
+        if (_wasm_is_lax(val)) return WSTR("Lax");
+        if (_looks_like_pack(val)) return WSTR("BuchiPack");
+        if (_looks_like_list(val)) return WSTR("List");
+        if (_looks_like_string(val)) return WSTR("Str");
     }
     switch (tag) {
-        case 1: return (int64_t)(intptr_t)"Float";
-        case 2: return (int64_t)(intptr_t)"Bool";
-        case 3: return (int64_t)(intptr_t)"Str";
-        case 4: return (int64_t)(intptr_t)"BuchiPack";
-        case 5: return (int64_t)(intptr_t)"List";
-        case 6: return (int64_t)(intptr_t)"Closure";
-        default: return (int64_t)(intptr_t)"Int";
+        case 1: return WSTR("Float");
+        case 2: return WSTR("Bool");
+        case 3: return WSTR("Str");
+        case 4: return WSTR("BuchiPack");
+        case 5: return WSTR("List");
+        case 6: return WSTR("Closure");
+        default: return WSTR("Int");
     }
 }
 
@@ -35,7 +35,7 @@ int64_t taida_type_name(int64_t val, int64_t tag) {
         }
         /* Plain packs intentionally have no class-like identity. If a future
            pack metadata field becomes public identity, add it before this return. */
-        return (int64_t)(intptr_t)"";
+        return WSTR("");
     }
     return taida_typeof(val, tag);
 }
@@ -900,6 +900,24 @@ int64_t taida_list_none(int64_t list_ptr, int64_t fn_ptr) {
 
 /* ── WC-3b: List operation functions (all profiles) ── */
 
+/* Ordering for Sort[] (native twin: taida_sort_gt): FLOAT kinds
+   compare as f64, strings by byte content via their positive header,
+   Int<->Float pairs cross over. Raw i64 order made negative-Float
+   order invert and turned Sort[] on a Str list into pointer order. */
+static int _wasm_sort_gt(int64_t a, uint32_t eka, int64_t b, uint32_t ekb) {
+    int a_f = WASM_EKIND_KIND(eka) == WASM_TAG_FLOAT;
+    int b_f = WASM_EKIND_KIND(ekb) == WASM_TAG_FLOAT;
+    if (a_f || b_f) {
+        double da, db;
+        if (a_f) __builtin_memcpy(&da, &a, sizeof(double)); else da = (double)a;
+        if (b_f) __builtin_memcpy(&db, &b, sizeof(double)); else db = (double)b;
+        return da > db;
+    }
+    if (_wasm_is_string_ptr(a) && _wasm_is_string_ptr(b))
+        return _wf_strcmp((const char *)(intptr_t)a, (const char *)(intptr_t)b) > 0;
+    return a > b;
+}
+
 int64_t taida_list_sort(int64_t list_ptr) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
@@ -915,12 +933,14 @@ int64_t taida_list_sort(int64_t list_ptr) {
         items[i] = list[WASM_LIST_ELEMS + i];
         if (eks) eks[i] = _wasm_elem_kind_at(list, i);
     }
-    /* Insertion sort ascending */
+    /* Insertion sort ascending — kind-aware (homogeneous lists carry
+       their kind in the single elem tag). */
+    uint32_t homog_ek = elem_tag >= 0 ? WASM_EKIND((uint32_t)elem_tag, 0) : WASM_EKIND_UNKNOWN;
     for (int64_t i = 1; i < len; i++) {
         int64_t key = items[i];
-        uint32_t kek = eks ? eks[i] : 0;
+        uint32_t kek = eks ? eks[i] : homog_ek;
         int64_t j = i - 1;
-        while (j >= 0 && items[j] > key) {
+        while (j >= 0 && _wasm_sort_gt(items[j], eks ? eks[j] : homog_ek, key, kek)) {
             items[j+1] = items[j];
             if (eks) eks[j+1] = eks[j];
             j--;
@@ -948,12 +968,13 @@ int64_t taida_list_sort_desc(int64_t list_ptr) {
         items[i] = list[WASM_LIST_ELEMS + i];
         if (eks) eks[i] = _wasm_elem_kind_at(list, i);
     }
-    /* Insertion sort descending */
+    /* Insertion sort descending — kind-aware, see _wasm_sort_gt. */
+    uint32_t homog_ek = elem_tag >= 0 ? WASM_EKIND((uint32_t)elem_tag, 0) : WASM_EKIND_UNKNOWN;
     for (int64_t i = 1; i < len; i++) {
         int64_t key = items[i];
-        uint32_t kek = eks ? eks[i] : 0;
+        uint32_t kek = eks ? eks[i] : homog_ek;
         int64_t j = i - 1;
-        while (j >= 0 && items[j] < key) {
+        while (j >= 0 && _wasm_sort_gt(key, kek, items[j], eks ? eks[j] : homog_ek)) {
             items[j+1] = items[j];
             if (eks) eks[j+1] = eks[j];
             j--;
@@ -1062,12 +1083,13 @@ int64_t taida_list_sort_by(int64_t list_ptr, int64_t fn_ptr) {
 int64_t taida_list_unique(int64_t list_ptr) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
-    if (_wasm_elem_slot_is_array(list[2])) {
+    if (_wasm_elem_slot_is_array(list[2])
+        || _wasm_elem_tag_for_propagation(list) == WASM_TAG_FLOAT) {
         /* Kind-aware dedup over (value, recorded kind) pairs (mirror of
            native taida_list_unique). The result rebuilds its own kind
            entries for the surviving elements (and naturally re-homogenises
            when only one kind survives). The hash path engages only when
-           every element kind is hashable — Float or unknown kinds fall back
+           every element kind is hashable — unknown kinds fall back
            to the linear pair scan. */
         int64_t new_list = taida_list_new();
         _wasm_seen_k seen;
@@ -1170,6 +1192,25 @@ int64_t taida_list_reverse(int64_t list_ptr) {
     return new_list;
 }
 
+/* Kind-aware element rendering for the list display paths. The list
+   records each element's kind, but the display paths used to funnel
+   every element through the tag-blind polymorphic heuristics — a Float
+   element rendered as its raw f64 bit pattern and a Bool as 0/1,
+   because neither payload can be identified from the value alone.
+   Every other kind keeps the existing fallback. */
+static int64_t _wasm_elem_to_string_kinded(int64_t item, uint32_t ek) {
+    uint32_t k = WASM_EKIND_KIND(ek);
+    if (k == WASM_TAG_FLOAT) return taida_float_to_str(item);
+    if (k == WASM_TAG_BOOL) {
+        const char *s = item ? "true" : "false";
+        unsigned int sl = item ? 4u : 5u;
+        char *r = _wasm_str_alloc(sl + 1);
+        _wf_memcpy(r, s, (int)(sl + 1));
+        return (int64_t)r;
+    }
+    return taida_polymorphic_to_string(item);
+}
+
 int64_t taida_list_join(int64_t list_ptr, int64_t sep_raw) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
@@ -1178,22 +1219,37 @@ int64_t taida_list_join(int64_t list_ptr, int64_t sep_raw) {
     if (!sep) sep = "";
     int sep_len = _wf_strlen(sep);
 
-    /* Convert each element through polymorphic_to_string */
+    /* String elements (the dominant case: Split/Map outputs) are
+       borrowed in place — materialising a per-element copy through
+       polymorphic_to_string just to memcpy it once is pure allocation
+       traffic. Non-string elements keep the shared toString path.
+       Lengths are scanned once and reused for the copy pass. The
+       total runs in 64 bits and oversize results are steered into the
+       allocator's loud heap-ceiling trap rather than wrapping the
+       32-bit allocation size. */
     const char **strs = (const char **)wasm_alloc((unsigned int)(len * sizeof(const char *)));
-    int total = 0;
+    int *lens = (int *)wasm_alloc((unsigned int)(len * sizeof(int)));
+    int64_t total = 0;
     for (int64_t i = 0; i < len; i++) {
-        strs[i] = (const char *)(intptr_t)taida_polymorphic_to_string(list[WASM_LIST_ELEMS + i]);
-        total += _wf_strlen(strs[i]);
+        int64_t elem = list[WASM_LIST_ELEMS + i];
+        if (_wasm_is_string_ptr(elem)) {
+            strs[i] = (const char *)(intptr_t)elem;
+        } else {
+            strs[i] = (const char *)(intptr_t)_wasm_elem_to_string_kinded(
+                elem, _wasm_elem_kind_at(list, i));
+        }
+        lens[i] = _wf_strlen(strs[i]);
+        total += lens[i];
         if (i > 0) total += sep_len;
     }
+    if (total + 1 > 0x7FFF0000LL) total = 0x7FFF0000LL; /* trap in the allocator */
 
     char *r = _wasm_str_alloc((unsigned int)(total + 1));
     char *dst = r;
     for (int64_t i = 0; i < len; i++) {
         if (i > 0 && sep_len > 0) { _wf_memcpy(dst, sep, sep_len); dst += sep_len; }
-        int sl = _wf_strlen(strs[i]);
-        _wf_memcpy(dst, strs[i], sl);
-        dst += sl;
+        _wf_memcpy(dst, strs[i], lens[i]);
+        dst += lens[i];
     }
     *dst = '\0';
     return (int64_t)r;
@@ -1225,7 +1281,32 @@ int64_t taida_list_concat(int64_t list1, int64_t list2) {
     return new_list;
 }
 
-int64_t taida_list_append(int64_t list_ptr, int64_t item) {
+/* Record the kind of a value about to be pushed by an append (native
+   twin: taida_list_note_appended_kind). Array carriers note the entry
+   verbatim. Homogeneous-tag lists only act in one case: an EMPTY list
+   with no established tag adopts the item's kind — this is how
+   `Append[@[], 1.5]()` and the tail-recursive `build(n, @[])` pattern
+   earn a Float tag; without it the result list stayed kindless and
+   Float/Bool elements displayed as raw bits. A non-empty list keeps
+   its tag untouched (the checker guarantees homogeneity; a kindless
+   non-empty list has unknown provenance). Enum kinds keep the legacy
+   untagged state — the homogeneous slot cannot carry the type-id aux. */
+static void _wasm_list_note_appended_kind(int64_t *nl, uint32_t item_ek) {
+    if (_wasm_elem_slot_is_array(nl[2])) {
+        _wasm_elem_tags_note_push_ek(nl, item_ek);
+        return;
+    }
+    uint32_t k = WASM_EKIND_KIND(item_ek);
+    if (k == WASM_EKIND_UNKNOWN) return;
+    if (nl[1] == 0 && nl[2] == WASM_TAG_UNKNOWN && k != WASM_TAG_ENUM) {
+        nl[2] = (int64_t)k;
+    }
+}
+
+/* Kind-supplying append: codegen passes the appended item's statically
+   known kind (same encoding as taida_list_map_k). UNKNOWN leaves every
+   tag exactly as the legacy entry point did. */
+int64_t taida_list_append_k(int64_t list_ptr, int64_t item, int64_t item_ek) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
     int src_tagged = _wasm_elem_slot_is_array(list[2]);
@@ -1239,9 +1320,28 @@ int64_t taida_list_append(int64_t list_ptr, int64_t item) {
             new_list = taida_list_push(new_list, list[WASM_LIST_ELEMS + i]);
         }
     }
-    if (src_tagged) _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)new_list, WASM_EKIND_UNKNOWN);
+    _wasm_list_note_appended_kind((int64_t *)(intptr_t)new_list, (uint32_t)item_ek);
     new_list = taida_list_push(new_list, item);
     return new_list;
+}
+
+int64_t taida_list_append(int64_t list_ptr, int64_t item) {
+    return taida_list_append_k(list_ptr, item, WASM_EKIND_UNKNOWN);
+}
+
+/* Consume-variant Append — see the native twin for the ownership
+   contract (owned=0 detaches via the copy variant; owned=1 pushes in
+   place, the lowering having proven no other reference exists). */
+int64_t taida_list_append_consume_k(int64_t list_ptr, int64_t item, int64_t item_ek,
+                                    int64_t owned) {
+    if (!owned) return taida_list_append_k(list_ptr, item, item_ek);
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    _wasm_list_note_appended_kind(list, (uint32_t)item_ek);
+    return taida_list_push(list_ptr, item);
+}
+
+int64_t taida_list_append_consume(int64_t list_ptr, int64_t item, int64_t owned) {
+    return taida_list_append_consume_k(list_ptr, item, WASM_EKIND_UNKNOWN, owned);
 }
 
 int64_t taida_list_prepend(int64_t list_ptr, int64_t item) {
@@ -1311,10 +1411,10 @@ int64_t taida_list_drop(int64_t list_ptr, int64_t n) {
    (registers inside the helper body rather than at startup because
    the field names are only meaningful on the zip / enumerate path). */
 static void _wasm_register_zip_enumerate_field_names(void) {
-    taida_register_field_name((int64_t)WASM_HASH_FIRST,  (int64_t)(intptr_t)"first");
-    taida_register_field_name((int64_t)WASM_HASH_SECOND, (int64_t)(intptr_t)"second");
-    taida_register_field_name((int64_t)WASM_HASH_INDEX,  (int64_t)(intptr_t)"index");
-    taida_register_field_name((int64_t)WASM_HASH_VALUE2, (int64_t)(intptr_t)"value");
+    taida_register_field_name((int64_t)WASM_HASH_FIRST,  WSTR("first"));
+    taida_register_field_name((int64_t)WASM_HASH_SECOND, WSTR("second"));
+    taida_register_field_name((int64_t)WASM_HASH_INDEX,  WSTR("index"));
+    taida_register_field_name((int64_t)WASM_HASH_VALUE2, WSTR("value"));
 }
 
 int64_t taida_list_enumerate(int64_t list_ptr) {
@@ -1377,14 +1477,18 @@ int64_t taida_list_to_display_string(int64_t list_ptr) {
         _wf_memcpy(result, "@[]", 4);
         return (int64_t)result;
     }
-    /* Build "@[elem, elem, ...]" */
+    /* Build "@[elem, elem, ...]" — the total runs in 64 bits and an
+       oversize result is steered into the allocator's loud
+       heap-ceiling trap rather than wrapping the 32-bit size. */
     const char **strs = (const char **)wasm_alloc((unsigned int)(len * sizeof(const char *)));
-    int total = 3; /* "@[" + "]" */
+    int64_t total = 3; /* "@[" + "]" */
     for (int64_t i = 0; i < len; i++) {
-        strs[i] = (const char *)(intptr_t)taida_polymorphic_to_string(list[WASM_LIST_ELEMS + i]);
+        strs[i] = (const char *)(intptr_t)_wasm_elem_to_string_kinded(
+            list[WASM_LIST_ELEMS + i], _wasm_elem_kind_at(list, i));
         total += _wf_strlen(strs[i]);
         if (i > 0) total += 2; /* ", " */
     }
+    if (total + 1 > 0x7FFF0000LL) total = 0x7FFF0000LL; /* trap in the allocator */
     char *r = _wasm_str_alloc((unsigned int)(total + 1));
     r[0] = '@'; r[1] = '[';
     char *dst = r + 2;
@@ -1415,15 +1519,22 @@ int64_t taida_list_last(int64_t list_ptr) {
     return _wasm_lax_new_k(list[WASM_LIST_ELEMS + len - 1], 0, _wasm_elem_kind_at(list, len - 1));
 }
 
+/* min/max order with the same kind-aware comparator as Sort[] and
+   carry the winner's kind into the Lax (native twin has details). */
 int64_t taida_list_min(int64_t list_ptr) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
     if (len == 0) return taida_lax_empty(0);
     int64_t min_val = list[WASM_LIST_ELEMS];
+    uint32_t min_ek = _wasm_elem_kind_at(list, 0);
     for (int64_t i = 1; i < len; i++) {
-        if (list[WASM_LIST_ELEMS + i] < min_val) min_val = list[WASM_LIST_ELEMS + i];
+        uint32_t ek = _wasm_elem_kind_at(list, i);
+        if (_wasm_sort_gt(min_val, min_ek, list[WASM_LIST_ELEMS + i], ek)) {
+            min_val = list[WASM_LIST_ELEMS + i];
+            min_ek = ek;
+        }
     }
-    return taida_lax_new(min_val, 0);
+    return _wasm_lax_new_k(min_val, 0, min_ek);
 }
 
 int64_t taida_list_max(int64_t list_ptr) {
@@ -1431,15 +1542,47 @@ int64_t taida_list_max(int64_t list_ptr) {
     int64_t len = list[1];
     if (len == 0) return taida_lax_empty(0);
     int64_t max_val = list[WASM_LIST_ELEMS];
+    uint32_t max_ek = _wasm_elem_kind_at(list, 0);
     for (int64_t i = 1; i < len; i++) {
-        if (list[WASM_LIST_ELEMS + i] > max_val) max_val = list[WASM_LIST_ELEMS + i];
+        uint32_t ek = _wasm_elem_kind_at(list, i);
+        if (_wasm_sort_gt(list[WASM_LIST_ELEMS + i], ek, max_val, max_ek)) {
+            max_val = list[WASM_LIST_ELEMS + i];
+            max_ek = ek;
+        }
     }
-    return taida_lax_new(max_val, 0);
+    return _wasm_lax_new_k(max_val, 0, max_ek);
 }
 
 int64_t taida_list_sum(int64_t list_ptr) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
+    /* A Float element's payload is its f64 bit pattern — a raw i64 +=
+       would add the bit patterns as garbage integers (native twin has
+       the same split). Any FLOAT-kind element switches the whole sum
+       to f64; Int-only lists keep the exact i64 accumulation. */
+    int has_float = 0;
+    for (int64_t i = 0; i < len; i++) {
+        if (WASM_EKIND_KIND(_wasm_elem_kind_at(list, i)) == WASM_TAG_FLOAT) {
+            has_float = 1;
+            break;
+        }
+    }
+    if (has_float) {
+        double dsum = 0.0;
+        for (int64_t i = 0; i < len; i++) {
+            int64_t v = list[WASM_LIST_ELEMS + i];
+            if (WASM_EKIND_KIND(_wasm_elem_kind_at(list, i)) == WASM_TAG_FLOAT) {
+                double d;
+                __builtin_memcpy(&d, &v, sizeof(double));
+                dsum += d;
+            } else {
+                dsum += (double)v;
+            }
+        }
+        int64_t bits;
+        __builtin_memcpy(&bits, &dsum, sizeof(double));
+        return bits;
+    }
     int64_t sum = 0;
     for (int64_t i = 0; i < len; i++) {
         sum += list[WASM_LIST_ELEMS + i];
@@ -1455,7 +1598,10 @@ int64_t taida_list_contains(int64_t list_ptr, int64_t item) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
     for (int64_t i = 0; i < len; i++) {
-        if (list[WASM_LIST_ELEMS + i] == item) return 1;
+        /* Structural equality (native twin: taida_list_contains): raw `==`
+           only matched by bit pattern, so a computed string or an equal
+           pack/list was never "contained" — unlike `==` / setOf / interp. */
+        if (_wasm_value_eq(list[WASM_LIST_ELEMS + i], item)) return 1;
     }
     return 0;
 }
@@ -1468,7 +1614,8 @@ int64_t taida_list_index_of(int64_t list_ptr, int64_t item) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
     for (int64_t i = 0; i < len; i++) {
-        if (list[WASM_LIST_ELEMS + i] == item) return i;
+        /* Structural equality — see taida_list_contains. */
+        if (_wasm_value_eq(list[WASM_LIST_ELEMS + i], item)) return i;
     }
     return -1;
 }
@@ -1478,7 +1625,8 @@ int64_t taida_list_last_index_of(int64_t list_ptr, int64_t item) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
     for (int64_t i = len - 1; i >= 0; i--) {
-        if (list[WASM_LIST_ELEMS + i] == item) return i;
+        /* Structural equality — see taida_list_contains. */
+        if (_wasm_value_eq(list[WASM_LIST_ELEMS + i], item)) return i;
     }
     return -1;
 }

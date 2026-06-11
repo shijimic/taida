@@ -690,7 +690,7 @@ mod tests {
 
     #[test]
     fn publish_auth_token_uses_publish_scope_env_token() {
-        let _guard = crate::util::env_test_lock().lock().unwrap();
+        let _guard = crate::util::env_test_guard();
         let old_gh = std::env::var("GH_TOKEN").ok();
         let old_github = std::env::var("GITHUB_TOKEN").ok();
         unsafe {

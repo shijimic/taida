@@ -418,10 +418,23 @@ impl Interpreter {
                     }
                     other => return Ok(Some(other)),
                 };
-                let parts: Vec<Value> = s
-                    .split(delim.as_str())
-                    .map(|p| Value::str(p.to_string()))
-                    .collect();
+                // Empty separator follows the locked `.split("")` method
+                // semantics (chars split, empty input gives the empty
+                // list) — NOT Rust's split(""), whose leading/trailing
+                // empty fragments this mold path used to leak, splitting
+                // the language in two against the method and every
+                // compiled backend.
+                let parts: Vec<Value> = if delim.is_empty() {
+                    if s.is_empty() {
+                        vec![]
+                    } else {
+                        s.chars().map(|ch| Value::str(ch.to_string())).collect()
+                    }
+                } else {
+                    s.split(delim.as_str())
+                        .map(|p| Value::str(p.to_string()))
+                        .collect()
+                };
                 Ok(Some(Signal::Value(Value::list(parts))))
             }
             "Chars" => {
@@ -558,6 +571,22 @@ impl Interpreter {
                             new_offset,
                             new_len,
                         ))))
+                    }
+                    Value::List(items) => {
+                        let end = if type_args.len() >= 3 {
+                            match self.eval_expr(&type_args[2])? {
+                                Signal::Value(Value::Int(n)) => n,
+                                _ => items.len() as i64,
+                            }
+                        } else {
+                            self.eval_mold_option(fields, "end")?
+                                .and_then(|v| if let Value::Int(n) = v { Some(n) } else { None })
+                                .unwrap_or(items.len() as i64)
+                        };
+                        let (clamped_start, clamped_end) =
+                            clamp_slice_bounds(items.len(), start, end);
+                        let result: Vec<Value> = items[clamped_start..clamped_end].to_vec();
+                        Ok(Some(Signal::Value(Value::list(result))))
                     }
                     _ => Ok(None), // Not a supported Slice target, fall through
                 }
@@ -1926,6 +1955,49 @@ impl Interpreter {
                 };
                 let result: Vec<String> = list.iter().map(|v| v.to_display_string()).collect();
                 Ok(Some(Signal::Value(Value::str(result.join(&sep)))))
+            }
+            "Min" | "Max" => {
+                // Mold twins of the .min()/.max() methods (the spec table
+                // registered them but no backend implemented the mold form:
+                // the interpreter leaked the raw MoldInst pack).
+                if type_args.is_empty() {
+                    return Err(RuntimeError {
+                        message: format!("{} requires 1 argument: {}[list]()", name, name),
+                    });
+                }
+                let list = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(Value::List(items)) => items,
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!("{}: argument must be a list, got {}", name, v),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                if list.is_empty() {
+                    return Ok(Some(Signal::Value(Value::pack(vec![
+                        ("has_value".into(), Value::Bool(false)),
+                        ("__value".into(), Value::Int(0)),
+                        ("__default".into(), Value::Int(0)),
+                        ("__type".into(), Value::str("Lax".into())),
+                    ]))));
+                }
+                let picked = if name == "Min" {
+                    list.iter()
+                        .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                } else {
+                    list.iter()
+                        .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                }
+                .cloned()
+                .unwrap_or_else(|| Value::default_for_list(&list));
+                let default_val = super::eval::Interpreter::default_for_value(&picked);
+                Ok(Some(Signal::Value(Value::pack(vec![
+                    ("has_value".into(), Value::Bool(true)),
+                    ("__value".into(), picked),
+                    ("__default".into(), default_val),
+                    ("__type".into(), Value::str("Lax".into())),
+                ]))))
             }
             "Sum" => {
                 if type_args.is_empty() {

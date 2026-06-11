@@ -345,6 +345,17 @@ pub fn classify_symbol_in_module(
             Statement::Assignment(a) if a.target == symbol_name => {
                 return Some(SymbolKind::Value);
             }
+            // Unmold bindings (`... >=> name` / `name <=< ...`) are value
+            // bindings too: classifying them through the Function
+            // fallback made an exported unmold-bound module value link
+            // against a non-existent function symbol and fail the
+            // native/wasm build.
+            Statement::UnmoldForward(uf) if uf.target == symbol_name => {
+                return Some(SymbolKind::Value);
+            }
+            Statement::UnmoldBackward(ub) if ub.target == symbol_name => {
+                return Some(SymbolKind::Value);
+            }
             // Note: EnumDef is intentionally not handled here.
             // In the native backend, imported enums are treated as Functions
             // (the default fallback), which matches existing behavior.

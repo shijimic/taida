@@ -875,7 +875,39 @@ mod tests {
         //   helper header described static strings as header-less; they have
         //   carried a TAIDA_STR_STATIC_MAGIC header since the F58 rework.
         //   +103. 1,310,758 -> 1,310,861.
-        const EXPECTED_TOTAL_LEN: usize = 1_310_861;
+        // 2026-06-10 consume-variant Append (core.c, F1): +912.
+        //   1,310,861 -> 1,311,773.
+        // 2026-06-11 kind-aware hash path for Float-bearing Set ops /
+        //   unique (core.c, F1): Float fingerprint canonicalisation +
+        //   seen-set wiring in union/intersect/diff, tagged linear
+        //   helpers removed. +3,074. 1,322,868 -> 1,325,942.
+        // 2026-06-11 unhandled-throw report unification (core.c, F2):
+        //   taida_throw's no-ceiling path matches the interpreter's
+        //   `Runtime error: Unhandled error: ...` / Error[type]: message
+        //   format. +1,407. 1,325,942 -> 1,327,349.
+        // 2026-06-11 string-conversion parse parity (core.c, F1):
+        //   Int rejects out-of-range (ERANGE), Float rejects strtod's
+        //   whitespace / hex / NaN-payload extensions — both matching
+        //   the reference parse. +1,013. 1,327,349 -> 1,328,362.
+        // 2026-06-11 code-point string indexing (core.c, F1): length /
+        //   get / CharAt / Slice / Reverse walk UTF-8 lead bytes instead
+        //   of treating bytes as characters. +2,123.
+        //   1,328,362 -> 1,330,485.
+        // 2026-06-11 public-shape container display (core.c, F2): the
+        //   synthetic `@(__entries/__items ...)` full-form renderers are
+        //   removed — every display path routes HashMap / Set through
+        //   the `HashMap({...})` / `Set({...})` shape. -5,273.
+        //   1,330,485 -> 1,325,212.
+        // 2026-06-11 Slice end-sentinel unification (core.c, F1): +390.
+        //   1,325,212 -> 1,325,602.
+        // 2026-06-11 STR tags on str.get's Lax (core.c, F1): +317.
+        //   1,325,602 -> 1,325,919.
+        // 2026-06-11 numeric fingerprint = f64 image (core.c, F1): the
+        //   kind-aware fingerprint lives in the same domain the
+        //   equality widens to, so past-2^53 Int/Float crossings stop
+        //   splitting hash buckets the equality merges. -516.
+        //   1,325,919 -> 1,325,403.
+        const EXPECTED_TOTAL_LEN: usize = 1_325_403;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1613,7 +1645,23 @@ mod tests {
         // 2026-06-10 F58 stale-comment refresh: the heap-string helper
         //   header comment now matches the static-string header reality
         //   (before the marker). +103. F1 402,959 -> 403,062.
-        const F1_LEN: usize = 403_062;
+        // 2026-06-10 consume-variant Append (core.c, before the marker):
+        //   taida_list_append_consume — in-place push once the
+        //   tail-recursive build loop owns its accumulator (ownership
+        //   bit threaded by the emitter). +912. F1 403,062 -> 403,974.
+        // 2026-06-11 kind-aware hash path for Float-bearing Set ops /
+        //   unique (before the marker): +3,074. F1 413,526 -> 416,600.
+        // 2026-06-11 string-conversion parse parity (before the
+        //   marker): +1,013. F1 416,600 -> 417,613.
+        // 2026-06-11 code-point string indexing (before the marker):
+        //   +2,123. F1 417,613 -> 419,736.
+        // 2026-06-11 Slice end-sentinel unification (before the
+        //   marker): +390. F1 419,736 -> 420,126.
+        // 2026-06-11 STR tags on str.get's Lax (before the marker):
+        //   +317. F1 420,126 -> 420,443.
+        // 2026-06-11 numeric fingerprint = f64 image (before the
+        //   marker): -516. F1 420,443 -> 419,927.
+        const F1_LEN: usize = 419_927;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this
@@ -1652,7 +1700,33 @@ mod tests {
             // F2 225,711 -> 227,107.
             // F58 P2-2: (no change after the marker for the watermark itself;
             // recompute keeps this in lockstep). F2 -> 227,400.
-            F1_LEN + 227_400,
+            // String-duel work: borrowed-string list join + the kind-aware
+            // element renderer next to it land before the marker (F1
+            // 403,974 -> 406,101); the list-display loop's switch to that
+            // renderer adds +47 after the marker. F2 227,400 -> 227,447.
+            // Kind-supplying append (note_appended_kind + the _k entry
+            // points) lands before the marker (F1 406,101 -> 407,671);
+            // the full-form list renderers' kind wiring adds +732 after
+            // it. F2 227,447 -> 228,179.
+            // Quality work: f64-aware Sum, structural-equality membership
+            // (contains/indexOf), and the kind-aware sort comparator all
+            // land before the marker (F1 407,671 -> 410,760); F2 unchanged.
+            // min/max switch to that comparator and stamp the winner's
+            // kind into their Lax (F1 410,760 -> 411,424); F2 unchanged.
+            // jsonEncode learns the Float hint + non-monadic slot-tag
+            // read (after the marker): F2 228,179 -> 228,943.
+            // HashMap/Set display kind wiring lands before the marker
+            // (F1 411,424 -> 412,335); F2 unchanged.
+            // Fixed-notation float formatting for extreme magnitudes
+            // (F1 412,335 -> 413,526); F2 unchanged.
+            // Float-bearing Set ops hash path, the string-conversion
+            // parse parity and the code-point string indexing land
+            // before the marker (F1 413,526 -> 419,736); the
+            // unhandled-throw report unification adds +1,407 after it
+            // and the public-shape container display removes the
+            // synthetic full-form renderers (-5,273).
+            // F2 228,943 -> 225,077.
+            F1_LEN + 225_077,
             "core.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";

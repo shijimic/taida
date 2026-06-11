@@ -122,6 +122,14 @@ pub struct IrFunction {
     pub params: Vec<String>,
     pub body: Vec<IrInst>,
     pub next_var: IrVar,
+    /// Set by the append-consume rewrite: this function's body holds
+    /// `taida_list_append_consume` calls whose third (ownership)
+    /// argument must be wired by the emitter as part of the TCO loop
+    /// machinery — 0 on entry, 1 after every self tail-call. A named
+    /// IR variable cannot express this: the native emitter resolves
+    /// DefVar/UseVar statically (no loop-carried mutation), so the
+    /// bit lives next to the loop the same way the param variables do.
+    pub append_consume_owned: bool,
 }
 
 impl IrFunction {
@@ -130,6 +138,7 @@ impl IrFunction {
             name,
             params: Vec::new(),
             body: Vec::new(),
+            append_consume_owned: false,
             next_var: 0,
         }
     }
@@ -141,6 +150,7 @@ impl IrFunction {
             params,
             body: Vec::new(),
             next_var,
+            append_consume_owned: false,
         }
     }
 

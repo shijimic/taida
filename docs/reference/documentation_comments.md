@@ -17,13 +17,13 @@
 
 ### 単一行コメント
 
-```taida
+```taida fragment
 ///@ Purpose: この関数の目的を簡潔に説明
 ```
 
 ### 複数行コメント
 
-```taida
+```taida fragment
 ///@
 ///@ 複数行にわたる説明を
 ///@ 記述できます。
@@ -34,7 +34,7 @@
 
 タグは `@タグ名:` の形式で始まり、値が続きます。
 
-```taida
+```taida fragment
 ///@ Purpose: パイロットを作成する
 ///@ Returns: 作成されたパイロットオブジェクト
 ```
@@ -75,7 +75,7 @@ getPilot id: Int includeDeleted: Bool =
 
 戻り値を説明します。
 
-```taida
+```taida fragment
 ///@ Returns: 見つかったパイロット、見つからない場合はデフォルト値
 ```
 
@@ -83,7 +83,7 @@ getPilot id: Int includeDeleted: Bool =
 
 発生しうるエラーを説明します。
 
-```taida
+```taida fragment
 ///@ Throws:
 ///@   - ValidationError: IDが負の場合
 ///@   - NetworkError: サーバーに接続できない場合
@@ -93,7 +93,7 @@ getPilot id: Int includeDeleted: Bool =
 
 使用例を示します。
 
-```taida
+```taida fragment
 ///@ Example:
 ///@   pilot <= getPilot(123)
 ///@   stdout(pilot.name)  // "Misato"
@@ -103,7 +103,7 @@ getPilot id: Int includeDeleted: Bool =
 
 導入バージョンを示します。値は Taida のバージョン表記 `<世代>.<番号>.<ラベル?>` (`a.3` / `c.27` / `e.30` / `e.32.alpha` など) を使います。`1.2.0` のような Semantic Versioning 風の値は使用しません（リリースプロセスの方針については [`docs/reference/release_process.md`](release_process.md) を参照）。
 
-```taida
+```taida fragment
 ///@ Since: e.32
 ```
 
@@ -113,7 +113,7 @@ doc-comment の lint (`taida way lint`) は、`@Since:` の値が `[a-z]\.\d+(\.
 
 非推奨であることを示します。
 
-```taida
+```taida fragment
 ///@ Deprecated: 代わりに getPilotById を使用してください
 ```
 
@@ -121,7 +121,7 @@ doc-comment の lint (`taida way lint`) は、`@Since:` の値が `[a-z]\.\d+(\.
 
 関連する関数・型への参照を示します。
 
-```taida
+```taida fragment
 ///@ See: updatePilot, deletePilot
 ```
 
@@ -151,7 +151,7 @@ createPilot name: Str email: Str =
 
 AI が学習するための複数の使用例を提供します。
 
-```taida
+```taida fragment
 ///@ AI-Examples:
 ///@   // 基本的な使用
 ///@   pilot <= createPilot("Misato", "asuka@nerv.jp")
@@ -171,7 +171,7 @@ AI が学習するための複数の使用例を提供します。
 
 AI がこの関数で行ってはいけないことを説明します。
 
-```taida
+```taida fragment
 ///@ AI-Constraints:
 ///@   - 未検証の入力を直接渡さない
 ///@   - 空文字列のnameを渡さない
@@ -186,7 +186,7 @@ AI がこの関数で行ってはいけないことを説明します。
 
 関連する関数・型を示し、AI が文脈を理解するのを助けます。
 
-```taida
+```taida fragment
 ///@ AI-Related:
 ///@   - updatePilot: パイロット情報の更新
 ///@   - deletePilot: パイロットの削除
@@ -198,7 +198,7 @@ AI がこの関数で行ってはいけないことを説明します。
 
 機能のカテゴリを示します。
 
-```taida
+```taida fragment
 ///@ AI-Category: pilot-management, crud, database
 ```
 
@@ -218,7 +218,7 @@ AI がこの関数で行ってはいけないことを説明します。
 
 処理の計算量や複雑さを示します。
 
-```taida
+```taida fragment
 ///@ AI-Complexity:
 ///@   - Time: O(n log n)
 ///@   - Space: O(n)
@@ -229,7 +229,7 @@ AI がこの関数で行ってはいけないことを説明します。
 
 副作用を明示します。
 
-```taida
+```taida fragment
 ///@ AI-SideEffects:
 ///@   - Database: Creates new pilot record
 ///@   - Email: Sends welcome email
@@ -240,7 +240,7 @@ AI がこの関数で行ってはいけないことを説明します。
 
 AI が実装や呼び出し方を選ぶときの補助ヒントを明示します。
 
-```taida
+```taida fragment
 ///@ AI-Hint:
 ///@   - Prefer renderFrame for normal TUI redraw loops
 ///@   - Pair enter/leave style APIs in cleanup paths
@@ -441,7 +441,7 @@ createPilot name: Str =
 
 ### 2. AI-Contextは具体的に書く
 
-```taida
+```taida fragment
 // 良い例
 ///@ AI-Context:
 ///@   パイロット登録フォームの送信時に呼び出される。
@@ -454,7 +454,7 @@ createPilot name: Str =
 
 ### 3. 例は実際に動作するコードで書く
 
-```taida
+```taida fragment
 // 良い例
 ///@ Example:
 ///@   config <= loadConfig("app.json")
@@ -469,7 +469,7 @@ createPilot name: Str =
 
 ### 4. 制約は具体的な値で示す
 
-```taida
+```taida fragment
 // 良い例
 ///@ AI-Constraints:
 ///@   - nameは1文字以上100文字以下

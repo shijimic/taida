@@ -185,7 +185,7 @@ result <= sumTo(1000000)  // スタックオーバーフローしません
 
 ### 階乗
 
-```taida
+```taida fragment
 factorial n: Int =
   factorialTail n 1
 => :Int
@@ -198,7 +198,7 @@ factorialTail n: Int acc: Int =
 
 ### フィボナッチ数列
 
-```taida
+```taida fragment
 fibonacci n: Int =
   fibTail n 0 1
 => :Int
@@ -283,7 +283,7 @@ classify n =
 - `expr => _var` パターンでの値の捨て (哲学 I「暗黙の排除」に反するため)。末尾位置でも `_var` への破棄は禁止
 - アーム本体内での関数定義 / 型定義 / モールド定義 / `|==` エラー天井 / `>>>` import / `<<<` export
 
-```taida
+```taida reject
 // NG: アーム内に副作用文が紛れ込む anti-pattern
 validateProjectRoot =
   rootExists <= Exists["./"]()
@@ -300,7 +300,7 @@ validateProjectRoot =
 
 副作用を伴う前処理が必要な場合は **アーム本体の外に出す** か、ヘルパ関数 / `If` モールドを使います。
 
-```taida
+```taida reject
 // NG: アーム内で副作用を起こしている
 run =
   | needsInit |>

@@ -1339,9 +1339,54 @@ impl Value {
             }
             Value::Bool(b) => b.to_string(),
             Value::BuchiPack(fields) => {
-                let is_lax = fields.iter().any(|(name, value)| {
-                    name == "__type" && matches!(value, Value::Str(s) if s.as_string() == "Lax")
+                // HashMap / Set are packs internally, but their `__`
+                // fields are compiler-internal (the diagnostics docs
+                // declare the `__` namespace reserved) — display the
+                // same `HashMap({...})` / `Set({...})` shape the
+                // `.toString()` methods and the compiled backends
+                // print, never the carrier pack.
+                let type_tag = fields.iter().find_map(|(name, value)| {
+                    if name == "__type"
+                        && let Value::Str(s) = value
+                    {
+                        Some(s.as_string().as_str())
+                    } else {
+                        None
+                    }
                 });
+                if type_tag == Some("HashMap")
+                    && let Some(Value::List(entries)) = fields
+                        .iter()
+                        .find(|(n, _)| n == "__entries")
+                        .map(|(_, v)| v)
+                {
+                    let pairs: Vec<String> = entries
+                        .iter()
+                        .filter_map(|entry| {
+                            let Value::BuchiPack(ef) = entry else {
+                                return None;
+                            };
+                            let key = ef
+                                .iter()
+                                .find(|(n, _)| n == "key")
+                                .map(|(_, v)| v.to_debug_string())?;
+                            let value = ef
+                                .iter()
+                                .find(|(n, _)| n == "value")
+                                .map(|(_, v)| v.to_debug_string())?;
+                            Some(format!("{}: {}", key, value))
+                        })
+                        .collect();
+                    return format!("HashMap({{{}}})", pairs.join(", "));
+                }
+                if type_tag == Some("Set")
+                    && let Some(Value::List(items)) =
+                        fields.iter().find(|(n, _)| n == "__items").map(|(_, v)| v)
+                {
+                    let strs: Vec<String> = items.iter().map(|i| i.to_debug_string()).collect();
+                    return format!("Set({{{}}})", strs.join(", "));
+                }
+                let is_lax = type_tag == Some("Lax");
                 let mut s = String::from("@(");
                 let mut visible = 0;
                 for (name, val) in fields.iter() {

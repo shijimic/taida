@@ -1125,7 +1125,7 @@ mod tests {
         // unit tests in parallel and `cache_root()` reads `HOME`,
         // so without this lock two clean_addon_cache tests race
         // and one walks the other test's fixture root.
-        let _guard = crate::util::env_test_lock().lock().unwrap();
+        let _guard = crate::util::env_test_guard();
         // Redirect HOME to a temp dir so we don't touch the real cache.
         let saved_home = std::env::var("HOME").ok();
         let tmp = std::env::temp_dir().join(format!("taida_clean_empty_{}", std::process::id()));
@@ -1158,7 +1158,7 @@ mod tests {
     fn clean_addon_cache_removes_binaries_and_sidecars() {
         // RC2B-209: serialize HOME mutation. See sibling test
         // `clean_addon_cache_on_empty_root` for the rationale.
-        let _guard = crate::util::env_test_lock().lock().unwrap();
+        let _guard = crate::util::env_test_guard();
         let saved_home = std::env::var("HOME").ok();
         let tmp = std::env::temp_dir().join(format!("taida_clean_nonempty_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);

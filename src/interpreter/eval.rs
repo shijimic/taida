@@ -144,6 +144,15 @@ pub struct Interpreter {
     /// When a mutual tail call is detected, this holds the target function name.
     /// Used by call_function's trampoline loop to switch to a different function.
     mutual_tail_call_target: Option<String>,
+    /// `node_id`s of `Append[p, item]()` sites in the currently
+    /// executing function that passed the shared consume analysis
+    /// (`parser::append_consume_plan`). When such a site evaluates, the
+    /// accumulator binding is taken out of the environment instead of
+    /// cloned, so `Value::list_take` sees a unique Arc and pushes in
+    /// place — turning the tail-recursive build loop from O(n²) into
+    /// amortized O(n). Saved/restored across nested calls; the empty
+    /// set disables the fast path.
+    append_consume_sites: std::collections::HashSet<usize>,
     /// Methods defined in TypeDef/InheritanceDef/MoldDef: type_name -> method_name -> FuncDef
     pub(crate) type_methods: HashMap<String, HashMap<String, FuncDef>>,
     /// TypeDef field definitions: type_name -> Vec<FieldDef> (for JSON schema matching)
@@ -251,6 +260,7 @@ impl Interpreter {
             loading_modules: HashSet::new(),
             active_function: None,
             mutual_tail_call_target: None,
+            append_consume_sites: std::collections::HashSet::new(),
             type_methods: HashMap::new(),
             type_defs: HashMap::new(),
             enum_defs: HashMap::new(),
@@ -1288,6 +1298,37 @@ impl Interpreter {
                     return self.eval_rust_addon_binding(type_args, fields, span);
                 }
 
+                // Append-consume fast path (sites proven by the shared
+                // shape analysis, keyed by node_id): take the accumulator
+                // binding out of the environment instead of cloning it.
+                // The shape guarantees the binding is never read again in
+                // this activation, and `list_take` still falls back to a
+                // copy whenever any other alias holds the Arc — the first
+                // iteration of a build loop detaches that way.
+                if name == "Append"
+                    && type_args.len() >= 2
+                    && self.append_consume_sites.contains(&span.node_id)
+                    && let Expr::Ident(pname, _) = &type_args[0]
+                    && let Some(taken) = self.env.take(pname)
+                {
+                    match taken {
+                        Value::List(items) => {
+                            let val = match self.eval_expr(&type_args[1])? {
+                                Signal::Value(v) => v,
+                                other => return Ok(other),
+                            };
+                            let mut result = Value::list_take(items);
+                            result.push(val);
+                            return Ok(Signal::Value(Value::list(result)));
+                        }
+                        other_val => {
+                            // Not a list: restore the binding and let the
+                            // normal arm produce its error message.
+                            self.env.define_force(pname, other_val);
+                        }
+                    }
+                }
+
                 // Check for new operation mold types (str, num, list with fields support)
                 if let Some(result) = self.try_operation_mold(name, type_args, fields)? {
                     return Ok(result);
@@ -2266,6 +2307,19 @@ impl Interpreter {
         // current_func tracks which function to execute (may change for mutual recursion)
         let mut current_func = func.clone();
         let mut current_args = arg_values;
+        // Append-consume: compute this function's consumable sites once
+        // per activation (recomputed on mutual retarget). The previous
+        // set is restored on every exit path alongside `prev_active`.
+        let saved_consume_sites = std::mem::replace(
+            &mut self.append_consume_sites,
+            crate::parser::append_consume_plan(
+                &current_func.name,
+                &current_func.params,
+                &current_func.body,
+            )
+            .map(|plan| plan.sites)
+            .unwrap_or_default(),
+        );
         // C20B-015 / ROOT-18: overlay defining-module typedef scope.
         //
         // Invariant: on *every* exit path from this trampoline we restore
@@ -2323,6 +2377,7 @@ impl Interpreter {
                     self.type_defs = saved_td_root.clone();
                     self.enum_defs = saved_ed_root.clone();
                     self.active_function = prev_active;
+                    self.append_consume_sites = saved_consume_sites;
                     self.call_depth -= 1;
                     return Ok(signal);
                 }
@@ -2333,6 +2388,7 @@ impl Interpreter {
                     self.type_defs = saved_td_root.clone();
                     self.enum_defs = saved_ed_root.clone();
                     self.active_function = prev_active;
+                    self.append_consume_sites = saved_consume_sites;
                     self.call_depth -= 1;
                     return Err(err);
                 }
@@ -2363,6 +2419,7 @@ impl Interpreter {
                     self.type_defs = saved_td_root.clone();
                     self.enum_defs = saved_ed_root.clone();
                     self.active_function = prev_active;
+                    self.append_consume_sites = saved_consume_sites;
                     self.call_depth -= 1;
                     return Err(err);
                 }
@@ -2401,6 +2458,16 @@ impl Interpreter {
                             // overlay into a later iteration's scope.
                             self.type_defs = saved_td_root.clone();
                             self.enum_defs = saved_ed_root.clone();
+                            // The retargeted function has its own consume
+                            // plan (usually none) — never carry the previous
+                            // function's sites across.
+                            self.append_consume_sites = crate::parser::append_consume_plan(
+                                &current_func.name,
+                                &current_func.params,
+                                &current_func.body,
+                            )
+                            .map(|plan| plan.sites)
+                            .unwrap_or_default();
                             let _ = self.push_func_module_scope(&current_func);
                             continue;
                         } else {
@@ -2411,6 +2478,7 @@ impl Interpreter {
                             self.active_function = prev_active.clone();
                             self.type_defs = saved_td_root.clone();
                             self.enum_defs = saved_ed_root.clone();
+                            self.append_consume_sites = saved_consume_sites;
                             // Re-evaluate the original function body without tail call optimization.
                             // We need to re-execute the function with the original args but
                             // as a normal call. Instead, we reconstruct the call.
@@ -2434,6 +2502,7 @@ impl Interpreter {
                     self.type_defs = saved_td_root.clone();
                     self.enum_defs = saved_ed_root.clone();
                     self.active_function = prev_active;
+                    self.append_consume_sites = saved_consume_sites;
                     self.call_depth -= 1;
                     return Ok(other);
                 }

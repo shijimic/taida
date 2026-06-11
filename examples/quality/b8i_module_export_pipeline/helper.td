@@ -4,6 +4,6 @@ processNums nums: @[Int] =
   Map[evens, _ x: Int = x * 10]() >=> scaled
   Sum[scaled]() >=> total
   total
-=> :Num
+=> :Int
 
 <<< @(processNums)

@@ -171,9 +171,9 @@ empty.max().getOrDefault(-1)             // -1
 すべての要素が条件を満たすかを返します。
 
 ```taida
-@[2, 4, 6].all(_ x = Mod[x, 2]() >=> r; r == 0)  // true
-@[1, 2, 3].all(_ x = x > 0)                        // true
-@[1, 2, 3].all(_ x = x > 2)                        // false
+stdout(@[2, 4, 6].all(_ x = Mod[x, 2]().getOrDefault(1) == 0))  // true
+stdout(@[1, 2, 3].all(_ x = x > 0))                              // true
+stdout(@[1, 2, 3].all(_ x = x > 2))                              // false
 ```
 
 ### none
@@ -201,11 +201,13 @@ empty.max().getOrDefault(-1)             // -1
 Map[@[1, 2, 3], _ x = x * 2]() >=> doubled
 // doubled: @[2, 4, 6]
 
-// 条件付き変換
-Map[@[1, 2, 3, 4, 5], _ x =
+// 条件付き変換はヘルパ関数に切り出す
+// (モールドの `[]` 引数は同一物理行に収める必要があります)
+scaleBig x: Int =
   | x > 3 |> x * 10
   | _ |> x
-]() >=> processed
+=> :Int
+Map[@[1, 2, 3, 4, 5], scaleBig]() >=> processed
 // processed: @[1, 2, 3, 40, 50]
 ```
 
@@ -233,12 +235,13 @@ Filter[@[1, 2, 3, 4, 5, 6], isEven]() >=> evens
 Fold[@[1, 2, 3, 4, 5], 0, _ acc: Int x: Int = acc + x]() >=> total
 // total: 15
 
-// 文字列の結合
-names <= @["Asuka", "Rei", "Shinji"]
-Fold[names, "", _ acc: Str name: Str =
+// 文字列の結合 (条件分岐を伴う畳み込みはヘルパ関数に切り出す)
+joinNames acc: Str name: Str =
   | acc == "" |> name
   | _ |> acc + ", " + name
-]() >=> joined
+=> :Str
+names <= @["Asuka", "Rei", "Shinji"]
+Fold[names, "", joinNames]() >=> joined
 // joined: "Asuka, Rei, Shinji"
 ```
 

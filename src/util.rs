@@ -22,3 +22,15 @@ pub fn env_test_lock() -> &'static std::sync::Mutex<()> {
     static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
+
+/// Acquire the env lock, recovering from poisoning. A single test
+/// panicking while it holds the lock must not cascade a PoisonError
+/// into every later env-touching test in the same process — each test
+/// sets up the variables it reads, so the previous holder's state is
+/// irrelevant to correctness.
+#[cfg(test)]
+pub fn env_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    env_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}

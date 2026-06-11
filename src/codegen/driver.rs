@@ -46,7 +46,7 @@ const WASM_CLANG_FLAGS_COMMON: &[&str] = &[
 ];
 const WASM_CLANG_FLAGS_MIN: &[&str] = &[];
 const WASM_CLANG_FLAGS_WASI: &[&str] = &["-msimd128"];
-const WASM_CLANG_FLAGS_EDGE: &[&str] = &["-msimd128"];
+const WASM_CLANG_FLAGS_EDGE: &[&str] = &["-msimd128", "-DTAIDA_WASM_PROFILE_EDGE"];
 const WASM_CLANG_FLAGS_FULL: &[&str] = &["-msimd128"];
 
 /// Measurement-build gate: when the `TAIDA_PERF_COUNTERS=1` environment

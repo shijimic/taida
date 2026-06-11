@@ -88,6 +88,21 @@ impl Environment {
         self.get(name).is_some()
     }
 
+    /// Remove and return a binding, searching innermost→outermost —
+    /// the same resolution order as `get`, so shadowing resolves
+    /// identically. The caller takes ownership of the value; the
+    /// binding ceases to exist. Only safe when the caller can prove
+    /// the name is never read again in the binding's remaining
+    /// lifetime (see the Append consume fast path).
+    pub fn take(&mut self, name: &str) -> Option<Value> {
+        for scope in self.scopes.iter_mut().rev() {
+            if let Some(value) = scope.remove(name) {
+                return Some(value);
+            }
+        }
+        None
+    }
+
     /// Check if a variable is defined in the current (innermost) scope only.
     /// Used to distinguish local definitions from outer-scope definitions.
     pub fn is_defined_in_current_scope(&self, name: &str) -> bool {

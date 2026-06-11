@@ -15,8 +15,8 @@ Taida の言語設計において特別な意味を持つ **構文マーカー**
 | 1 | `=` | 定義 | 型・関数・エラー天井の定義 |
 | 2 | `=>` | 右ぶちこみ | パイプライン・代入（左から右へ） |
 | 3 | `<=` | 左ぶちこみ | 代入・関数適用（右から左へ） |
-| 4 | `>=>` | 右アンモールド | `solidify` 後の値から `unmold` で取り出して右側へ渡す（`=>` と同じ右方向） |
-| 5 | `<=<` | 左アンモールド | `solidify` 後の値から `unmold` で取り出して左側へ渡す（`<=` と同じ左方向） |
+| 4 | `>=>` | 右アンモールド | モールド値から `unmold` で取り出して右側へ渡す（`=>` と同じ右方向） |
+| 5 | `<=<` | 左アンモールド | モールド値から `unmold` で取り出して左側へ渡す（`<=` と同じ左方向） |
 | 6 | `\|==` | エラー天井 | エラーをキャッチして処理 |
 | 7 | `(\| ... \|>)` | 条件分岐 | 条件のガードと値取り出しを 1 つの delimiter pair として数える (`\| cond \|> body`) |
 | 8 | `>>>` | インポート | モジュールの読み込み |
@@ -273,10 +273,12 @@ typed: Int <= plusOne(_) <= double(_) <= 10
 - `{=>} ⊆ Ops(S)` かつ `{<=} ⊆ Ops(S)` のとき、文 S はコンパイルエラーとなる
 - ただし `=`（定義演算子）はこの制約の対象外である
 
-```taida
+```taida fragment
 // OK: 単一方向
 data => filter(_) => map(_) => result
+```
 
+```taida reject
 // NG: 方向混在（コンパイルエラー）
 data => filter(_) <= result
 // エラー E0301: 単一方向制約違反
@@ -342,7 +344,7 @@ riskyOperation()
 
 Lax 境界は `|==` ではなく、`has_value` / `getOrDefault` / `|` による分岐で処理します:
 
-```taida
+```taida fragment
 result <= JSON[raw, User]()
 result >=> user
 | user.status.has_value |> stdout("status=" + user.status.getOrDefault(Status:Pending()).toString())
@@ -416,7 +418,7 @@ err.throw()
 
 シンボルをエクスポートします。通常の `.td` ファイルでは複数行の `<<<` が許可されます。
 
-```taida
+```taida fragment
 // 複数シンボル
 <<< @(add, subtract, Point)
 
@@ -541,7 +543,7 @@ Gorillax モールドの unmold 失敗時も同様にゴリラが発動し、プ
 
 ### `unmold()` アンモールド（メソッド形式）
 
-`solidify` 後の値に対して `unmold` を実行し、取り出し値を返します。
+モールド値に対して `unmold` を実行し、取り出し値を返します。
 
 ```taida
 lax <= Div[10, 3]()
@@ -561,7 +563,7 @@ result <= (
 
 ### `>=>` 右アンモールド
 
-`solidify` 後の値に `unmold` を適用し、右側の変数に代入します。
+モールド値に `unmold` を適用し、右側の変数に代入します。
 
 ```taida fragment
 lax <= Div[10, 3]()
@@ -580,7 +582,7 @@ Map[filtered, _ x = x * 2]() >=> result
 
 ### `<=<` 左アンモールド
 
-`>=>` の逆向き。`solidify` 後の値に `unmold` を適用し、左側の変数に代入します。
+`>=>` の逆向き。モールド値に `unmold` を適用し、左側の変数に代入します。
 
 ```taida fragment
 lax <= Div[10, 3]()
@@ -601,11 +603,13 @@ filtered <=< Filter[items, _ x = x > 10]()
 - 文 S 内に出現するアンモールド演算子の集合を `UnmoldOps(S)` とする
 - `{>=>} ⊆ UnmoldOps(S)` かつ `{<=<} ⊆ UnmoldOps(S)` のとき、文 S はコンパイルエラーとなる
 
-```taida
+```taida fragment
 // OK: 単一方向
 mold >=> value
 value <=< mold
+```
 
+```taida reject
 // NG: 方向混在（コンパイルエラー）
 mold >=> x <=< other
 // エラー E0302: 単一方向制約違反
@@ -673,9 +677,7 @@ result <= add(x, 10)
 
 ### 関数呼び出しの引数補完（仕様）
 
-関数引数デフォルトの正式仕様は `docs/design/function_default_args.md` を参照。
-
-要点:
+関数引数デフォルトの仕様の要点 (詳細は [関数ガイド](../guide/09_functions.md#引数のデフォルト値)):
 
 1. 省略された末尾引数は実効デフォルトで補完される
 2. 実効デフォルトは `param: Type <= expr` があれば `expr`、なければ型デフォルト

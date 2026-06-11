@@ -869,3 +869,176 @@ pub fn statement_contains_placeholder(stmt: &Statement) -> bool {
         Statement::EnumDef(_) | Statement::Import(_) | Statement::Export(_) => false,
     }
 }
+
+/// Consume plan for sequential-Append tail recursion
+/// (`f(n - 1, Append[acc, x]())`): the runtimes copy the whole
+/// accumulator per element — O(n²) — unless they can prove the
+/// accumulator's only use in every self-tail-calling arm is the
+/// Append's first argument. This shared analysis mirrors the native
+/// backend's IR-level pass; the Interpreter and JS backends key their
+/// consume fast paths off `sites` (expression `node_id`s), so an
+/// `Append` that did not pass the shape check here can never be
+/// consumed. Everything fails closed.
+pub struct AppendConsumePlan {
+    /// The accumulator parameter's name.
+    pub param: String,
+    /// The accumulator's position in the parameter list (and therefore
+    /// in every full-arity self call).
+    pub param_idx: usize,
+    /// `node_id` of each `Append[p, item]()` MoldInst that is safe to
+    /// consume.
+    pub sites: std::collections::HashSet<usize>,
+}
+
+/// Analyse a function body for the consumable-Append shape.
+///
+/// Accepted shape (everything else returns `None`):
+/// - the body is a single `CondBranch` expression statement,
+/// - no parameter declares a default value (a short self call would
+///   evaluate defaults after the explicit args and may read the
+///   consumed list),
+/// - every arm whose single statement is a full-arity self call has
+///   the candidate parameter appear exactly once — as the first
+///   argument of an `Append[p, item]()` in the parameter's own slot —
+///   with every other argument scalar-safe (no calls, no lambdas, no
+///   reference to `p` or the function itself),
+/// - no arm condition mentions the candidate parameter.
+///
+/// Arms that are not such a self call cannot reach a consume site (the
+/// sites are keyed by node id), so they are unconstrained.
+pub fn append_consume_plan(
+    fname: &str,
+    params: &[Param],
+    body: &[Statement],
+) -> Option<AppendConsumePlan> {
+    if params.is_empty() || params.iter().any(|p| p.default_value.is_some()) {
+        return None;
+    }
+    let arity = params.len();
+    let [Statement::Expr(Expr::CondBranch(arms, _))] = body else {
+        return None;
+    };
+    'params: for (p_idx, p) in params.iter().enumerate() {
+        let pname = p.name.as_str();
+        let mut sites = std::collections::HashSet::new();
+        for arm in arms {
+            // The condition must mention neither the accumulator nor
+            // the function itself — a self call inside a condition would
+            // make "every self call is a bare tail call" unprovable.
+            if let Some(cond) = &arm.condition
+                && (expr_mentions_ident(cond, pname) || expr_mentions_ident(cond, fname))
+            {
+                continue 'params;
+            }
+            let [Statement::Expr(Expr::FuncCall(callee, args, _))] = arm.body.as_slice() else {
+                continue; // not a bare call — cannot host a consume site
+            };
+            if !matches!(callee.as_ref(), Expr::Ident(n, _) if n == fname) {
+                continue; // call to something else — unconstrained
+            }
+            if args.len() != arity {
+                continue 'params; // default completion may read p
+            }
+            let Some(Expr::MoldInst(mname, targs, mfields, mspan)) = args.get(p_idx) else {
+                continue 'params;
+            };
+            if mname != "Append" || targs.len() != 2 || !mfields.is_empty() {
+                continue 'params;
+            }
+            if !matches!(&targs[0], Expr::Ident(n, _) if n == pname) {
+                continue 'params;
+            }
+            if !append_consume_scalar_safe(&targs[1], pname, fname) {
+                continue 'params;
+            }
+            for (i, a) in args.iter().enumerate() {
+                if i != p_idx && !append_consume_scalar_safe(a, pname, fname) {
+                    continue 'params;
+                }
+            }
+            sites.insert(mspan.node_id);
+        }
+        if !sites.is_empty() {
+            return Some(AppendConsumePlan {
+                param: pname.to_string(),
+                param_idx: p_idx,
+                sites,
+            });
+        }
+    }
+    None
+}
+
+/// Scalar-safe: literals, identifiers other than the accumulator and
+/// the function itself, and arithmetic over those. Calls, lambdas,
+/// containers — anything that could alias or re-enter — fail closed.
+fn append_consume_scalar_safe(e: &Expr, pname: &str, fname: &str) -> bool {
+    match e {
+        Expr::Ident(n, _) => n != pname && n != fname,
+        Expr::IntLit(..) | Expr::FloatLit(..) | Expr::BoolLit(..) | Expr::StringLit(..) => true,
+        Expr::BinaryOp(l, _, r, _) => {
+            append_consume_scalar_safe(l, pname, fname)
+                && append_consume_scalar_safe(r, pname, fname)
+        }
+        Expr::UnaryOp(_, x, _) => append_consume_scalar_safe(x, pname, fname),
+        _ => false,
+    }
+}
+
+/// Whether `name` is mentioned anywhere inside `e`. Lambdas count as a
+/// mention (closure capture reaches every visible binding), as do
+/// template literals containing the name and any statement form we do
+/// not model — this is a fail-closed guard, not a precise use check.
+fn expr_mentions_ident(e: &Expr, name: &str) -> bool {
+    match e {
+        Expr::Ident(n, _) => n == name,
+        Expr::IntLit(..)
+        | Expr::FloatLit(..)
+        | Expr::StringLit(..)
+        | Expr::BoolLit(..)
+        | Expr::Gorilla(..)
+        | Expr::Placeholder(..)
+        | Expr::Hole(..)
+        | Expr::TypeLiteral(..)
+        | Expr::EnumVariant(..) => false,
+        Expr::TemplateLit(s, _) => s.contains(name),
+        Expr::Lambda(..) => true,
+        Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => {
+            fields.iter().any(|f| expr_mentions_ident(&f.value, name))
+        }
+        Expr::ListLit(items, _) | Expr::Pipeline(items, _) => {
+            items.iter().any(|i| expr_mentions_ident(i, name))
+        }
+        Expr::BinaryOp(l, _, r, _) => expr_mentions_ident(l, name) || expr_mentions_ident(r, name),
+        Expr::UnaryOp(_, x, _) | Expr::Unmold(x, _) | Expr::Throw(x, _) => {
+            expr_mentions_ident(x, name)
+        }
+        Expr::FuncCall(c, args, _) => {
+            expr_mentions_ident(c, name) || args.iter().any(|a| expr_mentions_ident(a, name))
+        }
+        Expr::MethodCall(recv, _, args, _) => {
+            expr_mentions_ident(recv, name) || args.iter().any(|a| expr_mentions_ident(a, name))
+        }
+        Expr::FieldAccess(x, _, _) => expr_mentions_ident(x, name),
+        Expr::CondBranch(arms, _) => arms.iter().any(|arm| {
+            arm.condition
+                .as_ref()
+                .is_some_and(|c| expr_mentions_ident(c, name))
+                || arm.body.iter().any(|st| stmt_mentions_ident(st, name))
+        }),
+        Expr::MoldInst(_, targs, fields, _) => {
+            targs.iter().any(|t| expr_mentions_ident(t, name))
+                || fields.iter().any(|f| expr_mentions_ident(&f.value, name))
+        }
+    }
+}
+
+fn stmt_mentions_ident(st: &Statement, name: &str) -> bool {
+    match st {
+        Statement::Expr(e) => expr_mentions_ident(e, name),
+        Statement::Assignment(a) => expr_mentions_ident(&a.value, name),
+        Statement::UnmoldForward(u) => expr_mentions_ident(&u.source, name),
+        Statement::UnmoldBackward(u) => expr_mentions_ident(&u.source, name),
+        _ => true, // unmodeled statement form — fail closed
+    }
+}

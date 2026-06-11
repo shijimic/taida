@@ -553,9 +553,9 @@ impl TypeRegistry {
         use crate::parser::TypeExpr;
         match ty {
             TypeExpr::Named(name) => match name.as_str() {
-                "Int" => Type::Int,
+                "Int" | "Integer" => Type::Int,
                 "Float" => Type::Float,
-                "Num" | "Number" => Type::Num,
+                "Num" => Type::Num,
                 "Str" | "String" => Type::Str,
                 "Bytes" => Type::Bytes,
                 "Bool" | "Boolean" => Type::Bool,

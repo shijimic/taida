@@ -22,7 +22,7 @@
 
 > 入力の SHA-2 ダイジェストを小文字 16 進文字列で返す。
 
-```taida
+```taida fragment
 sha256 value: Str => :Str
 sha256 value: Bytes => :Str
 sha512 value: Str => :Str
@@ -70,7 +70,7 @@ sha256(raw) => hex_bytes
 
 > RFC 2104 の HMAC-SHA256 を小文字 16 進文字列 (64 文字) で返す。
 
-```taida
+```taida fragment
 hmacSha256 key: Str, data: Str => :Str
 hmacSha256 key: Bytes, data: Bytes => :Str
 ```
@@ -102,7 +102,7 @@ hmacSha256("Jefe", "what do ya want for nothing?") => mac
 
 > 2 つのバイト列が等しいかを定数時間で比較する。
 
-```taida
+```taida fragment
 constantTimeEquals a: Str, b: Str => :Bool
 constantTimeEquals a: Bytes, b: Bytes => :Bool
 ```
@@ -135,7 +135,7 @@ constantTimeEquals(expectedMac, actualMac) => ok
 
 > バイト列を 16 進 / base64 文字列にエンコードする。
 
-```taida
+```taida fragment
 hexEncode data: Str => :Str
 hexEncode data: Bytes => :Str
 base64Encode data: Str => :Str
@@ -157,7 +157,7 @@ base64Encode("foobar") => b // b = "Zm9vYmFy"
 > 16 進 / base64 文字列をバイト列にデコードする。不正入力は失敗側の
 > `Lax[Bytes]` を返す。
 
-```taida
+```taida fragment
 hexDecode hex: Str => :Lax[Bytes]
 base64Decode b64: Str => :Lax[Bytes]
 ```
@@ -201,7 +201,7 @@ hexDecode("zz").has_value => ok    // ok = false（不正 hex）
 
 > OS の暗号論的乱数源から `n` バイトを取得する。
 
-```taida
+```taida fragment
 randomBytes n: Int => :Bytes
 ```
 

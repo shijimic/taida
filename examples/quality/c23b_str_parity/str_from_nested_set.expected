@@ -1,1 +1,1 @@
-@(has_value <= true, __value <= "@(__entries <= @[@(key <= "k", value <= @(__items <= @[1, 2], __type <= "Set"))], __type <= "HashMap")", __default <= "", __type <= "Lax")
+@(has_value <= true, __value <= "HashMap({"k": Set({1, 2})})", __default <= "", __type <= "Lax")

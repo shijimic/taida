@@ -133,6 +133,10 @@ pub struct Lowering {
     /// `a.get(i) >=> av` の unmold 結果型推論 (= `av` を float_vars に入れる) に使う。
     /// これが無いと内積計算 `av * bv` が `taida_int_mul` に降り、Float bits が破壊される。
     list_element_types: std::collections::HashMap<String, String>,
+    /// Pack-literal bindings' per-field static kinds (tag_prop TAG_*),
+    /// keyed by variable name — `p <= @(x <= 1.5)` records p.x = FLOAT
+    /// so a later `p.x` field read displays under its real type.
+    pack_field_kinds: std::collections::HashMap<String, std::collections::HashMap<String, i64>>,
     /// TypeDef 名 → メソッド定義リスト（メソッド名, FuncDef）
     type_method_defs: std::collections::HashMap<String, Vec<(String, crate::parser::FuncDef)>>,
     /// トップレベルで定義される変数名のセット（Native グローバル変数テーブル用）

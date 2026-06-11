@@ -245,7 +245,7 @@ fn wasm_min_size_gate() {
         hello_size
     );
 
-    // Hard gate: pi_approx must be <= 9,664 bytes.
+    // Hard gate: pi_approx must be <= 10,240 bytes.
     // F56 (2026-06-09): bumped 9,216 -> 9,664 across the secret-carrier landing.
     // The shared wasm runtime gained the sealed-carrier (Moltenized/Secret)
     // fail-closed guards, which `pi_approx` links via `>=>` (unmold reject),
@@ -253,10 +253,18 @@ fn wasm_min_size_gate() {
     // guard): pi.wasm 9,097 -> 9,516 (+419). These guards are the runtime half of
     // the no-plaintext-leak guarantee — display/unmold can't expose a sealed
     // value and `==`/dedup/indexOf can't form an equality oracle — even under
-    // `--no-check`, so the cost is intentional. Headroom kept at ~148 bytes.
+    // `--no-check`, so the cost is intentional.
+    // Quality track (2026-06-11): bumped 9,664 -> 10,240. taida_throw's
+    // no-ceiling path now prints the reference's one-line unhandled
+    // report (pack type/message extraction + WASI stderr write +
+    // proc_exit) instead of trapping after a generic note: +418 on every
+    // binary that links throw. The report deliberately renders strings
+    // and scalars locally — referencing the polymorphic display
+    // machinery from this path would cost ~16KB, which this gate caught.
+    // Headroom kept at ~158 bytes.
     assert!(
-        pi_size > 0 && pi_size <= 9664,
-        "HARD GATE FAIL: pi.wasm should be <= 9,664 bytes (WC-7d gate), got {} bytes. \
+        pi_size > 0 && pi_size <= 10240,
+        "HARD GATE FAIL: pi.wasm should be <= 10,240 bytes (WC-7d gate), got {} bytes. \
          E33 core baseline is 8,348 bytes.",
         pi_size
     );

@@ -1445,11 +1445,50 @@ defaulted fields must be provided via `()`",
         }
 
         if arity_ok {
+            // Callback-kinded arguments (unary/binary function or predicate)
+            // are inferred WITH the element-type hint derived from the list
+            // argument, mirroring method-position lambdas — a bare
+            // `self.infer_expr_type(lambda)` here fired [E1527] on every
+            // unannotated mold callback before the HOF inference arm could
+            // supply the expected function type.
+            let elem_hint = std::cell::OnceCell::<Type>::new();
             for (idx, arg) in type_args.iter().enumerate() {
                 let Some(kind) = spec.arg_kinds.get(idx).copied() else {
                     continue;
                 };
-                self.validate_builtin_mold_arg_kind(name, idx, arg, kind, span);
+                use crate::types::mold_specs::MoldArgKind as K;
+                let hint = match kind {
+                    K::UnaryFunction | K::UnaryPredicate | K::BinaryFunction => {
+                        let elem = elem_hint
+                            .get_or_init(|| {
+                                let list_ty = type_args
+                                    .first()
+                                    .map(|a| self.infer_expr_type(a))
+                                    .unwrap_or(Type::Unknown);
+                                Self::mold_list_elem_type(&list_ty)
+                            })
+                            .clone();
+                        let ret = if matches!(kind, K::UnaryPredicate) {
+                            Type::Bool
+                        } else {
+                            Type::Unknown
+                        };
+                        match kind {
+                            K::BinaryFunction => {
+                                // Fold-family callback: (Acc, T) => Acc. The
+                                // accumulator type comes from the init arg.
+                                let acc = type_args
+                                    .get(1)
+                                    .map(|a| self.infer_expr_type(a))
+                                    .unwrap_or(Type::Unknown);
+                                Some(Type::Function(vec![acc.clone(), elem], Box::new(acc)))
+                            }
+                            _ => Some(Type::Function(vec![elem], Box::new(ret))),
+                        }
+                    }
+                    _ => None,
+                };
+                self.validate_builtin_mold_arg_kind_hinted(name, idx, arg, kind, span, hint);
             }
         }
 
@@ -1489,18 +1528,22 @@ defaulted fields must be provided via `()`",
         }
     }
 
-    fn validate_builtin_mold_arg_kind(
+    fn validate_builtin_mold_arg_kind_hinted(
         &mut self,
         mold_name: &str,
         idx: usize,
         arg: &Expr,
         kind: crate::types::mold_specs::MoldArgKind,
         span: &Span,
+        hint: Option<Type>,
     ) {
         if matches!(kind, crate::types::mold_specs::MoldArgKind::Any) {
             return;
         }
-        let actual = self.infer_expr_type(arg);
+        let actual = match hint {
+            Some(expected) => self.infer_expr_type_with_expected(arg, &expected),
+            None => self.infer_expr_type(arg),
+        };
         if self.builtin_mold_kind_matches(&actual, kind) {
             return;
         }

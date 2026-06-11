@@ -199,7 +199,7 @@ createStaff name: Str rank: Str =
 
 副作用を持つ関数であることを明示します。
 
-```taida
+```taida fragment
 ///@ AI-SideEffects: writes to database
 saveRecord record: Record =
   ...
@@ -210,7 +210,7 @@ saveRecord record: Record =
 
 関数がスローする可能性のあるエラー型を明示します。
 
-```taida
+```taida fragment
 ///@ Throws:
 ///@   - ValidationError: 入力が不正な場合
 ///@   - NetworkError: 接続エラー
