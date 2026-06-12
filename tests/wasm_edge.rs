@@ -1359,6 +1359,161 @@ const fs = require("fs");
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Test: a Cage reached on the dead path after a pending suspend must be
+/// inert. The wasm error model is flag-based (a throw does not unwind), so
+/// the statements after the first suspending Cage still execute with dummy
+/// values; before the dead-path guard the second Cage overwrote the pending
+/// envelope (the host saw the WRONG call) and consumed replay payloads out
+/// of order (re-running non-idempotent host calls). Two sequential
+/// awaiting-helper calls are the minimal trigger.
+#[test]
+fn wasm_edge_handler_dead_path_cage_keeps_first_pending_node() {
+    if !Command::new("node")
+        .arg("--version")
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+    {
+        eprintln!("node not found, skipping wasm-edge dead-path Cage runtime test");
+        return;
+    }
+
+    let dir = unique_temp_dir("taida_wasm_edge_dead_path_cage");
+    let td_path = dir.join("handler.td");
+    let wasm_path = dir.join("handler.wasm");
+    let js_path = dir.join("dead_path.js");
+    let source = r#">>> taida-lang/abi => @(WebRequest, WebResponse, text, HostCall, HostStep, HostCapability)
+
+KV <= "cloudflare/kv"
+
+getOne key: Str =
+  cache <= HostCapability["CACHE", KV]()
+  value <=< Cage[cache, HostCall[@[HostStep["get", @[key]]()], Str]()]()
+  value
+=> :Str
+
+handle req: WebRequest =
+  a <= getOne("first")
+  b <= getOne("second")
+  text(a + "/" + b)
+=> :WebResponse
+"#;
+    let wrangler = r#"{ "kv_namespaces": [{ "binding": "CACHE" }] }"#;
+
+    std::fs::write(dir.join("wrangler.jsonc"), wrangler).expect("write wrangler manifest");
+    std::fs::write(&td_path, source).expect("write dead-path handler fixture");
+
+    let err = compile_wasm_edge_handler(&td_path, &wasm_path, "handle");
+    assert!(
+        err.is_none(),
+        "dead-path handler build should compile: {:?}",
+        err
+    );
+
+    let wasm_for_js = wasm_path.to_string_lossy();
+    let script = format!(
+        r#"
+const fs = require("fs");
+
+(async () => {{
+  let memory = new WebAssembly.Memory({{ initial: 2 }});
+  const wasm = fs.readFileSync("{wasm_for_js}");
+  const imports = {{
+    env: {{ memory }},
+    wasi_snapshot_preview1: {{
+      fd_write(fd, iovsPtr, iovsLen, nwrittenPtr) {{
+        new DataView(memory.buffer).setUint32(nwrittenPtr, 0, true);
+        return 0;
+      }},
+    }},
+    taida_host: {{
+      env_get() {{ return 0; }},
+      env_get_all() {{ return 0; }},
+    }},
+  }};
+  const {{ instance }} = await WebAssembly.instantiate(wasm, imports);
+  if (instance.exports.memory) {{
+    memory = instance.exports.memory;
+  }}
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  const request = encoder.encode(JSON.stringify({{
+    method: "GET",
+    path: "/dead-path",
+    rawQuery: "",
+    query: [],
+    headers: [],
+    bodyBase64: "",
+  }}));
+  const reqPtr = instance.exports.taida_abi_web_alloc(request.length);
+  new Uint8Array(memory.buffer, reqPtr, request.length).set(request);
+  const handle = instance.exports.taida_abi_web_start(reqPtr, request.length);
+  const seen = [];
+  const answers = {{ first: "A", second: "B" }};
+  for (let i = 0; i < 8; i++) {{
+    const state = instance.exports.taida_abi_web_poll(handle);
+    if (state === 0) {{
+      const outPtr = instance.exports.taida_abi_web_out_ptr(handle);
+      const outLen = instance.exports.taida_abi_web_out_len(handle);
+      const raw = decoder.decode(new Uint8Array(memory.buffer, outPtr, outLen));
+      instance.exports.taida_abi_web_free(handle);
+      console.log(JSON.stringify({{ seen, raw: JSON.parse(raw) }}));
+      return;
+    }}
+    if (state !== 1) throw new Error("unexpected poll state " + state);
+    const pendingPtr = instance.exports.taida_abi_web_out_ptr(handle);
+    const pendingLen = instance.exports.taida_abi_web_out_len(handle);
+    const pending = JSON.parse(decoder.decode(new Uint8Array(memory.buffer, pendingPtr, pendingLen)));
+    const key = pending.steps[0].args[0];
+    seen.push(key);
+    if (!(key in answers)) throw new Error("unmocked key " + key);
+    const resume = encoder.encode(JSON.stringify({{ id: pending.id, ok: true, value: answers[key] }}));
+    const resumePtr = instance.exports.taida_abi_web_alloc(resume.length);
+    new Uint8Array(memory.buffer, resumePtr, resume.length).set(resume);
+    instance.exports.taida_abi_web_resume(handle, resumePtr, resume.length);
+  }}
+  throw new Error("poll limit exceeded");
+}})().catch((err) => {{
+  console.error(err && err.stack ? err.stack : err);
+  process.exit(1);
+}});
+"#
+    );
+    std::fs::write(&js_path, script).expect("write dead-path node harness");
+
+    let run = Command::new("node")
+        .arg(&js_path)
+        .output()
+        .expect("node dead-path harness should run");
+    assert!(
+        run.status.success(),
+        "node dead-path harness failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("harness should print JSON");
+    assert_eq!(
+        parsed["seen"],
+        serde_json::json!(["first", "second"]),
+        "the FIRST pending envelope must reach the host first (no dead-path overwrite), got: {}",
+        stdout
+    );
+    assert_eq!(
+        parsed["raw"]["status"], 200,
+        "handler should complete after both resumes, got: {}",
+        stdout
+    );
+    // "A/B" — each call got its own recorded payload, in order.
+    assert_eq!(
+        parsed["raw"]["bodyBase64"], "QS9C",
+        "replay payloads must map to their own calls, got: {}",
+        stdout
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Test: HostCall encodes Bytes arguments with the same base64 wire rule as the
 /// request/response ABI instead of exposing the internal list-of-Int layout.
 #[test]

@@ -1240,7 +1240,25 @@ static int64_t abi_host_resume_error_async(const char *message) {
     return taida_async_err(abi_host_error(message ? message : "host call failed"));
 }
 
+/* Exposed by the core runtime (error-flag throw model). */
+extern int64_t taida_is_error_thrown(void);
+
 int64_t taida_abi_host_cage(int64_t capability, int64_t call) {
+    /* Dead-path guard. The wasm error model is flag-based: a throw does
+       not unwind, execution continues with dummy values until a ceiling /
+       try boundary checks the flag. A Cage reached on such a poisoned
+       path (e.g. the statements after a pending suspend throw) must be
+       inert: consuming a replay payload here would shift every later
+       call onto the wrong recorded result, and set_pending_json would
+       overwrite the envelope the host is about to read — re-running
+       non-idempotent host calls. Mirror native's longjmp semantics
+       instead: the first throw wins, later cages on the dead path do
+       nothing. Returning a resolved Async keeps the await from throwing
+       again, so the original error value (or the pending sentinel of the
+       suspend that started the dead path) reaches the boundary intact. */
+    if (taida_is_error_thrown()) {
+        return taida_async_ok(0);
+    }
     if (abi_host_replay_cursor < abi_host_replay_count) {
         const char *json = abi_host_replay_json[abi_host_replay_cursor];
         int32_t len = abi_host_replay_lens[abi_host_replay_cursor];
