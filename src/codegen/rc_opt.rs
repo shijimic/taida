@@ -46,15 +46,16 @@ fn remove_release_before_return(insts: &mut Vec<IrInst>) {
     // パターン: UseVar(tmp, name) → Release(tmp) → ... → Return(ret)
     // Return の直前にある Release を除去したい
 
-    if !matches!(insts.last(), Some(IrInst::Return(_))) {
+    let Some(IrInst::Return(returned)) = insts.last() else {
         return;
-    }
+    };
 
     let release_idx = len - 2;
     let use_idx = len - 3;
     if let (IrInst::Release(rel_var), IrInst::UseVar(use_var, _)) =
         (&insts[release_idx], &insts[use_idx])
         && rel_var == use_var
+        && rel_var == returned
     {
         insts.remove(release_idx);
     }
@@ -87,5 +88,28 @@ fn optimize_cond_branches(insts: &mut Vec<IrInst>) {
                 optimize_cond_branches(&mut arm.body);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn returning_a_scalar_keeps_heap_cleanup() {
+        let mut body = vec![
+            IrInst::ConstInt(0, 7),
+            IrInst::UseVar(1, "scratch".into()),
+            IrInst::Release(1),
+            IrInst::Return(0),
+        ];
+        remove_release_before_return(&mut body);
+        assert!(body.iter().any(|i| matches!(i, IrInst::Release(1))));
+        let mut transferred = vec![
+            IrInst::UseVar(1, "result".into()),
+            IrInst::Release(1),
+            IrInst::Return(1),
+        ];
+        remove_release_before_return(&mut transferred);
+        assert!(!transferred.iter().any(|i| matches!(i, IrInst::Release(_))));
     }
 }

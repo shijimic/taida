@@ -117,7 +117,7 @@ export async function handleTaidaRequest(request, env, ctx) {{
         const key = readStr(key_ptr, key_len);
         const val = env[key];
         if (val === undefined || val === null || typeof val !== "string") {{
-          return 0;
+          return -1;
         }}
         const bytes = encoder.encode(val);
         if (bytes.length > buf_cap) {{
@@ -317,7 +317,7 @@ async function getInstance(env) {{
         const key = readStr(key_ptr, key_len);
         const val = env[key];
         if (val === undefined || val === null || typeof val !== "string") {{
-          return 0;
+          return -1;
         }}
         const bytes = encoder.encode(val);
         if (bytes.length > buf_cap) {{

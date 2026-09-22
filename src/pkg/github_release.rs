@@ -57,7 +57,7 @@ fn api_url() -> String {
 
 /// Build a blocking reqwest client with the required headers.
 fn make_client(token: &str) -> Result<reqwest::blocking::Client, String> {
-    reqwest::blocking::Client::builder()
+    crate::util::http_client_builder()
         .user_agent("taida-publish")
         .default_headers({
             let mut headers = reqwest::header::HeaderMap::new();

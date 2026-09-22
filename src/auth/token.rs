@@ -106,6 +106,9 @@ pub fn save_token(
             .open(&path)
             .and_then(|mut f| {
                 use std::io::Write;
+                use std::os::unix::fs::PermissionsExt;
+                // Tighten an existing file before writing a new secret.
+                f.set_permissions(fs::Permissions::from_mode(0o600))?;
                 f.write_all(json.as_bytes())
             })
             .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
@@ -328,6 +331,8 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+            save_token("gho_testperms", Some("taida_sess"), "permuser").unwrap();
             let meta = fs::metadata(&path).unwrap();
             let mode = meta.permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "Expected permission 0o600, got 0o{:o}", mode);

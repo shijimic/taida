@@ -247,6 +247,7 @@ ClassLike / Inheritance で「親型を継承するだけで自前のフィー�
 | `E1616` | 条件分岐のアーム本体で、副作用のみの裸の関数呼び出し文を禁止 | Parser |
 | `E1617` | Regex の不変条件違反 (WASM プロファイル下での `Regex` 参照、`__` 接頭辞フィールドの衝突など) | TypeChecker / コード生成 |
 | `E1618` | モジュール境界越しの enum variant 並び順不一致 | TypeChecker |
+| `E1619` | 算術演算 (`+` / `-` / `*`) のオペランド型が不整合 | TypeChecker |
 | `E1620` | CPU worker 本体から I/O / 環境 / 時刻 / ネットワーク / プロセス / pool など外部効果を持つ API を呼び出した | TypeChecker |
 | `E1621` | CPU worker 本体から addon / host interop 境界 (`RustAddon` / `Cage` / JS runner など) を越えた | TypeChecker |
 | `E1622` | CPU worker 本体の中で `AsyncTask` / `Par` / `ParMap` / `Async` / `Stream` などの非同期・並列構造をネストした | TypeChecker |
@@ -259,6 +260,7 @@ ClassLike / Inheritance で「親型を継承するだけで自前のフィー�
 | `E1629` | addon audit metadata が無効、期限切れ、失効済み、または検証不能 | TypeChecker |
 | `E1630` | addon purity policy または function override が不正 | TypeChecker |
 | `E1631` | addon manifest の purity metadata が malformed、または未知関数を参照した | Addon manifest parser / TypeChecker |
+| `E1632` | 型エイリアスの展開に循環がある (例: `A = @[B]` と `B = @[A]`) | TypeChecker |
 
 #### `E1605` — 比較オペランド型の不整合
 
@@ -272,6 +274,7 @@ ClassLike / Inheritance で「親型を継承するだけで自前のフィー�
 |--------|-----------|---------|
 | `E1700` | 提供されていない top-level command / CLI flag が呼ばれた。新しい command path / positional syntax を使うこと | CLI |
 | `E1701` | `packages.tdm` で宣言された公開 API とエントリモジュールの実シンボル群が不整合 (未公開 symbol import / 宣言済み symbol 欠如 / module 内シンボル未発見) | TypeChecker |
+| `E1702` | テンプレート文字列の `${...}` 補間に式以外（文）が書かれた。補間には式のみを書くこと | Interpreter / コード生成 |
 
 `E1700` の標準表示:
 

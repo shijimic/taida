@@ -317,7 +317,14 @@ impl Interpreter {
                         Err(_) => None, // Invalid response from handler.
                     }
                 }
-                Err(_) => None, // Handler threw an error.
+                Err(_) => {
+                    // this path swallows the callback RuntimeError,
+                    // so consume the stashed throw value too — leaving it
+                    // stale would wire THIS request's error into the next
+                    // unrelated error ceiling.
+                    let _ = self.pending_throw.take();
+                    None // Handler threw an error.
+                }
             }
         };
 

@@ -129,7 +129,7 @@ pub struct Interpreter {
     /// counter replaces that check: after `eval_program`, if
     /// `stdout_emissions == 0` and the final value is not `Unit`, print it
     /// (matches existing buffered behavior where `output.is_empty()` conveys
-    /// the same signal). Named "emissions" rather than "stdout_count" because
+    /// The same signal). Named "emissions" rather than "stdout_count" because
     /// `debug` also increments it — both builtins surface to stdout in stream
     /// mode (see `prelude.rs` for the debug→stdout design rationale).
     pub stdout_emissions: usize,
@@ -203,7 +203,7 @@ pub struct Interpreter {
     /// Active streaming writer for 2-arg httpServe handler.
     /// Set before calling the handler, cleared after the handler returns.
     /// This allows startResponse/writeChunk/endResponse/sseEvent to access
-    /// the connection's StreamingWriter state and TcpStream during handler execution.
+    /// The connection's StreamingWriter state and TcpStream during handler execution.
     /// Safety: The interpreter is single-threaded (!Send). The raw pointers point to
     /// stack-local variables in dispatch_request that outlive the handler call.
     pub(crate) active_streaming_writer: Option<super::net::eval::ActiveStreamingWriter>,
@@ -225,6 +225,11 @@ pub struct Interpreter {
     /// sub-step; the interpreter contract here is purely runtime).
     pub(crate) loading_addon_facade_ctx: Option<(String, std::collections::BTreeMap<String, u32>)>,
 }
+
+/// Snapshot of the typedef/enum registries captured for a TCO trampoline's
+/// module-context overlay restore (see `push_func_module_scope_tracked`).
+#[allow(clippy::type_complexity)]
+type ModuleRegistrySnapshot = (HashMap<String, Vec<FieldDef>>, HashMap<String, Vec<String>>);
 
 impl Interpreter {
     /// Synthetic defaultFn sentinel name.
@@ -300,7 +305,7 @@ impl Interpreter {
     ///
     /// The public contract of `stdout` / `debug` is unchanged — still returns
     /// `Int` bytes, still appends the implicit `\n` on each invocation. Only
-    /// the flush timing differs between the two modes.
+    /// The flush timing differs between the two modes.
     pub fn new_streaming() -> Self {
         let mut interp = Self::new();
         interp.stream_stdout = true;
@@ -446,6 +451,15 @@ impl Interpreter {
                 // The remaining statements after the error ceiling are "protected"
                 let protected_stmts = &stmts[i + 1..];
 
+                // a consumer that swallows the callback RuntimeError
+                // (an HTTP handler answering 500, for example) leaves
+                // `pending_throw` stale. Clear it on entry so this ceiling
+                // never recovers a PREVIOUS run's throw when a genuine
+                // RuntimeError fires inside its own protected block — long
+                // lived servers would otherwise wire an old error value into
+                // an unrelated handler.
+                self.pending_throw = None;
+
                 // Evaluate the protected statements WITHOUT tail-call optimization.
                 // TCO on the last protected statement would return Signal::TailCall,
                 // bypassing the error ceiling catch below.  The caller (call_function's
@@ -520,7 +534,13 @@ impl Interpreter {
                             // Pattern B: split the `?` from the call so `pop_scope`
                             // runs before we propagate any error.
                             self.env.push_scope();
-                            self.env.define_force(&ec.error_param, err);
+                            // the handler variable always sees the
+                            // full ErrorInfo field set (type/message/kind/code),
+                            // regardless of how the error was thrown.
+                            self.env.define_force(
+                                &ec.error_param,
+                                Self::canonicalize_caught_error(err),
+                            );
 
                             let handler_result = self.eval_statements(&ec.handler_body);
                             self.env.pop_scope();
@@ -570,19 +590,26 @@ impl Interpreter {
             Statement::Expr(expr) => self.eval_expr(expr),
 
             Statement::EnumDef(ed) => {
+                // bind FIRST and surface a same-scope redefinition
+                // error instead of silently keeping the OLD binding while the
+                // registry takes the NEW variant list — the mismatch made
+                // variant resolution diverge from the visible binding under
+                // --no-check.
+                if let Err(e) = self.env.define(
+                    &ed.name,
+                    Value::pack(vec![
+                        ("__type".to_string(), Value::str("EnumDef".to_string())),
+                        ("__name".to_string(), Value::str(ed.name.clone())),
+                    ]),
+                ) {
+                    return Err(RuntimeError { message: e });
+                }
                 self.enum_defs.insert(
                     ed.name.clone(),
                     ed.variants
                         .iter()
                         .map(|variant| variant.name.clone())
                         .collect(),
-                );
-                let _ = self.env.define(
-                    &ed.name,
-                    Value::pack(vec![
-                        ("__type".to_string(), Value::str("EnumDef".to_string())),
-                        ("__name".to_string(), Value::str(ed.name.clone())),
-                    ]),
                 );
                 Ok(Signal::Value(Value::Unit))
             }
@@ -591,6 +618,17 @@ impl Interpreter {
             Statement::ClassLikeDef(cl) => match &cl.kind {
                 crate::parser::ClassLikeKind::BuchiPack => {
                     let td = cl;
+                    // bind first — a same-scope redefinition must
+                    // error before any registry is touched.
+                    if let Err(e) = self.env.define(
+                        &td.name,
+                        Value::pack(vec![
+                            ("__type".to_string(), Value::str("TypeDef".to_string())),
+                            ("__name".to_string(), Value::str(td.name.clone())),
+                        ]),
+                    ) {
+                        return Err(RuntimeError { message: e });
+                    }
                     // Register methods defined in the type
                     let mut methods = HashMap::new();
                     for field in &td.fields {
@@ -604,13 +642,6 @@ impl Interpreter {
                         self.type_methods.insert(td.name.clone(), methods);
                     }
                     self.type_defs.insert(td.name.clone(), td.fields.clone());
-                    let _ = self.env.define(
-                        &td.name,
-                        Value::pack(vec![
-                            ("__type".to_string(), Value::str("TypeDef".to_string())),
-                            ("__name".to_string(), Value::str(td.name.clone())),
-                        ]),
-                    );
                     Ok(Signal::Value(Value::Unit))
                 }
                 crate::parser::ClassLikeKind::Alias { .. } => {
@@ -618,17 +649,30 @@ impl Interpreter {
                     // sentinel as pack type-defs so the alias can sit in
                     // export lists / module symbol maps without a special
                     // case; it carries no constructor or fields.
-                    let _ = self.env.define(
+                    if let Err(e) = self.env.define(
                         &cl.name,
                         Value::pack(vec![
                             ("__type".to_string(), Value::str("TypeDef".to_string())),
                             ("__name".to_string(), Value::str(cl.name.clone())),
                         ]),
-                    );
+                    ) {
+                        return Err(RuntimeError { message: e });
+                    }
                     Ok(Signal::Value(Value::Unit))
                 }
                 crate::parser::ClassLikeKind::Mold { .. } => {
                     let md = cl;
+                    // bind first — a same-scope redefinition must
+                    // error before any registry is touched.
+                    if let Err(e) = self.env.define(
+                        &md.name,
+                        Value::pack(vec![
+                            ("__type".to_string(), Value::str("TypeDef".to_string())),
+                            ("__name".to_string(), Value::str(md.name.clone())),
+                        ]),
+                    ) {
+                        return Err(RuntimeError { message: e });
+                    }
                     // Register methods defined in the mold type
                     let mut methods = HashMap::new();
                     for field in &md.fields {
@@ -643,13 +687,6 @@ impl Interpreter {
                     }
                     self.type_defs.insert(md.name.clone(), md.fields.clone());
                     self.mold_defs.insert(md.name.clone(), md.fields.clone());
-                    let _ = self.env.define(
-                        &md.name,
-                        Value::pack(vec![
-                            ("__type".to_string(), Value::str("TypeDef".to_string())),
-                            ("__name".to_string(), Value::str(md.name.clone())),
-                        ]),
-                    );
                     Ok(Signal::Value(Value::Unit))
                 }
                 crate::parser::ClassLikeKind::Inheritance { parent, .. } => {
@@ -687,6 +724,17 @@ impl Interpreter {
                             merged_fields.push(child_field.clone());
                         }
                     }
+                    // bind first — a same-scope redefinition must
+                    // error before any registry is touched.
+                    if let Err(e) = self.env.define(
+                        inh_child,
+                        Value::pack(vec![
+                            ("__type".to_string(), Value::str("TypeDef".to_string())),
+                            ("__name".to_string(), Value::str(inh_child.clone())),
+                        ]),
+                    ) {
+                        return Err(RuntimeError { message: e });
+                    }
                     self.type_defs.insert(inh_child.clone(), merged_fields);
                     if self.mold_defs.contains_key(inh_parent) {
                         self.mold_defs
@@ -694,13 +742,6 @@ impl Interpreter {
                     }
                     self.type_parents
                         .insert(inh_child.clone(), inh_parent.clone());
-                    let _ = self.env.define(
-                        inh_child,
-                        Value::pack(vec![
-                            ("__type".to_string(), Value::str("TypeDef".to_string())),
-                            ("__name".to_string(), Value::str(inh_child.clone())),
-                        ]),
-                    );
                     Ok(Signal::Value(Value::Unit))
                 }
             },
@@ -913,7 +954,15 @@ impl Interpreter {
                 // build the proper closure value.
                 let is_partial_application = args.iter().any(|a| matches!(a, Expr::Hole(_)));
                 if !is_partial_application && let Expr::Ident(name, _) = callee.as_ref() {
-                    let is_self_call = self.active_function.as_deref() == Some(name);
+                    // a self-call must still RESOLVE to a function
+                    // value. An inner scope can re-bind the function's own
+                    // name to a non-function value (`f <= 3`); restarting
+                    // the trampoline on that binding turned "Cannot call
+                    // non-function value" into an infinite loop that never
+                    // reaches MAX_CALL_DEPTH.
+                    let is_self_call = self.active_function.as_deref() == Some(name)
+                        && !self.env.is_defined_in_current_scope(name)
+                        && matches!(self.env.get(name), Some(Value::Function(_)));
                     // Check if the callee is a user-defined function (for mutual recursion).
                     // Only attempt mutual TCO when inside a function context AND the
                     // function is NOT defined in the current (innermost) scope. Locally
@@ -982,9 +1031,9 @@ impl Interpreter {
             Expr::FloatLit(n, _) => Ok(Signal::Value(Value::Float(*n))),
             Expr::StringLit(s, _) => Ok(Signal::Value(Value::str(s.clone()))),
             Expr::TemplateLit(s, _) => {
-                // Template string interpolation: replace ${...} with evaluated values
-                let result = self.eval_template_string(s)?;
-                Ok(Signal::Value(Value::str(result)))
+                // Template string interpolation: replace ${...} with evaluated
+                // values. Throw / Gorilla propagate as-is.
+                self.eval_template_string(s)
             }
             Expr::BoolLit(b, _) => Ok(Signal::Value(Value::Bool(*b))),
             Expr::Gorilla(_) => Ok(Signal::Gorilla),
@@ -1092,7 +1141,10 @@ impl Interpreter {
                 };
                 match op {
                     UnaryOp::Neg => match val {
-                        Value::Int(n) => Ok(Signal::Value(Value::Int(-n))),
+                        // wrapping_neg matches the binary
+                        // operator discipline (wrapping_add/sub/mul) and
+                        // keeps `-i64::MIN` from panicking in debug builds.
+                        Value::Int(n) => Ok(Signal::Value(Value::Int(n.wrapping_neg()))),
                         Value::Float(n) => Ok(Signal::Value(Value::Float(-n))),
                         _ => Err(RuntimeError {
                             message: format!("Cannot negate {}", val),
@@ -1453,13 +1505,22 @@ impl Interpreter {
                 }
 
                 // Generic/custom mold instantiation.
-                let mut named_values = HashMap::<String, Value>::new();
+                //
+                // named fields keep their source order — a Vec with
+                // in-place overwrite instead of a HashMap, whose iteration
+                // order made the resulting pack's display order vary per
+                // process.
+                let mut named_values = Vec::<(String, Value)>::new();
                 for field in fields {
                     let value = match self.eval_expr(&field.value)? {
                         Signal::Value(v) => v,
                         other => return Ok(other),
                     };
-                    named_values.insert(field.name.clone(), value);
+                    if let Some(slot) = named_values.iter_mut().find(|(n, _)| *n == field.name) {
+                        slot.1 = value;
+                    } else {
+                        named_values.push((field.name.clone(), value));
+                    }
                 }
 
                 let mut positional_values = Vec::<Value>::new();
@@ -1520,7 +1581,9 @@ impl Interpreter {
                         if consumed.contains(&field_def.name) {
                             continue;
                         }
-                        if let Some(value) = named_values.get(&field_def.name) {
+                        if let Some((_, value)) =
+                            named_values.iter().find(|(n, _)| n == &field_def.name)
+                        {
                             result_fields.push((field_def.name.clone(), value.clone()));
                             consumed.insert(field_def.name.clone());
                             continue;
@@ -1536,9 +1599,9 @@ impl Interpreter {
                     }
 
                     // Preserve undeclared named options for runtime compatibility.
-                    for (name, value) in &named_values {
-                        if name != "filling" && !consumed.contains(name) {
-                            result_fields.push((name.clone(), value.clone()));
+                    for (fname, value) in &named_values {
+                        if fname != "filling" && !consumed.contains(fname) {
+                            result_fields.push((fname.clone(), value.clone()));
                         }
                     }
                 } else {
@@ -2082,46 +2145,59 @@ impl Interpreter {
         Ok(None)
     }
 
+    fn needs_registry_snapshot(func: &FuncValue) -> bool {
+        fn defines_types(stmts: &[Statement]) -> bool {
+            stmts.iter().any(|stmt| match stmt {
+                Statement::EnumDef(_) | Statement::ClassLikeDef(_) | Statement::Import(_) => true,
+                Statement::ErrorCeiling(ec) => defines_types(&ec.handler_body),
+                _ => false,
+            })
+        }
+        func.module_type_defs.is_some()
+            || func.module_enum_defs.is_some()
+            || defines_types(&func.body)
+    }
+
     /// Overlay a function's defining-module TypeDef / enum
     /// registries onto the interpreter's live registries before executing the
     /// function body. Returns the previous state so the caller can restore it
     /// after the body runs.
     ///
-    /// Lambdas / partials / internal helpers have `module_type_defs == None`
-    /// and this method is a no-op for them — they must see whatever TypeDefs
-    /// the currently-executing caller sees (that is the lexical-scope rule
-    /// for functions defined inline).
+    /// Inline functions see the caller's registries. They need a snapshot
+    /// only when their body can introduce local type or enum definitions.
     ///
     /// Overlay semantics: defining-module entries are layered *under* the
     /// current entries, i.e. a local TypeDef with the same name still wins.
-    /// This preserves F-56 behaviour (caller's typedef shadows imported one)
-    /// while ensuring JSON schema resolution inside the imported function
+    /// This lets the caller's typedef shadow an imported one while ensuring
+    /// JSON schema resolution inside the imported function
     /// body has access to every symbol the defining module saw.
     #[allow(clippy::type_complexity)]
     pub(crate) fn push_func_module_scope(
         &mut self,
         func: &FuncValue,
     ) -> (
-        HashMap<String, Vec<FieldDef>>,
-        HashMap<String, Vec<String>>,
+        Option<HashMap<String, Vec<FieldDef>>>,
+        Option<HashMap<String, Vec<String>>>,
         bool,
     ) {
-        let prev_td = self.type_defs.clone();
-        let prev_ed = self.enum_defs.clone();
-        let mut changed = false;
+        // Ordinary functions neither overlay nor modify these registries,
+        // so callbacks can skip both potentially large registry clones.
+        if !Self::needs_registry_snapshot(func) {
+            return (None, None, false);
+        }
+        let prev_td = Some(self.type_defs.clone());
+        let prev_ed = Some(self.enum_defs.clone());
         if let Some(mtd) = &func.module_type_defs {
             for (k, v) in mtd.iter() {
                 self.type_defs.entry(k.clone()).or_insert_with(|| v.clone());
             }
-            changed = true;
         }
         if let Some(med) = &func.module_enum_defs {
             for (k, v) in med.iter() {
                 self.enum_defs.entry(k.clone()).or_insert_with(|| v.clone());
             }
-            changed = true;
         }
-        (prev_td, prev_ed, changed)
+        (prev_td, prev_ed, true)
     }
 
     /// Restore TypeDef / enum registries that were captured by
@@ -2129,14 +2205,44 @@ impl Interpreter {
     /// `changed == false`.
     pub(crate) fn pop_func_module_scope(
         &mut self,
-        prev_td: HashMap<String, Vec<FieldDef>>,
-        prev_ed: HashMap<String, Vec<String>>,
+        prev_td: Option<HashMap<String, Vec<FieldDef>>>,
+        prev_ed: Option<HashMap<String, Vec<String>>>,
         changed: bool,
     ) {
         if changed {
-            self.type_defs = prev_td;
-            self.enum_defs = prev_ed;
+            self.type_defs =
+                prev_td.expect("an overlay push always captures the previous registry");
+            self.enum_defs =
+                prev_ed.expect("an overlay push always captures the previous registry");
         }
+    }
+
+    /// Lazy snapshot for a tail-call chain. Capture the caller's registries
+    /// before the first callee that overlays module context or can define
+    /// local types. Chains that cannot change the registries avoid cloning.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn push_func_module_scope_tracked(
+        &mut self,
+        func: &FuncValue,
+        saved_root: &mut Option<ModuleRegistrySnapshot>,
+    ) -> bool {
+        if !Self::needs_registry_snapshot(func) {
+            return false;
+        }
+        if saved_root.is_none() {
+            *saved_root = Some((self.type_defs.clone(), self.enum_defs.clone()));
+        }
+        if let Some(mtd) = &func.module_type_defs {
+            for (k, v) in mtd.iter() {
+                self.type_defs.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
+        if let Some(med) = &func.module_enum_defs {
+            for (k, v) in med.iter() {
+                self.enum_defs.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
+        true
     }
 
     /// Materialise the synthetic defaultFn return.
@@ -2350,7 +2456,7 @@ impl Interpreter {
     /// Call a function with arguments, with tail call optimization.
     ///
     /// When a function makes a tail call (self-recursive or mutual-recursive),
-    /// the interpreter returns a TailCall signal. This method loops
+    /// The interpreter returns a TailCall signal. This method loops
     /// (trampoline) on TailCall signals instead of growing the stack.
     ///
     /// For mutual recursion, `mutual_tail_call_target` is set by eval_expr_tail
@@ -2436,15 +2542,14 @@ impl Interpreter {
         // TypeDefs leaked into the caller's scope permanently. Pinned by
         // `c20b_015_interpreter_mutual_tail_call_does_not_leak_overlay`.
         //
-        // The unconditional clone-and-restore is the only correct contract
-        // here: any subset of iterations may or may not push an overlay,
-        // but the caller's pre-call scope is always `saved_*_root` and
-        // must be the state we return to. Cost: `HashMap::clone` of the
-        // root registries, paid per top-level function call (not per
-        // trampoline iteration).
-        let saved_td_root = self.type_defs.clone();
-        let saved_ed_root = self.enum_defs.clone();
-        let _ = self.push_func_module_scope(&current_func);
+        // `push_func_module_scope_tracked` captures the caller's registries
+        // before the first callee that can overlay or modify them.
+        // When no callee in the chain requires a snapshot,
+        // the registries are never touched, `saved_root` stays `None`, and
+        // the exit paths below skip the restore entirely — no per-call
+        // `HashMap` deep-copy of the root registries.
+        let mut saved_root: Option<ModuleRegistrySnapshot> = None;
+        self.push_func_module_scope_tracked(&current_func, &mut saved_root);
         loop {
             // Create closure scope (separate from local scope so user variables
             // can shadow captured names without "already defined" errors)
@@ -2494,8 +2599,10 @@ impl Interpreter {
                 Ok(Some(signal)) => {
                     self.env.pop_scope(); // pop local scope
                     self.env.pop_scope(); // pop closure scope
-                    self.type_defs = saved_td_root.clone();
-                    self.enum_defs = saved_ed_root.clone();
+                    if let Some((td, ed)) = saved_root.take() {
+                        self.type_defs = td;
+                        self.enum_defs = ed;
+                    }
                     self.active_function = prev_active;
                     self.append_consume_sites = saved_consume_sites;
                     self.call_depth -= 1;
@@ -2505,8 +2612,10 @@ impl Interpreter {
                 Err(err) => {
                     self.env.pop_scope(); // pop local scope
                     self.env.pop_scope(); // pop closure scope
-                    self.type_defs = saved_td_root.clone();
-                    self.enum_defs = saved_ed_root.clone();
+                    if let Some((td, ed)) = saved_root.take() {
+                        self.type_defs = td;
+                        self.enum_defs = ed;
+                    }
                     self.active_function = prev_active;
                     self.append_consume_sites = saved_consume_sites;
                     self.call_depth -= 1;
@@ -2536,8 +2645,10 @@ impl Interpreter {
                 Err(err) => {
                     self.env.pop_scope(); // pop local scope
                     self.env.pop_scope(); // pop closure scope
-                    self.type_defs = saved_td_root.clone();
-                    self.enum_defs = saved_ed_root.clone();
+                    if let Some((td, ed)) = saved_root.take() {
+                        self.type_defs = td;
+                        self.enum_defs = ed;
+                    }
                     self.active_function = prev_active;
                     self.append_consume_sites = saved_consume_sites;
                     self.call_depth -= 1;
@@ -2589,8 +2700,10 @@ impl Interpreter {
                             // overlays scoped to exactly the iterations that
                             // need them and never leaks a previous iteration's
                             // overlay into a later iteration's scope.
-                            self.type_defs = saved_td_root.clone();
-                            self.enum_defs = saved_ed_root.clone();
+                            if let Some((td, ed)) = saved_root.as_ref() {
+                                self.type_defs = td.clone();
+                                self.enum_defs = ed.clone();
+                            }
                             // The retargeted function has its own consume
                             // plan (usually none) — never carry the previous
                             // function's sites across.
@@ -2601,7 +2714,7 @@ impl Interpreter {
                             )
                             .map(|plan| plan.sites)
                             .unwrap_or_default();
-                            let _ = self.push_func_module_scope(&current_func);
+                            self.push_func_module_scope_tracked(&current_func, &mut saved_root);
                             continue;
                         } else {
                             // Target function not found in any scope — fall back to
@@ -2609,8 +2722,10 @@ impl Interpreter {
                             // where a non-recursive function call in tail position was
                             // speculatively treated as a mutual tail call.
                             self.active_function = prev_active.clone();
-                            self.type_defs = saved_td_root.clone();
-                            self.enum_defs = saved_ed_root.clone();
+                            if let Some((td, ed)) = saved_root.take() {
+                                self.type_defs = td;
+                                self.enum_defs = ed;
+                            }
                             self.append_consume_sites = saved_consume_sites;
                             // Re-evaluate the original function body without tail call optimization.
                             // We need to re-execute the function with the original args but
@@ -2632,8 +2747,10 @@ impl Interpreter {
                 }
                 other => {
                     // Normal result: restore and return.
-                    self.type_defs = saved_td_root.clone();
-                    self.enum_defs = saved_ed_root.clone();
+                    if let Some((td, ed)) = saved_root.take() {
+                        self.type_defs = td;
+                        self.enum_defs = ed;
+                    }
                     self.active_function = prev_active;
                     self.append_consume_sites = saved_consume_sites;
                     self.call_depth -= 1;
@@ -2644,7 +2761,12 @@ impl Interpreter {
     }
 
     /// Evaluate template string interpolation.
-    fn eval_template_string(&mut self, template: &str) -> Result<String, RuntimeError> {
+    ///
+    /// The result is a full `Signal` — an interpolation body that
+    /// throws (or fires the gorilla) propagates to the nearest error ceiling
+    /// instead of being silently skipped, leaving the program to continue
+    /// with an empty fragment.
+    fn eval_template_string(&mut self, template: &str) -> Result<Signal, RuntimeError> {
         let mut result = String::new();
         let mut chars = template.chars().peekable();
 
@@ -2667,10 +2789,26 @@ impl Interpreter {
                 // Parse and evaluate the interpolated expression
                 let (program, errors) = crate::parser::parse(&expr_str);
                 if errors.is_empty() && !program.statements.is_empty() {
-                    if let Statement::Expr(expr) = &program.statements[0]
-                        && let Signal::Value(v) = self.eval_expr(expr)?
-                    {
-                        result.push_str(&v.to_display_string())
+                    match &program.statements[0] {
+                        Statement::Expr(expr) => match self.eval_expr(expr)? {
+                            Signal::Value(v) => result.push_str(&v.to_display_string()),
+                            // Throw / Gorilla reach the nearest
+                            // ceiling instead of being silently skipped.
+                            // TailCall never escapes `eval_expr` (only the
+                            // tail-position wrapper produces it), so the
+                            // catch-all arm is Throw/Gorilla in practice.
+                            other => return Ok(other),
+                        },
+                        // a non-expression body (an assignment, a
+                        // nested statement) used to vanish without output or
+                        // diagnostics.
+                        _ => {
+                            return Err(RuntimeError {
+                                message: format!(
+                                    "[E1702] Template interpolation `${{{expr_str}}}` must be an expression, not a statement."
+                                ),
+                            });
+                        }
                     }
                 } else {
                     result.push_str(&expr_str);
@@ -2680,7 +2818,7 @@ impl Interpreter {
             }
         }
 
-        Ok(result)
+        Ok(Signal::Value(Value::str(result)))
     }
 
     /// evaluate the explicit addon-binding form
@@ -2688,14 +2826,14 @@ impl Interpreter {
     ///
     /// Contract:
     /// - `type_args` must contain exactly one entry, a `StringLit` with
-    /// the addon function name. Anything else → `[E1412]`.
+    /// The addon function name. Anything else → `[E1412]`.
     /// - `fields` must contain exactly one entry, name `arity`, with an
     /// `IntLit` value. Anything else → `[E1412]`.
     /// - Must execute inside an addon facade load context
     /// (`loading_addon_facade_ctx == Some(_)`). Otherwise → `[E1412]`.
     /// - The function name must exist in the surrounding addon's
     /// manifest `[functions]` table and the declared arity must match
-    /// the manifest arity. Otherwise → `[E1412]` drift error.
+    /// The manifest arity. Otherwise → `[E1412]` drift error.
     /// - On success, returns `Value::str("__taida_addon_call::<pkg>::<fn>")`
     /// so the binding is structurally identical to today's pre-injected
     /// addon sentinel (the addon dispatch path in `MoldInst` /

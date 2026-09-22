@@ -150,6 +150,58 @@ impl Interpreter {
         ])
     }
 
+    /// A caught error always exposes the full
+    /// ErrorInfo field set (`type` / `message` / `kind` / `code`) inside the
+    /// handler scope. Runtime-raised errors already contain kind/code. A
+    /// user throw like `Error(type <= "X", message <= "y").throw` builds a
+    /// bare @(type, message) pack, so `.kind` used to crash only on that path.
+    /// Normalizing at the catch binding makes every caught error carry the
+    /// same declared shape; native/wasm apply the identical canonicalization
+    /// in their catch sites. Values that already carry kind/code pass through
+    /// untouched so display / re-throw of runtime errors is unchanged.
+    pub(crate) fn canonicalize_caught_error(error: Value) -> Value {
+        let (error_type, message, kind, code) = match &error {
+            Value::Error(err) => {
+                let error_type = if err.error_type.is_empty() {
+                    "Error".to_string()
+                } else {
+                    err.error_type.clone()
+                };
+                let kind = string_field(&err.fields, "kind").unwrap_or_else(|| error_type.clone());
+                let code = int_field(&err.fields, "code").unwrap_or(0);
+                (error_type, err.message.clone(), kind, code)
+            }
+            Value::BuchiPack(fields) => {
+                let has_kind = fields.iter().any(|(n, _)| n == "kind");
+                let has_code = fields.iter().any(|(n, _)| n == "code");
+                let has_internal_type = fields.iter().any(|(n, _)| n == "__type");
+                if has_kind && has_code && has_internal_type {
+                    return error;
+                }
+                let error_type = string_field(fields, "type")
+                    .or_else(|| string_field(fields, "__type"))
+                    .unwrap_or_else(|| "Error".to_string());
+                // The thrown pack's OWN fields must survive canonicalization:
+                // a user subtype like `L2Error(l1, l2)` keeps its declared
+                // slots in the handler scope. Canonicalization only ADDS the
+                // missing ErrorInfo slots — it never rebuilds the pack.
+                let mut out = fields.as_ref().clone();
+                if !has_kind {
+                    out.push(("kind".into(), Value::str(error_type.clone())));
+                }
+                if !has_code {
+                    out.push(("code".into(), Value::Int(0)));
+                }
+                if !has_internal_type {
+                    out.push(("__type".into(), Value::str(error_type)));
+                }
+                return Value::BuchiPack(std::sync::Arc::new(out));
+            }
+            _ => return error,
+        };
+        Self::canonical_error_pack(&error_type, message, kind, code)
+    }
+
     pub(crate) fn canonical_error_pack(
         error_type: &str,
         message: String,

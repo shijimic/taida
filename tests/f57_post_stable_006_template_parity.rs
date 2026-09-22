@@ -117,21 +117,55 @@ fn padded_nonexpr_interpolation_preserves_leading_space_on_both() {
     );
 }
 
-/// A parsed-but-non-expression body emits nothing on both backends. `${x <= 1}`
-/// parses as an assignment (a non-expression statement); the interpreter pushes
-/// nothing for it, and native now matches (it previously emitted the raw text
-/// `x <= 1`). Wrapped in `[...]` so the empty interpolation is observable.
+/// a parsed-but-non-expression body (`${x <= 1}` parses as an
+/// assignment) is rejected with `[E1702]` instead of silently emitting
+/// nothing — the old silent-skip behaviour this test used to pin let a
+/// mistyped body vanish from the output with no diagnostic. Both backends
+/// must reject it: the interpreter at runtime, the native/wasm lowering at
+/// build time (they share `lower_template_lit`, so one check covers both).
 #[test]
-fn nonexpr_statement_interpolation_emits_nothing_on_both() {
+fn nonexpr_statement_interpolation_rejected_on_both() {
     let src = "y <= `[${x <= 1}]`\nstdout(y)\n";
-    let i = interp_out("f57_006fb_interp_assign", src);
-    let n = native_out("f57_006fb_native_assign", src);
-    assert_eq!(
-        n, i,
-        "native must match the interpreter for a non-expression (assignment) body"
+
+    let dir = unique_temp_dir("f57_006fb_interp_assign");
+    let f = dir.join("main.td");
+    write_file(&f, src);
+    let out = Command::new(taida_bin())
+        .arg(&f)
+        .output()
+        .expect("run interpreter");
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        !out.status.success(),
+        "interp must reject a statement body, got stdout: {}",
+        String::from_utf8_lossy(&out.stdout)
     );
-    assert_eq!(
-        i, "[]",
-        "an assignment body must emit nothing between the brackets, got: {i:?}"
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("[E1702]"),
+        "interp rejection must cite [E1702], got: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let dir = unique_temp_dir("f57_006fb_native_assign");
+    let f = dir.join("main.td");
+    write_file(&f, src);
+    let bin = dir.join("out.bin");
+    let comp = Command::new(taida_bin())
+        .arg("build")
+        .arg("native")
+        .arg(&f)
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .expect("native build");
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        !comp.status.success(),
+        "native build must reject a statement body"
+    );
+    assert!(
+        String::from_utf8_lossy(&comp.stderr).contains("[E1702]"),
+        "native rejection must cite [E1702], got: {}",
+        String::from_utf8_lossy(&comp.stderr)
     );
 }

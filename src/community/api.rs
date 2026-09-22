@@ -10,7 +10,7 @@ pub fn api_base_url() -> String {
 /// (ステータスコード, レスポンスボディ) を返す。
 pub fn api_get(path: &str, token: Option<&str>) -> Result<(u16, String), String> {
     let url = format!("{}{}", api_base_url(), path);
-    let client = reqwest::blocking::Client::new();
+    let client = crate::util::http_client()?;
 
     let mut req = client
         .get(&url)
@@ -41,7 +41,7 @@ pub fn api_post(
     token: Option<&str>,
 ) -> Result<(u16, String), String> {
     let url = format!("{}{}", api_base_url(), path);
-    let client = reqwest::blocking::Client::new();
+    let client = crate::util::http_client()?;
 
     let mut req = client
         .post(&url)

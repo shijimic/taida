@@ -39,6 +39,64 @@ pub fn json_to_taida_value(json: &serde_json::Value) -> Value {
     }
 }
 
+/// If `val` is the internal HashMap pack shape (`@(__entries: …, __type:
+/// "HashMap")`), return its entry `(key, value)` pairs in insertion order.
+/// The `__entries` machinery is an interpreter
+/// implementation detail and must not leak into external JSON — the public
+/// wire form is a plain object, matching the native runtime's jsonEncode.
+fn hashmap_entry_pairs(val: &Value) -> Option<Vec<(&Value, &Value)>> {
+    let fields = match val {
+        Value::BuchiPack(f) => f,
+        _ => return None,
+    };
+    if !fields
+        .iter()
+        .any(|(n, v)| n == "__type" && matches!(v, Value::Str(s) if s.as_string() == "HashMap"))
+    {
+        return None;
+    }
+    let entries = fields
+        .iter()
+        .find(|(n, _)| n == "__entries")
+        .map(|(_, v)| v)?;
+    match entries {
+        Value::List(list) => Some(
+            list.iter()
+                .filter_map(|e| {
+                    let ef = match e {
+                        Value::BuchiPack(f) => f,
+                        _ => return None,
+                    };
+                    let key = ef.iter().find(|(n, _)| n == "key").map(|(_, v)| v)?;
+                    let value = ef.iter().find(|(n, _)| n == "value").map(|(_, v)| v)?;
+                    Some((key, value))
+                })
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+/// If `val` is the internal Set pack shape (`@(__items: …, __type: "Set")`),
+/// return its items slice. The public wire form of a Set is a
+/// plain array, matching the native runtime's jsonEncode.
+fn set_item_slice(val: &Value) -> Option<&[Value]> {
+    let fields = match val {
+        Value::BuchiPack(f) => f,
+        _ => return None,
+    };
+    if !fields
+        .iter()
+        .any(|(n, v)| n == "__type" && matches!(v, Value::Str(s) if s.as_string() == "Set"))
+    {
+        return None;
+    }
+    match fields.iter().find(|(n, _)| n == "__items").map(|(_, v)| v) {
+        Some(Value::List(l)) => Some(l.as_slice()),
+        _ => None,
+    }
+}
+
 /// Convert a Taida Value to a serde_json::Value.
 ///
 /// contract: Enum values (`Value::EnumVal(enum_name, ordinal)`) are
@@ -46,7 +104,24 @@ pub fn json_to_taida_value(json: &serde_json::Value) -> Value {
 /// `jsonEncode` symmetric with the `JSON[raw, Schema]()` decoder,
 /// which accepts the variant-name Str wire format. `Value::Int` values
 /// that are not tagged as EnumVal continue to emit as JSON numbers.
+///
+/// HashMap encodes as a plain object keyed by its
+/// Str keys, Set encodes as a plain array — the internal `__entries` /
+/// `__items` packs never reach the wire. Non-Str HashMap keys have no
+/// JSON object-key form and are skipped.
 pub fn taida_value_to_json(val: &Value) -> serde_json::Value {
+    if let Some(pairs) = hashmap_entry_pairs(val) {
+        let mut map = serde_json::Map::new();
+        for (key, value) in pairs {
+            if let Value::Str(s) = key {
+                map.insert(s.as_string().clone(), taida_value_to_json(value));
+            }
+        }
+        return serde_json::Value::Object(map);
+    }
+    if let Some(items) = set_item_slice(val) {
+        return serde_json::Value::Array(items.iter().map(taida_value_to_json).collect());
+    }
     match val {
         Value::Int(n) => serde_json::Value::Number(serde_json::Number::from(*n)),
         Value::Float(n) => {
@@ -62,7 +137,13 @@ pub fn taida_value_to_json(val: &Value) -> serde_json::Value {
             serde_json::Value::Array(items.iter().map(taida_value_to_json).collect())
         }
         Value::BuchiPack(fields) => {
-            let mut map = serde_json::Map::new();
+            // serde_json's preserve_order
+            // feature (enabled for the HashMap insertion-order contract) makes
+            // Map keep insertion order, so the pack's visible fields are
+            // sorted by name explicitly here — the compiled backends emit
+            // pack fields alphabetically (`json_serialize_pack_fields`
+            // insertion sort) and the public wire form must match.
+            let mut entries: Vec<(String, serde_json::Value)> = Vec::new();
             let is_lax = fields.iter().any(|(name, value)| {
                 name == "__type" && matches!(value, Value::Str(s) if s.as_string() == "Lax")
             });
@@ -71,7 +152,12 @@ pub fn taida_value_to_json(val: &Value) -> serde_json::Value {
                 if field_name == "__type" || (is_lax && field_name == "__error") {
                     continue;
                 }
-                map.insert(field_name.clone(), taida_value_to_json(field_val));
+                entries.push((field_name.clone(), taida_value_to_json(field_val)));
+            }
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            let mut map = serde_json::Map::new();
+            for (field_name, field_json) in entries {
+                map.insert(field_name, field_json);
             }
             serde_json::Value::Object(map)
         }
@@ -96,13 +182,36 @@ pub fn taida_value_to_json(val: &Value) -> serde_json::Value {
 
 /// Enrich `taida_value_to_json` with an `enum_defs` registry so
 /// Enum values can be emitted as their declared variant-name Str. This is
-/// the wire form used by `jsonEncode` and symmetric with the
+/// The wire form used by `jsonEncode` and symmetric with the
 /// `JSON[raw, Schema]()` decoder. See `src/interpreter/prelude.rs`
 /// for the `jsonEncode` dispatch that routes through this function.
+///
+/// Shares the HashMap/Set public-shape contract with
+/// `taida_value_to_json` (see that function's doc-comment).
 pub fn taida_value_to_json_with_enum_defs(
     val: &Value,
     enum_defs: &std::collections::HashMap<String, Vec<String>>,
 ) -> serde_json::Value {
+    if let Some(pairs) = hashmap_entry_pairs(val) {
+        let mut map = serde_json::Map::new();
+        for (key, value) in pairs {
+            if let Value::Str(s) = key {
+                map.insert(
+                    s.as_string().clone(),
+                    taida_value_to_json_with_enum_defs(value, enum_defs),
+                );
+            }
+        }
+        return serde_json::Value::Object(map);
+    }
+    if let Some(items) = set_item_slice(val) {
+        return serde_json::Value::Array(
+            items
+                .iter()
+                .map(|item| taida_value_to_json_with_enum_defs(item, enum_defs))
+                .collect(),
+        );
+    }
     match val {
         Value::Int(n) => serde_json::Value::Number(serde_json::Number::from(*n)),
         Value::Float(n) => {
@@ -121,7 +230,10 @@ pub fn taida_value_to_json_with_enum_defs(
                 .collect(),
         ),
         Value::BuchiPack(fields) => {
-            let mut map = serde_json::Map::new();
+            // Same explicit alphabetical sort as `taida_value_to_json` —
+            // preserve_order makes the wire order observable and the compiled
+            // backends sort pack fields alphabetically.
+            let mut entries: Vec<(String, serde_json::Value)> = Vec::new();
             let is_lax = fields.iter().any(|(name, value)| {
                 name == "__type" && matches!(value, Value::Str(s) if s.as_string() == "Lax")
             });
@@ -129,10 +241,15 @@ pub fn taida_value_to_json_with_enum_defs(
                 if field_name == "__type" || (is_lax && field_name == "__error") {
                     continue;
                 }
-                map.insert(
+                entries.push((
                     field_name.clone(),
                     taida_value_to_json_with_enum_defs(field_val, enum_defs),
-                );
+                ));
+            }
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            let mut map = serde_json::Map::new();
+            for (field_name, field_json) in entries {
+                map.insert(field_name, field_json);
             }
             serde_json::Value::Object(map)
         }
@@ -291,7 +408,7 @@ pub fn json_to_typed_value(json: &serde_json::Value, schema: &JsonSchema) -> Val
 /// resulting shape, and absence is handled by Taida defaults. Present values
 /// whose JSON kind conflicts with the requested primitive / list / record /
 /// enum schema are a failed cast and must surface as `Lax.has_value=false` at
-/// the JSON mold boundary.
+/// The JSON mold boundary.
 pub fn json_to_typed_value_checked(json: &serde_json::Value, schema: &JsonSchema) -> (Value, bool) {
     match schema {
         JsonSchema::Primitive(prim) => (
@@ -403,7 +520,7 @@ fn field_missing_default(schema: &JsonSchema) -> Value {
 /// Lax[Enum] shape for JSON mold Enum validation failure.
 ///
 /// Kept identical to `mold::make_lax_value(false, Int(0), Int(0))` so that
-/// the 3-backend parity can be verified structurally:
+/// The 3-backend parity can be verified structurally:
 /// @(has_value=false, __value=Int(0), __default=Int(0), __type="Lax")
 ///
 /// `Int(0)` encodes the first variant's ordinal — Taida's "最初のバリアント = デフォルト"

@@ -51,46 +51,60 @@ impl Interpreter {
                 let result = self.tokio_runtime.block_on(async {
                     receiver
                         .await
-                        .map_err(|_| "Async task channel closed".to_string())
+                        .unwrap_or_else(|_| Err("Async task channel closed".to_string()))
                 });
-                match result {
-                    Ok(Ok(value)) => Ok(AsyncValue {
-                        status: AsyncStatus::Fulfilled,
-                        value: Box::new(value),
-                        error: Box::new(Value::Unit),
-                        task: None,
-                    }),
-                    Ok(Err(err_msg)) => Ok(AsyncValue {
-                        status: AsyncStatus::Rejected,
-                        value: Box::new(Value::Unit),
-                        error: Box::new(Value::Error(ErrorValue {
-                            error_type: "AsyncError".into(),
-                            message: err_msg,
-                            fields: Vec::new(),
-                        })),
-                        task: None,
-                    }),
-                    Err(err_msg) => Ok(AsyncValue {
-                        status: AsyncStatus::Rejected,
-                        value: Box::new(Value::Unit),
-                        error: Box::new(Value::Error(ErrorValue {
-                            error_type: "AsyncError".into(),
-                            message: err_msg,
-                            fields: Vec::new(),
-                        })),
-                        task: None,
-                    }),
+                // cache the resolution so awaiting the same
+                // pending Async again replays the same result instead of
+                // surfacing an empty Unit fulfillment.
+                if let Ok(mut guard) = task_arc.lock() {
+                    *guard = PendingState::Resolved(result.clone());
                 }
+                Ok(Self::async_from_outcome(&result))
+            }
+            PendingState::Resolved(result) => {
+                let resolved = Self::async_from_outcome(&result);
+                *guard = PendingState::Resolved(result);
+                Ok(resolved)
             }
             PendingState::Done => {
-                // Already consumed — return Unit (should not happen in normal use)
+                // Consumed without a cached resolution (only possible when
+                // the cache write-back failed on a poisoned lock). Report a
+                // rejection — never an empty Unit fulfillment.
                 Ok(AsyncValue {
-                    status: AsyncStatus::Fulfilled,
+                    status: AsyncStatus::Rejected,
                     value: Box::new(Value::Unit),
-                    error: Box::new(Value::Unit),
+                    error: Box::new(Value::Error(ErrorValue {
+                        error_type: "AsyncError".into(),
+                        message: "Async task was already awaited".into(),
+                        fields: Vec::new(),
+                    })),
                     task: None,
                 })
             }
+        }
+    }
+
+    /// build the surfaced Async value from a cached or freshly
+    /// awaited resolution outcome (fulfilled with the value, rejected with
+    /// the message).
+    fn async_from_outcome(outcome: &Result<Value, String>) -> AsyncValue {
+        match outcome {
+            Ok(value) => AsyncValue {
+                status: AsyncStatus::Fulfilled,
+                value: Box::new(value.clone()),
+                error: Box::new(Value::Unit),
+                task: None,
+            },
+            Err(err_msg) => AsyncValue {
+                status: AsyncStatus::Rejected,
+                value: Box::new(Value::Unit),
+                error: Box::new(Value::Error(ErrorValue {
+                    error_type: "AsyncError".into(),
+                    message: err_msg.clone(),
+                    fields: Vec::new(),
+                })),
+                task: None,
+            },
         }
     }
 
@@ -116,43 +130,49 @@ impl Interpreter {
                 let duration = std::time::Duration::from_millis(timeout_ms);
 
                 self.tokio_runtime.block_on(async {
-                    match tokio::time::timeout(duration, receiver).await {
-                        Ok(Ok(Ok(value))) => Ok(Some(AsyncValue {
-                            status: AsyncStatus::Fulfilled,
-                            value: Box::new(value),
-                            error: Box::new(Value::Unit),
-                            task: None,
-                        })),
-                        Ok(Ok(Err(err_msg))) => Ok(Some(AsyncValue {
-                            status: AsyncStatus::Rejected,
-                            value: Box::new(Value::Unit),
-                            error: Box::new(Value::Error(ErrorValue {
-                                error_type: "AsyncError".into(),
-                                message: err_msg,
-                                fields: Vec::new(),
-                            })),
-                            task: None,
-                        })),
-                        Ok(Err(_)) => Ok(Some(AsyncValue {
-                            status: AsyncStatus::Rejected,
-                            value: Box::new(Value::Unit),
-                            error: Box::new(Value::Error(ErrorValue {
-                                error_type: "AsyncError".into(),
-                                message: "Async task channel closed".into(),
-                                fields: Vec::new(),
-                            })),
-                            task: None,
-                        })),
-                        Err(_) => Ok(None), // Timeout elapsed
+                    // hold the receiver outside the timeout so a
+                    // timed-out wait can put it back — the pending Async
+                    // stays awaitable instead of silently degrading.
+                    let mut rx = receiver;
+                    match tokio::time::timeout(duration, &mut rx).await {
+                        Ok(Ok(Ok(value))) => {
+                            if let Ok(mut guard) = task_arc.lock() {
+                                *guard = PendingState::Resolved(Ok(value.clone()));
+                            }
+                            Ok(Some(Self::async_from_outcome(&Ok(value))))
+                        }
+                        Ok(Ok(Err(err_msg))) => {
+                            if let Ok(mut guard) = task_arc.lock() {
+                                *guard = PendingState::Resolved(Err(err_msg.clone()));
+                            }
+                            Ok(Some(Self::async_from_outcome(&Err(err_msg))))
+                        }
+                        Ok(Err(_)) => {
+                            let closed = "Async task channel closed".to_string();
+                            if let Ok(mut guard) = task_arc.lock() {
+                                *guard = PendingState::Resolved(Err(closed.clone()));
+                            }
+                            Ok(Some(Self::async_from_outcome(&Err(closed))))
+                        }
+                        Err(_) => {
+                            // Timeout elapsed — put the receiver back so a
+                            // later await can still resolve.
+                            if let Ok(mut guard) = task_arc.lock() {
+                                *guard = PendingState::Waiting(rx);
+                            }
+                            Ok(None)
+                        }
                     }
                 })
             }
-            PendingState::Done => Ok(Some(AsyncValue {
-                status: AsyncStatus::Fulfilled,
-                value: Box::new(Value::Unit),
-                error: Box::new(Value::Unit),
-                task: None,
-            })),
+            PendingState::Resolved(result) => {
+                let resolved = Self::async_from_outcome(&result);
+                *guard = PendingState::Resolved(result);
+                Ok(Some(resolved))
+            }
+            PendingState::Done => Ok(Some(Self::async_from_outcome(&Err(
+                "Async task was already awaited".to_string(),
+            )))),
         }
     }
 
@@ -495,9 +515,17 @@ impl Interpreter {
         if let Some(f) = fields.iter().find(|f| f.name == name) {
             match self.eval_expr(&f.value)? {
                 Signal::Value(v) => Ok(Some(v)),
-                Signal::Throw(err) => Err(RuntimeError {
-                    message: format!("Error in mold option '{}': {}", name, err),
-                }),
+                Signal::Throw(err) => {
+                    // a Taida throw inside a mold option must stay
+                    // catchable. Stash the thrown value so the nearest `|==`
+                    // ceiling can recover it from this RuntimeError (the same
+                    // recovery path HOF callbacks use) instead of dying as an
+                    // uncatchable fatal.
+                    self.pending_throw = Some(err.clone());
+                    Err(RuntimeError {
+                        message: format!("Error in mold option '{}': {}", name, err),
+                    })
+                }
                 _other => Ok(None), // Gorilla/TailCall — safe to ignore in mold option context
             }
         } else {

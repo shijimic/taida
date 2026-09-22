@@ -928,7 +928,7 @@ impl Lowering {
         }
 
         // ヒープ変数トラッカーをリセット
-        self.current_heap_vars.clear();
+        let prev_heap_vars = std::mem::take(&mut self.current_heap_vars);
 
         // FL-16: パラメータの型注釈から型トラッキング変数を登録
         for param in &func_def.params {
@@ -1088,6 +1088,7 @@ impl Lowering {
                     closure_params.extend(inner_func_def.params.iter().map(|p| p.name.clone()));
                     let mut lambda_fn =
                         IrFunction::new_with_params(lambda_name.clone(), closure_params);
+                    let parent_heap_vars = std::mem::take(&mut self.current_heap_vars);
 
                     // 環境からキャプチャ変数を復元
                     let env_var = 0u32;
@@ -1137,6 +1138,8 @@ impl Lowering {
 
                     self.user_funcs.insert(lambda_name.clone());
                     self.lambda_funcs.push(lambda_fn);
+
+                    self.current_heap_vars = parent_heap_vars;
 
                     // MakeClosure は本体処理時に発行する（下記 lower_statement で処理）
                     self.pending_local_closures
@@ -1271,6 +1274,7 @@ impl Lowering {
 
         // Restore net builtin shadow set to pre-function state
         self.current_schema_params = prev_schema_params;
+        self.current_heap_vars = prev_heap_vars;
         self.shadowed_net_builtins = prev_shadowed_net;
         // NB-14: Restore param_tag_vars to pre-function state
         self.param_tag_vars = prev_param_tag_vars;
@@ -2139,6 +2143,7 @@ impl Lowering {
         // C13-1: A tail binding statement yields the bound value as the
         // try-block's effective result.
         let mut last_try_var: Option<IrVar> = None;
+        let parent_heap_vars = std::mem::take(&mut self.current_heap_vars);
         if !subsequent_stmts.is_empty() {
             // Lower all statements except possibly the last one
             let last_idx = subsequent_stmts.len() - 1;
@@ -2163,6 +2168,9 @@ impl Lowering {
                 }
             }
         }
+        // Locals of the synthetic function are not bindings in its caller.
+        // Its IR receives the same lifetime analysis as every other function.
+        self.current_heap_vars = parent_heap_vars;
         // Return the last expression value, or 0 if none
         match last_try_var {
             Some(v) => {
@@ -2810,6 +2818,7 @@ impl Lowering {
                     closure_params.extend(fd.params.iter().map(|p| p.name.clone()));
                     let mut lambda_fn =
                         IrFunction::new_with_params(lambda_name.clone(), closure_params);
+                    let parent_heap_vars = std::mem::take(&mut self.current_heap_vars);
 
                     // 環境からキャプチャ変数を復元
                     let env_var = 0u32;
@@ -2878,6 +2887,8 @@ impl Lowering {
 
                     self.user_funcs.insert(lambda_name.clone());
                     self.lambda_funcs.push(lambda_fn);
+
+                    self.current_heap_vars = parent_heap_vars;
 
                     self.pending_local_closures
                         .insert(fd.name.clone(), (lambda_name, captures));

@@ -5,7 +5,7 @@
 ///
 /// WC-7d: Size gate CI tests — hard gates on .wasm file sizes.
 /// E33 core baselines: hello = 340 bytes, pi_approx = 8,348 bytes.
-/// Gate: hello <= 512 bytes, pi <= 9,216 bytes.
+/// Gate: hello <= 512 bytes, pi <= 10,880 bytes.
 ///
 /// RC-8b: Parity tests save compiled .wasm files to `target/wasm-test-cache/wasm-min/`
 /// so superset tests in wasm_wasi.rs can reuse them without recompiling.
@@ -245,7 +245,7 @@ fn wasm_min_size_gate() {
         hello_size
     );
 
-    // Hard gate: pi_approx must be <= 10,240 bytes.
+    // Hard gate: pi_approx must be <= 10,880 bytes.
     // F56 (2026-06-09): bumped 9,216 -> 9,664 across the secret-carrier landing.
     // The shared wasm runtime gained the sealed-carrier (Moltenized/Secret)
     // fail-closed guards, which `pi_approx` links via `>=>` (unmold reject),
@@ -269,16 +269,19 @@ fn wasm_min_size_gate() {
     // pi_approx links: pi.wasm 9,9xx -> 10,698 (+~460). The gorilla is
     // the runtime half of the bare-unmold rejection (the checker is the
     // static half), so the cost is intentional. Headroom ~54 bytes.
+    // LLVM 18.1.3 produces 10,793 bytes with both the previous and current
+    // runtime; LLVM 19 produces 10,756. Allow this toolchain variation while
+    // retaining less than 128 bytes of headroom over either measurement.
     assert!(
-        pi_size > 0 && pi_size <= 10752,
-        "HARD GATE FAIL: pi.wasm should be <= 10,752 bytes (WC-7d gate), got {} bytes. \
+        pi_size > 0 && pi_size <= 10880,
+        "HARD GATE FAIL: pi.wasm should be <= 10,880 bytes, got {} bytes. \
          E33 core baseline is 8,348 bytes.",
         pi_size
     );
 
     // Report exact values for tracking
     eprintln!(
-        "Size gate passed: hello={} (gate: 512), pi={} (gate: 9,216)",
+        "Size gate passed: hello={} (gate: 512), pi={} (gate: 10,880)",
         hello_size, pi_size
     );
 }

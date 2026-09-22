@@ -273,7 +273,39 @@ mod tests {
         //   importing proc_exit (the helper is reachable from every `>=>`
         //   lowering, so the hard import broke node instantiation):
         //   +477. 497,982 -> 498,459.
-        const EXPECTED_TOTAL_LEN: usize = 498_459;
+        // 2026-08-22 display-parity field-name registry (01_core /
+        //   04_json_async): the bulk registration helper's forward
+        //   declarations + ABI descriptor names join the abi_fields
+        //   array, and the positive-string judgment precedes the pack
+        //   heuristic in _wc_json_serialize_typed: +1,752.
+        //   498,459 -> 500,211.
+        // 2026-08-22 review-fix (01_core / 02_containers / 04_json_async):
+        //   taida_todo_new stamps per-slot value tags via _wasm_todo_field_tag,
+        //   the Todo hash names register in the bulk registrar, the HashMap
+        //   jsonEncode arm gains a value kind hint + non-Str key skip, and
+        //   the L2 comment is tempered: +2,836.
+        //   500,211 -> 503,047.
+        // 2026-08-22 review-fix round 2 (01_core): the monadic slot names
+        //   (__default / __error / __value / has_value) join the bulk
+        //   registrar's abi_fields so the wasm TODO renderer resolves all
+        //   seven fields like interp/native: +278.
+        //   503,047 -> 503,325.
+        // 2026-08-22 review-fix round 3 (01_core): _wasm_pack_to_string_full
+        //   gains the Lax __error display skip (native twin) — registering
+        //   __error made its absence observable on wasm-full: +539.
+        //   503,325 -> 503,864.
+        //  (02_containers): taida_canonicalize_caught_error builds
+        //   the full ErrorInfo shape at the catch site with per-slot value
+        //   tags; taida_error_type_check_or_rethrow routes through it: +2,630.
+        //   503,864 -> 506,494.
+        //  (02_containers): the early-return guard gains
+        //   a HASH___TYPE presence probe, symmetric with interp/native: +1,171.
+        //   506,494 -> 507,665.
+        //  (02_containers): taida_str_pad counts
+        //   characters via _wasm_utf8_count and repeats the whole pad string,
+        //   with a total-length guard: +371.
+        //   507,665 -> 508,036.
+        const EXPECTED_TOTAL_LEN: usize = 507_704;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

@@ -149,11 +149,10 @@ fn terminal_addon_manifest_parses_with_v1_locked_shape() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// Defence against drift: if the external repo is checked out as a
-/// sibling, we re-parse its on-disk `native/addon.toml` and assert it
-/// matches the inline constant. This catches the case where someone
-/// edits the external repo without updating the main repo's frozen
-/// expectation, and vice versa.
+/// A newer sibling checkout must preserve the original callable surface.
+/// Additional exports are compatible; removing a required export or changing
+/// its arity breaks callers. The separate fixture test pins the original
+/// manifest exactly.
 #[test]
 fn terminal_addon_manifest_matches_external_repo_when_present() {
     let Some(repo) = locate_terminal_repo() else {
@@ -172,12 +171,13 @@ fn terminal_addon_manifest_matches_external_repo_when_present() {
     assert_eq!(manifest.package, "taida-lang/terminal");
     assert_eq!(manifest.library, "taida_lang_terminal");
 
-    let fn_names: Vec<&str> = manifest.functions.keys().map(String::as_str).collect();
-    assert_eq!(
-        fn_names,
-        vec!["readKey", "terminalSize"],
-        "external repo function table must match the v1 lock"
-    );
+    for name in ["readKey", "terminalSize"] {
+        assert_eq!(
+            manifest.functions.get(name).copied(),
+            Some(0),
+            "external repo must preserve the original {name} signature"
+        );
+    }
 
     assert!(
         manifest.prebuild.has_prebuild(),

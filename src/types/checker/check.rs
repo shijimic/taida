@@ -1251,17 +1251,31 @@ impl TypeChecker {
             if arm_ty != Type::Unknown && !Self::contains_unknown(&arm_ty) {
                 if result_ty == Type::Unknown || Self::contains_unknown(&result_ty) {
                     result_ty = arm_ty;
-                } else if !(self.registry.is_subtype_of(&arm_ty, &result_ty)
-                    || result_ty.is_numeric() && arm_ty.is_numeric())
-                {
-                    self.errors.push(TypeError {
-                        message: format!(
-                            "[E1603] Condition branch type mismatch: first resolved arm returns {}, but this arm returns {}. \
-                             Hint: All value-returning arms of a condition branch should return the same type.",
-                            result_ty, arm_ty
-                        ),
-                        span: span.clone(),
-                    });
+                } else {
+                    // Numeric-pair exception removed: an Int arm followed by
+                    // a Float arm used to unify silently with the FIRST
+                    // arm's type kept as the branch type, so the compiled
+                    // backends reinterpreted the other representation's raw
+                    // bits while the interpreter returned the dynamic value.
+                    // the subtype check alone still let
+                    // the REVERSE order through — a Float first arm with an
+                    // Int later arm passed because Int widens to Float.
+                    // A mixed Int/Float pair is rejected in BOTH directions.
+                    let mixed_numeric_pair = matches!(
+                        (&arm_ty, &result_ty),
+                        (Type::Int, Type::Float) | (Type::Float, Type::Int)
+                    );
+                    if mixed_numeric_pair || !self.registry.is_subtype_of(&arm_ty, &result_ty) {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1603] Condition branch type mismatch: first resolved arm returns {}, but this arm returns {}. \
+                                 Hint: All value-returning arms of a condition branch should return the same type \
+                                 (Int and Float arms cannot be mixed).",
+                                result_ty, arm_ty
+                            ),
+                            span: span.clone(),
+                        });
+                    }
                 }
             }
             self.pop_scope();

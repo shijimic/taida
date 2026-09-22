@@ -24,13 +24,24 @@ impl std::error::Error for ParseError {}
 /// Maximum nesting depth for recursive expression parsing.
 /// Prevents stack overflow from deeply nested inputs.
 const MAX_PARSE_DEPTH: usize = 256;
+/// maximum nesting depth for statement-level recursion
+/// (`parse_block` ↔ function/lambda bodies). Without it, deeply indented
+/// machine-generated input overflows the stack with no diagnostic.
+const MAX_STATEMENT_DEPTH: usize = 64;
 
 pub struct Parser {
     tokens: Vec<Token>,
+    /// the raw source characters, kept so numeric tokens inside
+    /// import paths / versions can be restored from their spans instead of a
+    /// lossy `f64::to_string` (`2.10` must not become `2.1`).
+    source_chars: Vec<char>,
     pos: usize,
     errors: Vec<ParseError>,
     /// Current recursion depth for expression parsing.
     depth: usize,
+    /// current recursion depth of statement-level block nesting
+    /// (`parse_block` ↔ function/lambda bodies).
+    stmt_depth: usize,
     /// Context while reading a `| cond |> body` branch.
     /// Switched to `LetRhs` while parsing the right-hand side of a `<=`
     /// assignment so that a multi-line multi-arm guard is rejected with
@@ -73,6 +84,16 @@ impl Parser {
         let mut filtered = Vec::with_capacity(tokens.len());
         let mut i = 0;
         while i < tokens.len() {
+            // Filtering comments can leave an indented empty line. Remove
+            // its indent before block detection, including at end of file.
+            if matches!(tokens[i].kind, TokenKind::Indent(_))
+                && tokens
+                    .get(i + 1)
+                    .is_some_and(|t| matches!(t.kind, TokenKind::Newline | TokenKind::Eof))
+            {
+                i += 1;
+                continue;
+            }
             if tokens[i].kind == TokenKind::Backslash {
                 let mut j = i + 1;
                 if j < tokens.len() && matches!(tokens[j].kind, TokenKind::Newline) {
@@ -94,12 +115,27 @@ impl Parser {
 
         Self {
             tokens: filtered,
+            source_chars: Vec::new(),
             pos: 0,
             errors: Vec::new(),
             depth: 0,
+            stmt_depth: 0,
             cond_branch_context: CondBranchContext::TopLevel,
             mold_bracket_args_depth: 0,
         }
+    }
+
+    /// Retain source spelling for numeric import path and version components.
+    pub fn with_source(tokens: Vec<Token>, source: &str) -> Self {
+        let mut parser = Self::new(tokens);
+        parser.source_chars = source.chars().collect();
+        parser
+    }
+
+    fn raw_token_text(&self, start: usize, end: usize) -> Option<String> {
+        self.source_chars
+            .get(start..end)
+            .map(|s| s.iter().collect())
     }
 
     /// Parse the entire token stream into a Program.
@@ -1024,7 +1060,8 @@ impl Parser {
                 }
             }
 
-            let tok = self.advance();
+            let tok = self.advance().clone();
+            let (span_start, span_end) = (tok.span.start, tok.span.end);
             match &tok.kind {
                 TokenKind::Ident(s) => path.push_str(s),
                 TokenKind::Dot => path.push('.'),
@@ -1032,8 +1069,20 @@ impl Parser {
                 TokenKind::Minus => path.push('-'),
                 TokenKind::At => path.push('@'),
                 TokenKind::Colon => path.push(':'),
-                TokenKind::IntLiteral(n) => path.push_str(&n.to_string()),
-                TokenKind::FloatLiteral(n) => path.push_str(&n.to_string()),
+                TokenKind::IntLiteral(n) => {
+                    path.push_str(
+                        &self
+                            .raw_token_text(span_start, span_end)
+                            .unwrap_or_else(|| n.to_string()),
+                    );
+                }
+                TokenKind::FloatLiteral(n) => {
+                    path.push_str(
+                        &self
+                            .raw_token_text(span_start, span_end)
+                            .unwrap_or_else(|| n.to_string()),
+                    );
+                }
                 TokenKind::Placeholder => path.push('_'),
                 TokenKind::Gt => path.push('>'),
                 _ => {
@@ -1292,13 +1341,22 @@ impl Parser {
                 }
             }
             // Legacy SemVer support (e.g. core-bundled packages still use 1.0.0)
-            TokenKind::FloatLiteral(f) => {
-                let s = f.to_string();
-                if s.contains('.') {
-                    ver.push_str(&s);
+            TokenKind::FloatLiteral(n) => {
+                let fallback = if n.fract() == 0.0 {
+                    format!("{n}.0")
                 } else {
-                    ver.push_str(&format!("{}.0", s));
-                }
+                    n.to_string()
+                };
+                // Preserve the dot and all digits in legacy versions.
+                let (span_start, span_end) = {
+                    let t = self.peek();
+                    (t.span.start, t.span.end)
+                };
+                ver.push_str(
+                    &self
+                        .raw_token_text(span_start, span_end)
+                        .unwrap_or(fallback),
+                );
                 self.advance();
             }
             TokenKind::IntLiteral(n) => {
@@ -1494,6 +1552,28 @@ impl Parser {
     //   3. `skip_blank_lines()` absorbs consecutive newlines between statements.
 
     fn parse_block(&mut self) -> Result<Vec<Statement>, ParseError> {
+        // guard the parse_block ↔ function/lambda-body mutual
+        // recursion. MAX_PARSE_DEPTH only covers expression recursion, so
+        // deeply indented function definitions used to abort with a bare
+        // stack overflow.
+        self.stmt_depth += 1;
+        if self.stmt_depth > MAX_STATEMENT_DEPTH {
+            let span = self.current_span();
+            self.stmt_depth -= 1;
+            return Err(ParseError {
+                message: format!(
+                    "Maximum statement nesting depth ({}) exceeded. Simplify the block structure.",
+                    MAX_STATEMENT_DEPTH
+                ),
+                span,
+            });
+        }
+        let result = self.parse_block_inner();
+        self.stmt_depth -= 1;
+        result
+    }
+
+    fn parse_block_inner(&mut self) -> Result<Vec<Statement>, ParseError> {
         let mut stmts = Vec::new();
 
         // Skip newlines and detect block indentation level
@@ -2133,7 +2213,7 @@ pub fn parse(source: &str) -> (Program, Vec<ParseError>) {
             .collect();
         return (Program { statements: vec![] }, parse_errors);
     }
-    Parser::new(tokens).parse()
+    Parser::with_source(tokens, source).parse()
 }
 
 #[cfg(test)]

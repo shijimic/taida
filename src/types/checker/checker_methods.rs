@@ -59,12 +59,19 @@ impl TypeChecker {
                 _ => vec![],
             },
             Type::Generic(name, args) if name == "Set" => {
-                let value = args.first().cloned().unwrap_or(Type::Unknown);
+                // every Set method slot stays
+                // element-lenient. Cross-element-type membership and mutation
+                // are pinned runtime semantics (enum ordinal == Int,
+                // Int in Set[Float]; Bool into
+                // a value-tagged Set, value-tag dedup parity), so the checker
+                // must not reject what the reference interpreter accepts.
+                // Mirrors the bare Named("Set") receiver arm above, which
+                // already passes Any for all six methods. Element precision
+                // lives at the binding site instead
+                // (`Set[Str] <= setOf(@[1, 2])` stays rejected).
+                let _ = args;
                 match method {
-                    "add" | "remove" | "has" => vec![value],
-                    "union" | "intersect" | "diff" => {
-                        vec![Type::Generic("Set".to_string(), vec![value])]
-                    }
+                    "add" | "remove" | "has" | "union" | "intersect" | "diff" => vec![Type::Any],
                     _ => vec![],
                 }
             }
@@ -926,14 +933,15 @@ mod arg_types_tests {
     }
 
     #[test]
-    fn set_element_type_flows_into_arg_positions() {
+    fn set_method_slots_stay_element_lenient() {
+        // cross-element-type membership/mutation is pinned
+        // runtime semantics (enum ordinal == Int; Int in
+        // Set[Float]; value-tag dedup Bool into Set[Int]), so every Set
+        // method slot passes Any — matching the bare Named("Set") arm.
         let s = Type::Generic("Set".to_string(), vec![Type::Int]);
-        assert_eq!(arg_types(s.clone(), "add"), vec![Type::Int]);
-        assert_eq!(arg_types(s.clone(), "has"), vec![Type::Int]);
-        assert_eq!(
-            arg_types(s, "union"),
-            vec![Type::Generic("Set".to_string(), vec![Type::Int])]
-        );
+        for method in ["add", "remove", "has", "union", "intersect", "diff"] {
+            assert_eq!(arg_types(s.clone(), method), vec![Type::Any]);
+        }
     }
 
     #[test]
@@ -983,5 +991,46 @@ mod arg_types_tests {
         assert_eq!(arg_types(Type::Int, "toString"), Vec::<Type>::new());
         assert_eq!(arg_types(Type::Bool, "toString"), Vec::<Type>::new());
         assert_eq!(arg_types(Type::Int, "isNaN"), Vec::<Type>::new());
+    }
+    #[test]
+    fn special_receivers_resolve_only_declared_signatures() {
+        let mut checker = TypeChecker::new();
+        for receiver in [
+            Type::Json,
+            Type::Molten,
+            Type::Generic("Stream".into(), vec![Type::Int]),
+        ] {
+            assert_eq!(
+                checker.builtin_method_signature(&receiver, "toString"),
+                None
+            );
+            assert_eq!(checker.builtin_method_signature(&receiver, "unknown"), None);
+        }
+        let fields = vec![(
+            "convert".into(),
+            Type::Function(vec![Type::Str], Box::new(Type::Int)),
+        )];
+        checker
+            .registry
+            .type_defs
+            .insert("Widget".into(), fields.clone());
+        checker
+            .registry
+            .error_types
+            .insert("CustomError".into(), fields.clone());
+        checker
+            .registry
+            .type_defs
+            .insert("CustomError".into(), fields);
+        for receiver in [
+            Type::Named("Widget".into()),
+            Type::Error("CustomError".into()),
+        ] {
+            assert_eq!(
+                checker.builtin_method_signature(&receiver, "convert"),
+                Some((1, 1, vec![Type::Str]))
+            );
+            assert_eq!(checker.builtin_method_signature(&receiver, "unknown"), None);
+        }
     }
 }

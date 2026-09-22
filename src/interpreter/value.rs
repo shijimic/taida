@@ -1034,8 +1034,13 @@ pub enum AsyncStatus {
 pub enum PendingState {
     /// Waiting for a result from a tokio task.
     Waiting(tokio::sync::oneshot::Receiver<Result<Value, String>>),
-    /// The task completed and its result has been consumed.
+    /// The task completed and its result has been consumed (legacy
+    /// placeholder — the resolution is now cached in [`PendingState::Resolved`]).
     Done,
+    /// the task's resolution is cached so awaiting the same
+    /// pending Async twice replays the same result instead of surfacing an
+    /// empty Unit fulfillment.
+    Resolved(Result<Value, String>),
 }
 
 /// An async value — Mold[T] for asynchronous operations.

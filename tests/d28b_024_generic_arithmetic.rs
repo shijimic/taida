@@ -161,8 +161,9 @@ fn d28b_024_checker_rejects_unconstrained_arithmetic() {
         combined
     );
     assert!(
-        combined.contains("Cannot apply Add"),
-        "D28B-024: expected `Cannot apply Add` for unconstrained type-var.\ncombined={}",
+        combined.contains("[E1619] Cannot apply `+` to T and T"),
+        "D28B-024: expected coded `[E1619] Cannot apply \\`+\\`` for unconstrained \
+         type-var.\ncombined={}",
         combined
     );
 }

@@ -2110,10 +2110,15 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
     })
 }
 
-/// ABI 定義 + AbiHelper から CLIF 型を解決する
-///
-/// W-0 では `CompileTarget::Native` のみが有効であり、全 AbiKind が I64 に解決
-/// されるため、旧 `runtime_func_signature()` と同一の結果を返す。
+/// Number of arguments for a runtime function that returns a Taida value.
+pub(crate) fn runtime_callable_arity(name: &str) -> Option<usize> {
+    runtime_abi(name)
+        .ok()
+        .filter(|abi| abi.returns.len() == 1)
+        .map(|abi| abi.params.len())
+}
+
+/// Resolve runtime ABI argument and return kinds to Cranelift types.
 fn resolve_abi(abi: &RuntimeAbi, helper: &AbiHelper) -> (Vec<clif::Type>, Vec<clif::Type>) {
     let resolve_kind = |k: &AbiKind| -> clif::Type {
         match k {
@@ -2869,8 +2874,9 @@ impl Emitter {
                 if let Some(&val) = ectx.named_vars.get(name) {
                     ectx.val_map.insert(*dst, val);
                 } else {
-                    let val = builder.ins().iconst(ectx.value_ty, 0);
-                    ectx.val_map.insert(*dst, val);
+                    return Err(EmitError {
+                        message: format!("Undefined variable: '{}'", name),
+                    });
                 }
             }
             IrInst::PackNew(dst, field_count) => {

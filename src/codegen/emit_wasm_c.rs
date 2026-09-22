@@ -285,7 +285,7 @@ fn c_string_literal(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            '\0' => out.push_str("\\0"),
+            '\0' => out.push_str("\\000"),
             c if c.is_ascii_graphic() || c == ' ' => out.push(c),
             c => {
                 // UTF-8 bytes as OCTAL escapes: C's \x is greedy
@@ -1753,6 +1753,7 @@ fn wasm_full_runtime_prototype(name: &str) -> Option<String> {
 /// 現在の関数のパラメータ名（TailCall で使用）
 struct FuncContext<'a> {
     param_names: Vec<String>,
+    named_vars: HashSet<String>,
     global_map: &'a HashMap<i64, String>,
     func_user_arity: &'a HashMap<String, usize>,
     str_index: &'a HashMap<String, usize>,
@@ -1812,6 +1813,7 @@ fn emit_function(
 
     let fctx = FuncContext {
         param_names: func.params.clone(),
+        named_vars,
         global_map,
         func_user_arity,
         str_index,
@@ -1853,9 +1855,6 @@ fn collect_named_vars(insts: &[IrInst], set: &mut HashSet<String>) {
     for inst in insts {
         match inst {
             IrInst::DefVar(name, _) => {
-                set.insert(name.clone());
-            }
-            IrInst::UseVar(_, name) => {
                 set.insert(name.clone());
             }
             IrInst::CondBranch(_, arms) => {
@@ -2000,6 +1999,11 @@ fn emit_inst(
             writeln!(c, "{}nv_{} = v_{};", indent, sanitize_name(name), src).unwrap();
         }
         IrInst::UseVar(dst, name) => {
+            if !fctx.named_vars.contains(name) {
+                return Err(WasmCEmitError {
+                    message: format!("Undefined variable: '{}'", name),
+                });
+            }
             writeln!(c, "{}v_{} = nv_{};", indent, dst, sanitize_name(name)).unwrap();
         }
         IrInst::Call(dst, name, args) => {

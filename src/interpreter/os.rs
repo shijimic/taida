@@ -1608,22 +1608,7 @@ impl Interpreter {
             // ── tcpConnect(host, port) → Async[Result[@(socket: Int, ...), _]] ──
             "tcpConnect" => {
                 let host = self.eval_os_str_arg(args, 0, "tcpConnect", "host")?;
-                let port = match args.get(1) {
-                    Some(arg) => match self.eval_expr(arg)? {
-                        Signal::Value(Value::Int(n)) => n as u16,
-                        Signal::Value(v) => {
-                            return Err(RuntimeError {
-                                message: format!("tcpConnect: port must be an Int, got {}", v),
-                            });
-                        }
-                        other => return Ok(Some(other)),
-                    },
-                    None => {
-                        return Err(RuntimeError {
-                            message: "tcpConnect: missing argument 'port'".into(),
-                        });
-                    }
-                };
+                let port = self.eval_os_port_arg(args, 1, "tcpConnect", "port")?;
                 let timeout_ms = self.eval_os_timeout_arg(args, 2, "tcpConnect")?;
 
                 let rt = self.tokio_runtime.clone();
@@ -1683,22 +1668,7 @@ impl Interpreter {
 
             // ── tcpListen(port) → Async[Result[@(listener: Int, ...), _]] ──
             "tcpListen" => {
-                let port = match args.first() {
-                    Some(arg) => match self.eval_expr(arg)? {
-                        Signal::Value(Value::Int(n)) => n as u16,
-                        Signal::Value(v) => {
-                            return Err(RuntimeError {
-                                message: format!("tcpListen: port must be an Int, got {}", v),
-                            });
-                        }
-                        other => return Ok(Some(other)),
-                    },
-                    None => {
-                        return Err(RuntimeError {
-                            message: "tcpListen: missing argument 'port'".into(),
-                        });
-                    }
-                };
+                let port = self.eval_os_port_arg(args, 0, "tcpListen", "port")?;
                 let timeout_ms = self.eval_os_timeout_arg(args, 1, "tcpListen")?;
 
                 let rt = self.tokio_runtime.clone();
@@ -2167,6 +2137,20 @@ impl Interpreter {
                         });
                     }
                 };
+                // an unbounded `vec![0u8; size]` turned an absurd
+                // recv length (e.g. 2^62) into a Rust runtime abort instead
+                // of a Taida-level error. Cap at MAX_READ_SIZE and resolve to
+                // a Lax failure, mirroring readBytesAt's "too_large" ceiling
+                // and the Native backend's capped recv.
+                if size as u64 > MAX_READ_SIZE {
+                    return Ok(Some(Signal::Value(make_async_fulfilled(
+                        make_socket_lax_failure(
+                            Value::bytes(Vec::new()),
+                            "SocketRecvExact error",
+                            "too_large",
+                        ),
+                    ))));
+                }
                 let timeout_ms = self.eval_os_timeout_arg(args, 2, "socketRecvExact")?;
                 let socket_handle = self
                     .socket_handles
@@ -2226,22 +2210,7 @@ impl Interpreter {
             // ── udpBind(host, port) → Async[Result[@(socket: Int, host: Str, port: Int), _]] ──
             "udpBind" => {
                 let host = self.eval_os_str_arg(args, 0, "udpBind", "host")?;
-                let port = match args.get(1) {
-                    Some(arg) => match self.eval_expr(arg)? {
-                        Signal::Value(Value::Int(n)) => n as u16,
-                        Signal::Value(v) => {
-                            return Err(RuntimeError {
-                                message: format!("udpBind: port must be an Int, got {}", v),
-                            });
-                        }
-                        other => return Ok(Some(other)),
-                    },
-                    None => {
-                        return Err(RuntimeError {
-                            message: "udpBind: missing argument 'port'".into(),
-                        });
-                    }
-                };
+                let port = self.eval_os_port_arg(args, 1, "udpBind", "port")?;
                 let timeout_ms = self.eval_os_timeout_arg(args, 2, "udpBind")?;
 
                 let rt = self.tokio_runtime.clone();
@@ -2303,22 +2272,7 @@ impl Interpreter {
             "udpSendTo" => {
                 let socket_fd = self.eval_os_handle_arg(args, 0, "udpSendTo", "socket")?;
                 let host = self.eval_os_str_arg(args, 1, "udpSendTo", "host")?;
-                let port = match args.get(2) {
-                    Some(arg) => match self.eval_expr(arg)? {
-                        Signal::Value(Value::Int(n)) => n as u16,
-                        Signal::Value(v) => {
-                            return Err(RuntimeError {
-                                message: format!("udpSendTo: port must be an Int, got {}", v),
-                            });
-                        }
-                        other => return Ok(Some(other)),
-                    },
-                    None => {
-                        return Err(RuntimeError {
-                            message: "udpSendTo: missing argument 'port'".into(),
-                        });
-                    }
-                };
+                let port = self.eval_os_port_arg(args, 2, "udpSendTo", "port")?;
                 let data = self.eval_os_bytes_arg(args, 3, "udpSendTo", "data")?;
                 let timeout_ms = self.eval_os_timeout_arg(args, 4, "udpSendTo")?;
                 let udp_handle = self
@@ -2944,6 +2898,43 @@ impl Interpreter {
             Signal::Value(Value::Str(s)) => Ok(Value::str_take(s)),
             Signal::Value(v) => Err(RuntimeError {
                 message: format!("{}: {} must be a string, got {}", func_name, arg_name, v),
+            }),
+            other => Err(RuntimeError {
+                message: format!(
+                    "{}: unexpected signal evaluating '{}': {}",
+                    func_name,
+                    arg_name,
+                    signal_name(&other)
+                ),
+            }),
+        }
+    }
+
+    /// Helper: evaluate a socket port argument for os functions.
+    /// ports used to be truncated with `as u16`, so `-1`
+    /// bound as 65535 and out-of-range values silently connected /
+    /// listened on an unintended port. Values outside `0..=65535` now
+    /// fail with an explicit error, mirroring `eval_os_timeout_arg`.
+    fn eval_os_port_arg(
+        &mut self,
+        args: &[Expr],
+        index: usize,
+        func_name: &str,
+        arg_name: &str,
+    ) -> Result<u16, RuntimeError> {
+        let arg = args.get(index).ok_or_else(|| RuntimeError {
+            message: format!("{}: missing argument '{}'", func_name, arg_name),
+        })?;
+        match self.eval_expr(arg)? {
+            Signal::Value(Value::Int(n)) if (0..=65535).contains(&n) => Ok(n as u16),
+            Signal::Value(Value::Int(n)) => Err(RuntimeError {
+                message: format!(
+                    "{}: {} must be within 0..=65535, got {}",
+                    func_name, arg_name, n
+                ),
+            }),
+            Signal::Value(v) => Err(RuntimeError {
+                message: format!("{}: {} must be an Int, got {}", func_name, arg_name, v),
             }),
             other => Err(RuntimeError {
                 message: format!(

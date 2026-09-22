@@ -1109,19 +1109,18 @@ fn try_fetch_prebuild(
     }
 
     // Parse out org/name from package id
-    let (org, name) = pkg.name.split_once('/').ok_or_else(|| {
-        PrebuildFailure::Unavailable(format!(
-            "cannot parse package '{}' as org/name for addon prebuild",
-            pkg.name
-        ))
-    })?;
+    let (org, name) =
+        crate::addon::prebuild_fetcher::split_package_id(&pkg.name).ok_or_else(|| {
+            PrebuildFailure::Unavailable(format!(
+                "cannot parse package '{}' as org/name for addon prebuild",
+                pkg.name
+            ))
+        })?;
 
     // Fetch prebuild binary
     let mut reporter = make_progress_reporter(&pkg.name, host.as_triple());
     let fetch_result = if force_refresh {
-        let cache_root = std::env::var("HOME")
-            .ok()
-            .map(|h| PathBuf::from(h).join(".taida/addon-cache"));
+        let cache_root = crate::addon::prebuild_fetcher::cache_root().ok();
         if let Some(ref root) = cache_root {
             let pkg_cache = root
                 .join(org)
@@ -1244,14 +1243,14 @@ fn try_local_addon_build(
     host: &host_target::HostTarget,
 ) -> Result<PathBuf, String> {
     // Build cache: ~/.taida/addon-build/{org}/{name}/{version}/{integrity}/{target}/
-    let home = std::env::var("HOME")
-        .map_err(|_| "cannot determine home directory ($HOME not set)".to_string())?;
-    let (org, name) = pkg.name.split_once('/').ok_or_else(|| {
-        format!(
-            "cannot parse package '{}' as org/name for local addon build",
-            pkg.name
-        )
-    })?;
+    let home = crate::util::taida_home_dir()?;
+    let (org, name) =
+        crate::addon::prebuild_fetcher::split_package_id(&pkg.name).ok_or_else(|| {
+            format!(
+                "cannot parse package '{}' as org/name for local addon build",
+                pkg.name
+            )
+        })?;
     let build_cache = PathBuf::from(&home)
         .join(".taida")
         .join("addon-build")

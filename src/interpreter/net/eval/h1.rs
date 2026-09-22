@@ -1046,6 +1046,11 @@ impl Interpreter {
             let response_value = match handler_result {
                 Ok(v) => v,
                 Err(e) => {
+                    // this path swallows the callback RuntimeError
+                    // (answers 500 and closes), so consume the stashed throw
+                    // value too — leaving it stale would wire THIS request's
+                    // error into the next unrelated error ceiling.
+                    let _ = self.pending_throw.take();
                     // v4: WebSocket state — send close frame on error.
                     if writer.state == WriterState::WebSocket {
                         // Send close frame with 1011 (internal error) if not already closed.
@@ -1356,6 +1361,11 @@ impl Interpreter {
             let response_value = match handler_result {
                 Ok(v) => v,
                 Err(e) => {
+                    // this path swallows the callback RuntimeError
+                    // (answers 500 and closes), so consume the stashed throw
+                    // value too — leaving it stale would wire THIS request's
+                    // error into the next unrelated error ceiling.
+                    let _ = self.pending_throw.take();
                     let error_body = format!("Internal Server Error: {}", e.message);
                     let error_response = format!(
                         "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",

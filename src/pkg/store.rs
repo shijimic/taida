@@ -798,6 +798,10 @@ impl GlobalStore {
         // Tags can be "a.3", "a.3.alpha" (new) or "va.3" (legacy) — extract num and pick highest
         let mut best: Option<(u64, String)> = None; // (num, version_without_v)
         for tag in extract_json_name_values(body) {
+            if !crate::pkg::manifest::is_valid_taida_version(tag.strip_prefix('v').unwrap_or(&tag))
+            {
+                continue;
+            }
             let suffix = tag
                 .strip_prefix(&prefix_new)
                 .or_else(|| tag.strip_prefix(&prefix_legacy));
@@ -806,7 +810,7 @@ impl GlobalStore {
                 let num_str = suffix.split('.').next().unwrap_or(suffix);
                 if let Ok(num) = num_str.parse::<u64>() {
                     let version = tag.strip_prefix('v').unwrap_or(&tag).to_string();
-                    if best.as_ref().is_none_or(|(prev, _)| num > *prev) {
+                    if generation_candidate_is_newer(num, &version, best.as_ref()) {
                         best = Some((num, version));
                     }
                 }
@@ -831,13 +835,16 @@ impl GlobalStore {
 
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
+            if is_scratch_dir_name(&name) || !crate::pkg::manifest::is_valid_taida_version(&name) {
+                continue;
+            }
             if let Some(suffix) = name.strip_prefix(&prefix) {
                 // suffix is "num" or "num.label"
                 let num_str = suffix.split('.').next().unwrap_or(suffix);
                 if let Ok(num) = num_str.parse::<u64>() {
                     // Only count if actually installed
                     if entry.path().join(".taida_installed").exists()
-                        && best.as_ref().is_none_or(|(prev, _)| num > *prev)
+                        && generation_candidate_is_newer(num, &name, best.as_ref())
                     {
                         best = Some((num, name));
                     }
@@ -1800,11 +1807,21 @@ pub fn refresh_reason_short(reason: &RefreshReason) -> String {
 }
 
 fn truncate_sha(sha: &str) -> String {
-    if sha.len() > 12 {
-        sha[..12].to_string()
-    } else {
-        sha.to_string()
-    }
+    sha.chars().take(12).collect()
+}
+
+fn generation_candidate_is_newer(num: u64, version: &str, best: Option<&(u64, String)>) -> bool {
+    best.is_none_or(|(prev, previous)| {
+        num.cmp(prev)
+            .then_with(|| {
+                crate::util::compare_version_labels(
+                    version.splitn(3, '.').nth(2),
+                    previous.splitn(3, '.').nth(2),
+                )
+            })
+            .then_with(|| version.cmp(previous))
+            .is_gt()
+    })
 }
 
 // =============================================================================
@@ -4381,5 +4398,61 @@ mod tests {
             None => unsafe { std::env::remove_var("GITHUB_TOKEN") },
         }
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
+
+#[cfg(test)]
+mod resolution_regressions {
+    use super::*;
+    #[test]
+    fn installed_generation_ignores_staging_and_breaks_label_ties() {
+        let root =
+            std::env::temp_dir().join(format!("taida-generation-audit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let versions = [
+            "a.10.beta",
+            "a.10",
+            "a.10.stable",
+            "a.999.refresh-staging-123-456",
+        ];
+        for reverse in [false, true] {
+            let parent = root.join(if reverse { "reverse" } else { "forward" });
+            let mut names = versions.to_vec();
+            if reverse {
+                names.reverse();
+            }
+            for name in names {
+                let dir = parent.join(name);
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(dir.join(".taida_installed"), "").unwrap();
+            }
+            let store = GlobalStore::with_root(root.clone());
+            assert_eq!(
+                store.find_latest_in_generation(&parent, "a").as_deref(),
+                Some("a.10")
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn remote_candidate_order_is_deterministic() {
+        for versions in [
+            ["a.10.beta", "a.10", "a.10.stable"],
+            ["a.10.stable", "a.10", "a.10.beta"],
+        ] {
+            let mut best = None;
+            for version in versions {
+                if generation_candidate_is_newer(10, version, best.as_ref()) {
+                    best = Some((10, version.to_string()));
+                }
+            }
+            assert_eq!(best.unwrap().1, "a.10");
+        }
+    }
+    #[test]
+    fn truncated_sha_handles_unicode_boundaries() {
+        assert_eq!(truncate_sha("0123456789abcdef"), "0123456789ab");
+        assert_eq!(truncate_sha("01234567890日本語"), "01234567890日");
+        assert_eq!(truncate_sha("日本語"), "日本語");
     }
 }

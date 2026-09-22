@@ -262,12 +262,18 @@ pub struct TypeRegistry {
 impl TypeRegistry {
     pub fn new() -> Self {
         let mut registry = Self::default();
-        // Register built-in Error base type
+        // Register built-in Error base type.
+        // kind/code are declared on the base Error
+        // because every caught error exposes the full ErrorInfo field set —
+        // the catch sites canonicalize thrown packs (interp / native / wasm)
+        // so `err.kind` handlers stay well-defined on every throw path.
         registry.type_defs.insert(
             "Error".to_string(),
             vec![
                 ("type".to_string(), Type::Str),
                 ("message".to_string(), Type::Str),
+                ("kind".to_string(), Type::Str),
+                ("code".to_string(), Type::Int),
             ],
         );
         registry.type_defs.insert(
@@ -284,6 +290,8 @@ impl TypeRegistry {
             vec![
                 ("type".to_string(), Type::Str),
                 ("message".to_string(), Type::Str),
+                ("kind".to_string(), Type::Str),
+                ("code".to_string(), Type::Int),
             ],
         );
         registry
@@ -302,7 +310,7 @@ impl TypeRegistry {
 
     /// Register a type alias. The target is stored pre-resolved, so an alias
     /// chain (`B = @[A]` where `A` is itself an alias) expands at the point
-    /// the later alias is registered, not at every use.
+    /// The later alias is registered, not at every use.
     pub fn register_type_alias(&mut self, name: &str, target: Type) {
         self.type_aliases.insert(name.to_string(), target);
     }
@@ -327,7 +335,7 @@ impl TypeRegistry {
     ///
     /// Returns `false` if registering would create a cycle in the
     /// inheritance chain (e.g. `A => B`, then `B => A`). In that case
-    /// the relationship is **not** stored.
+    /// The relationship is **not** stored.
     pub fn register_inheritance(
         &mut self,
         parent: &str,
@@ -554,7 +562,7 @@ impl TypeRegistry {
     /// TypeExpr tree. This is acceptable at current codebase scale because:
     /// 1. Type expressions are typically shallow (1-3 levels deep).
     /// 2. The checker calls resolve_type() O(n) times per program where n is
-    /// the number of type annotations -- not per-expression.
+    /// The number of type annotations -- not per-expression.
     /// 3. Adding a cache would require either interior mutability (&self -> &mut self
     /// propagation) or a RefCell, adding complexity for negligible benefit.
     ///
@@ -937,17 +945,21 @@ mod tests {
         assert!(reg.is_error_type("AppError"));
         assert!(reg.is_error_type("ValidationError"));
 
-        // Check field composition: ValidationError should have type, message, app_code, field
+        // Check field composition: ValidationError should have type, message,
+        // kind, code, app_code, field (kind/code come from the base
+        // Error declaration)
         let ve_fields = reg
             .get_type_fields("ValidationError")
             .expect("ValidationError should be registered");
         assert_eq!(
             ve_fields.len(),
-            4,
-            "ValidationError should have 4 fields: type, message, app_code, field"
+            6,
+            "ValidationError should have 6 fields: type, message, kind, code, app_code, field"
         );
         assert!(ve_fields.iter().any(|(n, _)| n == "type"));
         assert!(ve_fields.iter().any(|(n, _)| n == "message"));
+        assert!(ve_fields.iter().any(|(n, _)| n == "kind"));
+        assert!(ve_fields.iter().any(|(n, _)| n == "code"));
         assert!(ve_fields.iter().any(|(n, _)| n == "app_code"));
         assert!(ve_fields.iter().any(|(n, _)| n == "field"));
 

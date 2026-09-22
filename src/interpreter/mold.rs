@@ -55,10 +55,16 @@ fn pad_str_value(
         return Value::Str(s);
     }
     let target_len = target_len as usize;
-    if s.len() >= target_len {
+    // measure in CHARS, matching every other Taida Str API
+    // (length / indexOf / slices). The old byte-length check skipped the
+    // pad entirely for multi-byte strings that were still short in
+    // characters, and computed the repeat count from a byte difference
+    // while building the result in chars.
+    let char_count = s.cached_char_count();
+    if char_count >= target_len {
         return Value::Str(s);
     }
-    let repeat_count = target_len - s.len();
+    let repeat_count = target_len - char_count;
     let Some(padding_len) = pad_char.len().checked_mul(repeat_count) else {
         return Value::Str(s);
     };
@@ -1189,15 +1195,20 @@ impl Interpreter {
                         message: "Floor requires 1 argument: Floor[num]()".into(),
                     });
                 }
-                let num = match self.eval_expr(&type_args[0])? {
-                    Signal::Value(Value::Int(n)) => n as f64,
-                    Signal::Value(Value::Float(n)) => n,
-                    Signal::Value(v) => {
+                let val = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                // floor is the identity on integers -- routing Int
+                // through f64 corrupted values above 2^53.
+                let num = match val {
+                    Value::Int(n) => return Ok(Some(Signal::Value(Value::Int(n)))),
+                    Value::Float(n) => n,
+                    v => {
                         return Err(RuntimeError {
                             message: format!("Floor: argument must be numeric, got {}", v),
                         });
                     }
-                    other => return Ok(Some(other)),
                 };
                 Ok(Some(Signal::Value(Value::Int(num.floor() as i64))))
             }
@@ -1207,15 +1218,19 @@ impl Interpreter {
                         message: "Ceil requires 1 argument: Ceil[num]()".into(),
                     });
                 }
-                let num = match self.eval_expr(&type_args[0])? {
-                    Signal::Value(Value::Int(n)) => n as f64,
-                    Signal::Value(Value::Float(n)) => n,
-                    Signal::Value(v) => {
+                let val = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                // ceil is the identity on integers.
+                let num = match val {
+                    Value::Int(n) => return Ok(Some(Signal::Value(Value::Int(n)))),
+                    Value::Float(n) => n,
+                    v => {
                         return Err(RuntimeError {
                             message: format!("Ceil: argument must be numeric, got {}", v),
                         });
                     }
-                    other => return Ok(Some(other)),
                 };
                 Ok(Some(Signal::Value(Value::Int(num.ceil() as i64))))
             }
@@ -1225,15 +1240,19 @@ impl Interpreter {
                         message: "Round requires 1 argument: Round[num]()".into(),
                     });
                 }
-                let num = match self.eval_expr(&type_args[0])? {
-                    Signal::Value(Value::Int(n)) => n as f64,
-                    Signal::Value(Value::Float(n)) => n,
-                    Signal::Value(v) => {
+                let val = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                // round is the identity on integers.
+                let num = match val {
+                    Value::Int(n) => return Ok(Some(Signal::Value(Value::Int(n)))),
+                    Value::Float(n) => n,
+                    v => {
                         return Err(RuntimeError {
                             message: format!("Round: argument must be numeric, got {}", v),
                         });
                     }
-                    other => return Ok(Some(other)),
                 };
                 Ok(Some(Signal::Value(Value::Int(num.round() as i64))))
             }
@@ -1243,15 +1262,19 @@ impl Interpreter {
                         message: "Truncate requires 1 argument: Truncate[num]()".into(),
                     });
                 }
-                let num = match self.eval_expr(&type_args[0])? {
-                    Signal::Value(Value::Int(n)) => n as f64,
-                    Signal::Value(Value::Float(n)) => n,
-                    Signal::Value(v) => {
+                let val = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(v) => v,
+                    other => return Ok(Some(other)),
+                };
+                // truncate is the identity on integers.
+                let num = match val {
+                    Value::Int(n) => return Ok(Some(Signal::Value(Value::Int(n)))),
+                    Value::Float(n) => n,
+                    v => {
                         return Err(RuntimeError {
                             message: format!("Truncate: argument must be numeric, got {}", v),
                         });
                     }
-                    other => return Ok(Some(other)),
                 };
                 Ok(Some(Signal::Value(Value::Int(num.trunc() as i64))))
             }
@@ -2154,6 +2177,17 @@ impl Interpreter {
                     }
                     other => return Ok(Some(other)),
                 };
+                // an all-Int list sums with wrapping i64 arithmetic,
+                // matching the binary-operator discipline -- the previous f64
+                // accumulator silently lost bits above 2^53 before truncating
+                // back with `as i64`.
+                if list.iter().all(|v| matches!(v, Value::Int(_))) {
+                    let sum = list.iter().fold(0i64, |acc, v| match v {
+                        Value::Int(n) => acc.wrapping_add(*n),
+                        _ => acc,
+                    });
+                    return Ok(Some(Signal::Value(Value::Int(sum))));
+                }
                 let sum: f64 = list
                     .iter()
                     .map(|v| match v {
@@ -2162,11 +2196,7 @@ impl Interpreter {
                         _ => 0.0,
                     })
                     .sum();
-                if list.iter().all(|v| matches!(v, Value::Int(_))) {
-                    Ok(Some(Signal::Value(Value::Int(sum as i64))))
-                } else {
-                    Ok(Some(Signal::Value(Value::Float(sum))))
-                }
+                Ok(Some(Signal::Value(Value::Float(sum))))
             }
             "Sort" => {
                 if type_args.is_empty() {
@@ -4569,6 +4599,10 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let mut results = Vec::with_capacity(jobs.len());
+                // drop any stale throw left behind by a consumer
+                // that swallowed its callback RuntimeError, so the recovery
+                // below can only pick up a throw from THIS run's jobs.
+                self.pending_throw = None;
                 for job in jobs.iter() {
                     let task = match job {
                         Value::AsyncTask(task) => task,
@@ -4630,6 +4664,10 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let mut results = Vec::with_capacity(list_val.len());
+                // drop any stale throw left behind by a consumer
+                // that swallowed its callback RuntimeError, so the recovery
+                // below can only pick up a throw from THIS run's items.
+                self.pending_throw = None;
                 for item in list_val.iter() {
                     match self.call_function_with_values(&func, std::slice::from_ref(item)) {
                         Ok(value) => results.push(value),

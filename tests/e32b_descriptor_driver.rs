@@ -187,7 +187,7 @@ uncheckedUnit <= BuildUnit(
     );
     let checked_combined = format!("{}{}", stdout_text(&checked), stderr_text(&checked));
     assert!(
-        checked_combined.contains("Cannot apply Add to Int and Str"),
+        checked_combined.contains("[E1619] Cannot apply `+` to Int and Str"),
         "checked build should surface the child type error, got:\n{checked_combined}"
     );
 

@@ -42,7 +42,44 @@ impl TypeChecker {
             "enumerate" => Some(Type::List(Box::new(Type::Unknown))),
             "zip" => Some(Type::List(Box::new(Type::Unknown))),
             "hashMap" => Some(Type::Named("HashMap".to_string())),
-            "setOf" => Some(Type::Named("Set".to_string())),
+            // type the element from the source list so the
+            // Generic×Generic argument comparison rejects
+            // `Set[Str] <= setOf(@[1, 2])`. The bare Named fallback keeps
+            // element-opaque sources (empty lists, Unknown-typed values)
+            // flowing through the permissive Named↔Generic rule.
+            "setOf" => {
+                // Record the argument span so `check_program` can excuse the
+                // literal's own [E0401]: a heterogeneous literal is a
+                // legitimate value-tagged Set when its only use feeds setOf.
+                if let Some(arg) = args.first() {
+                    self.setof_arg_spans.push(arg.span().clone());
+                }
+                // type the element from the source list so the
+                // Generic×Generic argument comparison rejects
+                // `Set[Str] <= setOf(@[1, 2])`. The bare Named fallback keeps
+                // element-opaque sources (empty lists, Unknown-typed values)
+                // flowing through the permissive Named↔Generic rule.
+                //
+                // The element probe is a SPECULATIVE pass: the argument is
+                // inferred again by the authoritative argument-checking
+                // path. the probe's diagnostics are now
+                // KEPT, not truncated — dropping them let a heterogeneous
+                // literal like `setOf(@[1, "a", 2])` fall through the
+                // element-opaque Named("Set") fallback with no diagnostic at
+                // all. The authoritative pass re-reports the same
+                // (message, span) pair; the final error dedup in `check`
+                // collapses the duplicate, so nothing is double-reported.
+                let elem = match args.first().map(|arg| self.infer_expr_type(arg)) {
+                    Some(Type::List(inner)) if !matches!(*inner, Type::Unknown) => Some(*inner),
+                    _ => None,
+                };
+                match elem {
+                    Some(inner) if !Self::contains_unknown(&inner) => {
+                        Some(Type::Generic("Set".to_string(), vec![inner]))
+                    }
+                    _ => Some(Type::Named("Set".to_string())),
+                }
+            }
             "stdout" | "stderr" => Some(Type::Int),
             "exit" => Some(Type::Int),
             "stdin" => Some(Type::Str),
@@ -78,6 +115,40 @@ impl TypeChecker {
             }
             _ => None,
         }
+    }
+
+    /// Accurate checker return type for the effectful molds whose runtime
+    /// result is a Lax (or Async-wrapped Lax) on every backend. Mirrors the
+    /// lowering comments in `src/codegen/lower/molds_inst.rs` and the
+    /// interpreter constructors in `src/interpreter/os.rs`. Molds outside
+    /// this table keep the permissive `Unknown`.
+    pub(super) fn lax_mold_return_type(name: &str) -> Option<Type> {
+        let lax = |inner| Type::Generic("Lax".to_string(), vec![inner]);
+        let async_of = |inner| Type::Generic("Async".to_string(), vec![inner]);
+        let http_response = || {
+            Type::BuchiPack(vec![
+                ("status".to_string(), Type::Int),
+                ("body".to_string(), Type::Str),
+                // Dynamic header-name pack — its field set is only known at
+                // runtime, so `Any` (not `Unknown`) keeps the permissive
+                // behaviour without tripping the [E1529] residual-unknown
+                // pass, which treats a nested `Unknown` as unresolved
+                // inference rather than as "dynamically shaped by design".
+                ("headers".to_string(), Type::Any),
+            ])
+        };
+        Some(match name {
+            "Read" | "EnvVar" => lax(Type::Str),
+            "ListDir" => lax(Type::List(Box::new(Type::Str))),
+            "Stat" => lax(Type::BuchiPack(vec![
+                ("size".to_string(), Type::Int),
+                ("modified".to_string(), Type::Int),
+                ("isDir".to_string(), Type::Bool),
+            ])),
+            "ReadAsync" => async_of(lax(Type::Str)),
+            "HttpGet" | "HttpPost" => async_of(lax(http_response())),
+            _ => return None,
+        })
     }
 
     pub(super) fn wire_encodable_expr_type(&mut self, expr: &Expr) -> (Type, bool) {
@@ -538,10 +609,27 @@ impl TypeChecker {
                             }
                             continue;
                         }
-                        // BuchiPack 同士は構造的部分型なので許容
+                        // BuchiPack 同士は幅部分型のみ許容
+                        // 後続要素は先頭要素の全フィールドを含まな
+                        // ければならない。統一型は先頭要素の形なので、フィー
+                        // ルドを欠く要素へのアクセスは checker 上合法のまま
+                        // 実行時クラッシュになる（"Field '...' does not
+                        // exist"）。無条件素通しではなく registry の幅部分
+                        // 型判定で検証する
                         if matches!(unified_type, Type::BuchiPack(_))
                             && matches!(item_type, Type::BuchiPack(_))
                         {
+                            if !self.registry.is_subtype_of(&item_type, &unified_type) {
+                                self.errors.push(TypeError {
+                                    message: format!(
+                                        "[E0401] リスト要素の型が不一致: 先頭要素は {} ですが、位置 {} の要素は {} です。\
+                                         リスト内のぶちパックは先頭要素のフィールドをすべて含む必要があります",
+                                        first_type, i, item_type
+                                    ),
+                                    span: span.clone(),
+                                });
+                                break;
+                            }
                             continue;
                         }
                         // 型不一致
@@ -642,18 +730,46 @@ impl TypeChecker {
                         {
                             Type::Str
                         } else if left_type == Type::Unknown || right_type == Type::Unknown {
-                            if self.errors.is_empty() {
+                            // gate on THIS span, not the whole-program
+                            // error state — one unrelated earlier error used to
+                            // suppress every later E1525 (whack-a-mole). The
+                            // same-span dedup keeps re-walks from reporting the
+                            // same operand twice.
+                            let op_sym = match op {
+                                BinOp::Add => "+",
+                                BinOp::Sub => "-",
+                                _ => "*",
+                            };
+                            let already_reported = self
+                                .errors
+                                .iter()
+                                .any(|e| e.message.starts_with("[E1525]") && e.span == *span);
+                            if !already_reported {
                                 self.errors.push(TypeError {
-                                    message: "[E1525] Cannot infer operand type for `+`. Add parameter or expression type annotations.".to_string(),
+                                    message: format!(
+                                        "[E1525] Cannot infer operand type for `{}`. \
+                                         Add parameter or expression type annotations.",
+                                        op_sym
+                                    ),
                                     span: span.clone(),
                                 });
                             }
                             Type::Unknown
                         } else {
+                            // give the arithmetic operand mismatch
+                            // the same diagnostic-code surface as its
+                            // siblings (comparison E1605, logic E1606,
+                            // unary E1607) so tooling can grep it.
+                            let op_sym = match op {
+                                BinOp::Add => "+",
+                                BinOp::Sub => "-",
+                                _ => "*",
+                            };
                             self.errors.push(TypeError {
                                 message: format!(
-                                    "Cannot apply {:?} to {} and {}",
-                                    op, left_type, right_type
+                                    "[E1619] Cannot apply `{}` to {} and {}. \
+                                     Hint: convert the operands to matching types explicitly.",
+                                    op_sym, left_type, right_type
                                 ),
                                 span: span.clone(),
                             });
@@ -1631,9 +1747,18 @@ impl TypeChecker {
                         }
                     }
                     Type::Error(error_name) => {
-                        if field == "kind" {
-                            return Type::Str;
-                        }
+                        // the unconditional
+                        // `field == "kind" => Str` special case is gone.
+                        // The base `Error` registry entry declares only
+                        // `type` / `message`; `kind` lives on the
+                        // `ErrorInfo` carrier that `.errorInfo` hands
+                        // back, not on the error pack itself. Typing
+                        // `.kind` as Str here let programs pass the
+                        // checker and then crash at runtime with "Field
+                        // 'kind' does not exist". Resolution now goes
+                        // through the same registry path as every other
+                        // arm: concrete error fields first, then the
+                        // `Error` base for inherited types, then E1602.
                         if let Some(fields) = self.registry.get_type_fields(error_name) {
                             if let Some((_, ty)) = fields.iter().find(|(name, _)| name == field) {
                                 ty.clone()
@@ -1644,6 +1769,14 @@ impl TypeChecker {
                             {
                                 ty.clone()
                             } else {
+                                self.errors.push(TypeError {
+                                    message: format!(
+                                        "[E1602] Field '{}' does not exist on error type '{}'. \
+                                         Hint: use errorInfo() to reach the kind / code carrier.",
+                                        field, error_name
+                                    ),
+                                    span: span.clone(),
+                                });
                                 Type::Unknown
                             }
                         } else {
@@ -1736,7 +1869,32 @@ impl TypeChecker {
                         self.in_pipeline = true;
                     }
                     if i == 0 {
-                        result_type = self.infer_expr_type(pipe_expr);
+                        // seed the first stage with the
+                        // NEXT callable stage's first parameter as the
+                        // expected type — the same hint a direct-call
+                        // argument gets from
+                        // infer_expr_type_with_expected_for_function_arg.
+                        // Without it `@[] => count` dies on the
+                        // empty-literal-needs-annotation error even though
+                        // `count(@[])` passes: an empty list literal can only
+                        // type itself when something downstream says what it
+                        // holds.
+                        let mut expected_first: Option<Type> = None;
+                        if exprs.len() >= 2
+                            && let Expr::Ident(next_name, _) = &exprs[1]
+                            && self.is_pipeline_callable_ident(next_name)
+                            && let Some(Type::Function(params, _)) =
+                                self.pipeline_stage_function_type(next_name)
+                            && let Some(first_param) = params.first()
+                        {
+                            expected_first = Some(first_param.clone());
+                        }
+                        result_type = match expected_first {
+                            Some(expected) => self.infer_expr_type_with_expected_for_function_arg(
+                                pipe_expr, &expected,
+                            ),
+                            None => self.infer_expr_type(pipe_expr),
+                        };
                         continue;
                     }
                     if i < last_idx
@@ -1792,7 +1950,55 @@ impl TypeChecker {
                     // Rule 2: the stage is evaluated as written.
                     let stage_type = self.infer_expr_type(pipe_expr);
                     result_type = match (&stage_type, pipe_expr) {
-                        (Type::Function(_, ret), _) => (**ret).clone(),
+                        (Type::Function(params, ret), _) => {
+                            // the runtime applies a `_`-free
+                            // function-valued stage to exactly one argument —
+                            // the piped value. The registered / generic
+                            // ident-call paths already count injected
+                            // arguments into their E1301 / E1506 rules; this
+                            // arm is the remaining injection site, so mirror
+                            // the direct-call checks here.
+                            if let Some(first_param) = params.first() {
+                                let piped = result_type.clone();
+                                let piped_unknown = piped == Type::Unknown;
+                                if !piped_unknown {
+                                    if Self::contains_unknown(&piped)
+                                        && !Self::contains_unknown(first_param)
+                                    {
+                                        self.errors.push(TypeError {
+                                            message: format!(
+                                                "[E1506] Pipeline injects the piped value of type {}, \
+                                                 expected {}. Hint: Add annotations so inference can \
+                                                 resolve the piped value's type.",
+                                                piped, first_param
+                                            ),
+                                            span: pipe_expr.span().clone(),
+                                        });
+                                    } else if !self.registry.is_subtype_of(&piped, first_param) {
+                                        self.errors.push(TypeError {
+                                            message: format!(
+                                                "[E1506] Pipeline injects the piped value of type {}, \
+                                                 expected {}. Hint: mark the injection position with \
+                                                 `_` (`x => f(_, a)`), or pass a value of the correct type.",
+                                                piped, first_param
+                                            ),
+                                            span: pipe_expr.span().clone(),
+                                        });
+                                    }
+                                }
+                            } else {
+                                self.errors.push(TypeError {
+                                    message: "[E1301] A `_`-free pipeline stage receives the \
+                                              piped value as its argument, but this function \
+                                              takes no arguments. Hint: use `_` to mark where \
+                                              the piped value goes, or call the function with \
+                                              `f()` and bind its result."
+                                        .to_string(),
+                                    span: pipe_expr.span().clone(),
+                                });
+                            }
+                            (**ret).clone()
+                        }
                         // Divergent stages (`=> ><`, `=> throw ...`) never
                         // produce a value to apply — keep their type.
                         (_, Expr::Gorilla(_)) | (_, Expr::Throw(..)) => stage_type,
@@ -2555,17 +2761,30 @@ impl TypeChecker {
                         if type_args.len() >= 3 {
                             let then_ty = self.infer_expr_type(&type_args[1]);
                             let else_ty = self.infer_expr_type(&type_args[2]);
+                            // the old
+                            // `then.is_numeric && else.is_numeric` escape
+                            // let If[false, 1.5, 2] pass — the interpreter
+                            // returned the dynamic Int while native/WASM
+                            // reinterpreted the other representation's raw
+                            // bits. A mixed Int/Float pair is rejected in
+                            // BOTH directions (subtype widening would still
+                            // let Float-then/Int-else through).
+                            let mixed_numeric_pair = matches!(
+                                (&then_ty, &else_ty),
+                                (Type::Int, Type::Float) | (Type::Float, Type::Int)
+                            );
                             if !(then_ty == Type::Unknown
                                 || else_ty == Type::Unknown
                                 || Self::contains_unknown(&then_ty)
                                 || Self::contains_unknown(&else_ty)
-                                || self.registry.is_subtype_of(&else_ty, &then_ty)
-                                || then_ty.is_numeric() && else_ty.is_numeric())
+                                || (!mixed_numeric_pair
+                                    && self.registry.is_subtype_of(&else_ty, &then_ty)))
                             {
                                 self.errors.push(TypeError {
                                     message: format!(
                                         "[E1603] Condition branch type mismatch: then branch returns {}, but else branch returns {}. \
-                                         Hint: Both branches of If[] should return the same type.",
+                                         Hint: Both branches of If[] should return the same type \
+                                         (Int and Float branches cannot be mixed).",
                                         then_ty, else_ty
                                     ),
                                     span: mold_span.clone(),
@@ -2914,7 +3133,17 @@ impl TypeChecker {
                                 }
                                 crate::types::mold_specs::MoldReturnKind::Pack
                                 | crate::types::mold_specs::MoldReturnKind::Dynamic => {
-                                    Type::Unknown
+                                    // The OS / net effectful molds produce a Lax
+                                    // (or Async-wrapped Lax) at runtime on every
+                                    // backend. Typing them Unknown let direct
+                                    // method calls slip past the checker and then
+                                    // diverge at runtime — the interpreter raised
+                                    // "Unknown method ... on Lax" while native
+                                    // misread the carrier pack. With the accurate
+                                    // receiver the regular E1509 unknown-method
+                                    // rule fires; `>=>` unmold and the sanctioned
+                                    // Lax methods stay available.
+                                    Self::lax_mold_return_type(name).unwrap_or(Type::Unknown)
                                 }
                             }
                         } else if matches!(self.lookup_var(name), Some(Type::Unknown)) {

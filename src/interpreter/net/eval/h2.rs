@@ -532,6 +532,12 @@ impl Interpreter {
                             }
                         }
                         Err(_) => {
+                            // this path swallows the callback
+                            // RuntimeError (answers 500), so consume the
+                            // stashed throw value too — leaving it stale would
+                            // wire THIS request's error into the next
+                            // unrelated error ceiling.
+                            let _ = self.pending_throw.take();
                             let _ = send_response_headers(
                                 stream,
                                 &mut h2_conn.encoder,
@@ -582,6 +588,9 @@ impl Interpreter {
                             }
                         }
                         Err(_) => {
+                            // consume the stashed throw value —
+                            // this path answers 500 without it (see above).
+                            let _ = self.pending_throw.take();
                             // Handler error — send 500
                             let _ = send_response_headers(
                                 stream,

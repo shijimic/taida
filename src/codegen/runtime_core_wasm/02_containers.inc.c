@@ -335,6 +335,73 @@ int64_t taida_make_error_with_kind_code(int64_t type_ptr, int64_t msg_ptr, int64
     return pack;
 }
 
+/* catch-site canonicalization — a caught error
+   always exposes the full ErrorInfo field set (type/message/kind/code)
+   inside the handler scope. Runtime-raised errors already carry kind/code
+   so handlers can read `err.kind`. A
+   user throw like `Error(type <= "X", message <= "y").throw()` builds a
+   bare @(type, message) pack, so `.kind` used to crash only on that path.
+   Mirrors the interpreter's canonicalize_caught_error and the native
+   runtime's catch-site normalization. */
+int64_t taida_canonicalize_caught_error(int64_t error_val) {
+    if (!_looks_like_pack(error_val)) return error_val;
+    if (taida_pack_has_hash(error_val, WASM_HASH_KIND)
+        && taida_pack_has_hash(error_val, WASM_HASH_CODE)
+        && taida_pack_has_hash(error_val, WASM_HASH___TYPE)) {
+        return error_val; /* already canonical — display / re-throw unchanged */
+    }
+    int64_t type_ptr = 0;
+    if (taida_pack_has_hash(error_val, WASM_HASH_TYPE)) {
+        type_ptr = taida_pack_get(error_val, WASM_HASH_TYPE);
+    } else if (taida_pack_has_hash(error_val, WASM_HASH___TYPE)) {
+        type_ptr = taida_pack_get(error_val, WASM_HASH___TYPE);
+    }
+    if (type_ptr == 0 || !_wasm_is_string_ptr(type_ptr)) type_ptr = WSTR("Error");
+    /* The thrown pack's OWN fields must survive canonicalization: a user
+       subtype like L2Error(l1, l2) keeps its declared slots in the handler
+       scope. Canonicalization only ADDS the missing ErrorInfo slots — it
+       never rebuilds the pack. Mirrors the interpreter's BuchiPack arm. */
+    int64_t *src = (int64_t *)(intptr_t)error_val;
+    int64_t src_fc = src[0];
+    int has_kind_slot = taida_pack_has_hash(error_val, WASM_HASH_KIND);
+    int has_code_slot = taida_pack_has_hash(error_val, WASM_HASH_CODE);
+    int has_type_slot = taida_pack_has_hash(error_val, WASM_HASH___TYPE);
+    int64_t extra = (int64_t)(!has_kind_slot) + (int64_t)(!has_code_slot)
+                  + (int64_t)(!has_type_slot);
+    int64_t canon = taida_pack_new(src_fc + extra);
+    for (int64_t i = 0; i < src_fc; i++) {
+        /* Copy each slot verbatim — hash, tag, and value. The bump
+           allocator never frees, so no retain is needed on this profile. */
+        taida_pack_set_hash(canon, i, src[1 + i * 3]);
+        taida_pack_set_tag(canon, i, src[1 + i * 3 + 1]);
+        taida_pack_set(canon, i, src[1 + i * 3 + 2]);
+    }
+    int64_t next = src_fc;
+    if (!has_kind_slot) {
+        /* Stamp per-slot value tags : the full-form pack
+           renderer renders tag-0 slots through its explicit INT branch, so
+           the Str payloads must be tagged or they surface as raw heap
+           addresses. */
+        taida_pack_set_hash(canon, next, WASM_HASH_KIND);
+        taida_pack_set(canon, next, type_ptr);
+        taida_pack_set_tag(canon, next, WASM_TAG_STR);
+        next++;
+    }
+    if (!has_code_slot) {
+        taida_pack_set_hash(canon, next, WASM_HASH_CODE);
+        taida_pack_set(canon, next, 0);
+        taida_pack_set_tag(canon, next, WASM_TAG_INT);
+        next++;
+    }
+    if (!has_type_slot) {
+        taida_pack_set_hash(canon, next, WASM_HASH___TYPE);
+        taida_pack_set(canon, next, type_ptr);
+        taida_pack_set_tag(canon, next, WASM_TAG_STR);
+        next++;
+    }
+    return canon;
+}
+
 /* ── W-5: Lax[T] runtime ────────────────────────────────── */
 /* Lax is a BuchiPack @(has_value: Bool, __value: T, __default: T, __type: Str)
    Layout: 4-field pack using same hash constants as native. */
@@ -1133,7 +1200,10 @@ static int64_t _wasm_async_task_callable(int64_t task) {
    If it does not match, calls taida_throw(error_val) which sets the error flag (never returns normally). */
 int64_t taida_error_type_check_or_rethrow(int64_t error_val, int64_t handler_type_str) {
     if (taida_error_type_matches(error_val, handler_type_str)) {
-        return error_val;
+        /* the handler variable always sees the full ErrorInfo
+           field set (type/message/kind/code), regardless of how the error
+           was thrown. */
+        return taida_canonicalize_caught_error(error_val);
     }
     /* Re-throw: sets __wasm_error_thrown flag */
     taida_throw(error_val);
@@ -1191,24 +1261,53 @@ int64_t taida_stub_new(int64_t message) {
     return taida_molten_new();
 }
 
+/* classify a TODO field value so the
+   pack renderers' explicit INT branch (tag 0) never swallows it. Str
+   payloads used to surface as raw heap addresses (`id <= 4649840`).
+   Structural kinds get their heap tag so the renderer takes the recursive
+   full-form path; scalars stay INT (Bool is indistinguishable from Int at
+   the value level — the legacy ftype-4 registry hint keeps Bool fields
+   rendering as true/false). Float payloads have no unboxed runtime
+   signature and remain on the per-entry value-tag track. */
+static int _wasm_todo_field_tag(int64_t v) {
+    if (_wasm_is_string_ptr(v)) return WASM_TAG_STR;
+    if (taida_is_buchi_pack(v)) return WASM_TAG_PACK;
+    if (taida_is_list(v)) return WASM_TAG_LIST;
+    if (taida_is_hashmap(v)) return WASM_TAG_HMAP;
+    if (taida_is_set(v)) return WASM_TAG_SET;
+    return WASM_TAG_INT;
+}
+
 int64_t taida_todo_new(int64_t id, int64_t task, int64_t sol, int64_t unm) {
     /* BE-WASM-1: proper TODO pack matching native_runtime.c layout.
        Fields: id(0), task(1), sol(2), unm(3), __value(4), __default(5), __type(6) */
     int64_t pack = taida_pack_new(7);
+    int id_tag = _wasm_todo_field_tag(id);
+    int task_tag = _wasm_todo_field_tag(task);
+    int sol_tag = _wasm_todo_field_tag(sol);
+    int unm_tag = _wasm_todo_field_tag(unm);
     taida_pack_set_hash(pack, 0, WASM_HASH_TODO_ID);
     taida_pack_set(pack, 0, id);
+    taida_pack_set_tag(pack, 0, id_tag);
     taida_pack_set_hash(pack, 1, WASM_HASH_TODO_TASK);
     taida_pack_set(pack, 1, task);
+    taida_pack_set_tag(pack, 1, task_tag);
     taida_pack_set_hash(pack, 2, WASM_HASH_TODO_SOL);
     taida_pack_set(pack, 2, sol);
+    taida_pack_set_tag(pack, 2, sol_tag);
     taida_pack_set_hash(pack, 3, WASM_HASH_TODO_UNM);
     taida_pack_set(pack, 3, unm);
+    taida_pack_set_tag(pack, 3, unm_tag);
+    /* __value / __default mirror the sol / unm channels. */
     taida_pack_set_hash(pack, 4, WASM_HASH___VALUE);
     taida_pack_set(pack, 4, sol);
+    taida_pack_set_tag(pack, 4, sol_tag);
     taida_pack_set_hash(pack, 5, WASM_HASH___DEFAULT);
     taida_pack_set(pack, 5, unm);
+    taida_pack_set_tag(pack, 5, unm_tag);
     taida_pack_set_hash(pack, 6, WASM_HASH___TYPE);
     taida_pack_set(pack, 6, WSTR("TODO"));
+    taida_pack_set_tag(pack, 6, WASM_TAG_STR);
     return pack;
 }
 
@@ -2679,27 +2778,30 @@ int64_t taida_str_pad(int64_t s_raw, int64_t target_len_raw, int64_t pad_char_ra
     const char *pad_char = (const char *)pad_char_raw;
     int pad_end = (int)pad_end_raw;
     if (!s) { return taida_str_alloc(0); }
-    int slen = _wf_strlen(s);
-    if (target_len_raw <= slen || target_len_raw > TAIDA_WASM_I32_MAX - 1) {
+    /* measure characters (code points), not bytes, and repeat the
+     * whole pad string -- matching the interpreter's char-based behavior. */
+    int sbytes = _wf_strlen(s);
+    int slen = _wasm_utf8_count(s, sbytes);
+    if (slen >= target_len_raw || target_len_raw > TAIDA_WASM_I32_MAX - 1) {
         return taida_str_new_copy(s_raw);
     }
-    int target_len = (int)target_len_raw;
-    if (slen >= target_len) {
+    const char *pc = (pad_char && pad_char[0] != '\0') ? pad_char : " ";
+    int pc_bytes = _wf_strlen(pc);
+    int pad_count = (int)(target_len_raw - slen);
+    if (pad_count > (TAIDA_WASM_I32_MAX - 1 - sbytes) / pc_bytes) {
         return taida_str_new_copy(s_raw);
     }
-    int pad_len = target_len - slen;
-    char pc = ' ';
-    if (pad_char && _wf_strlen(pad_char) > 0) pc = pad_char[0];
-    char *r = _wasm_str_alloc((unsigned int)(target_len + 1));
+    int pad_bytes = pad_count * pc_bytes;
+    char *r = _wasm_str_alloc((unsigned int)(sbytes + pad_bytes + 1));
     if (!r) { return taida_str_new_copy(s_raw); }
     if (pad_end) {
-        _wf_memcpy(r, s, slen);
-        for (int i = 0; i < pad_len; i++) r[slen + i] = pc;
+        _wf_memcpy(r, s, sbytes);
+        for (int i = 0; i < pad_count; i++) _wf_memcpy(r + sbytes + i * pc_bytes, pc, pc_bytes);
     } else {
-        for (int i = 0; i < pad_len; i++) r[i] = pc;
-        _wf_memcpy(r + pad_len, s, slen);
+        for (int i = 0; i < pad_count; i++) _wf_memcpy(r + i * pc_bytes, pc, pc_bytes);
+        _wf_memcpy(r + pad_bytes, s, sbytes);
     }
-    r[target_len] = '\0';
+    r[sbytes + pad_bytes] = '\0';
     return (int64_t)r;
 }
 

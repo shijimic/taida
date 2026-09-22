@@ -927,7 +927,36 @@ mod tests {
         // 2026-06-12 F62B-038 #6 (core.c): cage-builder check is-pack
         //   guard + detected-type-name report: +524.
         //   1,336,718 -> 1,337,242.
-        const EXPECTED_TOTAL_LEN: usize = 1_337_242;
+        // 2026-08-22 display-parity field-name registry (core.c): the
+        //   renderer-side bulk registration of internal pack field names
+        //   (Todo/Cursor/StepIterator/RegexMatch/monadic/ABI descriptor
+        //   names) + the per-element JSON kind hint helper land after
+        //   the Error-ceiling marker: +3,803.
+        //   1,337,242 -> 1,341,045.
+        // 2026-08-22 review-fix (core.c): taida_todo_new stamps per-slot
+        //   value tags via taida_runtime_detect_tag (full renderer's INT
+        //   branch no longer truncates tag-less slots); jsonEncode HashMap
+        //   arm gains a value kind hint + non-Str key skip; the bulk field
+        //   registrar becomes pthread_once-guarded; stream-hash comment
+        //   corrections: +4,043.
+        //   1,341,045 -> 1,345,088.
+        // 2026-08-23  (core.c): HASH_KIND/HASH_CODE constants and
+        //   the taida_canonicalize_caught_error helper land before the
+        //   marker (F1 431,546 -> 433,832); the catch-site normalization
+        //   call inside taida_error_type_check_or_rethrow lands after it
+        //   (F2 233,128 -> 233,332).
+        //   1,345,088 -> 1,347,578.
+        // 2026-08-23 the early-return guard gains a
+        //   HASH___TYPE presence probe (`taida_pack_has_hash`), symmetric
+        //   with interp/wasm.
+        //   1,347,578 -> 1,349,193.
+        // 2026-08-23 :  rewrites taida_str_pad to count
+        //   characters (taida_utf8_count) and memcpy the whole pad string
+        //   (before the marker);  adds out-of-range port rejection
+        //   in tls.c tcp_listen / udp_bind and aligns socketRecvExact's cap
+        //   to 64MB (tls.c).
+        //   1,349,193 -> 1,350,482.
+        const EXPECTED_TOTAL_LEN: usize = 1_354_264;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1692,7 +1721,19 @@ mod tests {
         // F62B-038 #6: the cage-builder check gains the is-pack guard +
         // the detected-type-name report (before the marker): +524.
         // 429,235 -> 429,759.
-        const F1_LEN: usize = 429_759;
+        // 2026-08-22 display-parity + review-fix (before the marker): the
+        //   taida_runtime_detect_tag prototype, the taida_todo_new per-slot
+        //   tag stamping and the stream-hash comment corrections land
+        //   before the marker: 429,759 -> 431,546.
+        // HASH_KIND/HASH_CODE + taida_canonicalize_caught_error
+        //   land before the marker: 431,546 -> 433,832.
+        // the early-return guard inside
+        //   taida_canonicalize_caught_error gains a HASH___TYPE presence
+        //   probe (before the marker): 433,832 -> 435,203.
+        //  : taida_str_pad counts characters via
+        //   taida_utf8_count and repeats the whole pad string with memcpy,
+        //   with an overflow guard (before the marker): 435,203 -> 435,809.
+        const F1_LEN: usize = 434_580;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this
@@ -1778,7 +1819,19 @@ mod tests {
             // Final-review #2: the CageBuilder tag fixes land next to the
             // host abi (before the marker): F1 428,824 -> 429,235; F2
             // unchanged.
-            F1_LEN + 227_069,
+            // Display-parity field-name registry + per-element JSON kind
+            // hint helper land after the marker: F2 227,069 -> 230,872.
+            // 2026-08-22 review-fix after the marker: the pthread_once
+            //   bulk registrar split, the jsonEncode HashMap value hint +
+            //   non-Str key skip and the registry-cap note add +2,182.
+            //   F2 230,872 -> 233,128.
+            //  after the marker: the catch-site normalization call
+            //   inside taida_error_type_check_or_rethrow adds +204.
+            //   F2 233,128 -> 233,332.
+            //  after the marker: the early-return guard
+            //   inside taida_error_type_check_or_rethrow gains the
+            //   HASH___TYPE presence probe: +244. F2 233,332 -> 233,576.
+            F1_LEN + 238_617,
             "core.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";

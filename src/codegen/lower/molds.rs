@@ -117,6 +117,12 @@ impl Lowering {
         fields: &[BuchiField],
     ) -> Result<IrVar, LowerError> {
         let mut materialized_fields: Vec<(String, IrVar)> = Vec::new();
+        // Value-derived per-field tags for slots whose TypeDef annotation is
+        // absent. The full-form display renderer treats a zero (INT) per-field
+        // tag as "raw integer" and would print a heap Str pointer as its own
+        // address (`type <= 4654056`), so unannotated slots must still receive
+        // the tag their initializer literal carries.
+        let mut materialized_value_tags: Vec<i64> = Vec::new();
 
         if let Some(type_fields) = self.type_field_defs.get(type_name).cloned() {
             let mut consumed = std::collections::HashSet::new();
@@ -125,8 +131,11 @@ impl Lowering {
                 let value_var = if let Some(provided) =
                     fields.iter().rev().find(|f| f.name == field_def.name)
                 {
-                    self.lower_expr(func, &provided.value)?
+                    let v = self.lower_expr(func, &provided.value)?;
+                    materialized_value_tags.push(self.expr_type_tag(&provided.value));
+                    v
                 } else {
+                    materialized_value_tags.push(0);
                     self.lower_default_for_field_def(func, field_def, &mut visiting)?
                 };
                 materialized_fields.push((field_def.name.clone(), value_var));
@@ -136,12 +145,14 @@ impl Lowering {
             for field in fields {
                 if !consumed.contains(&field.name) {
                     let val = self.lower_expr(func, &field.value)?;
+                    materialized_value_tags.push(self.expr_type_tag(&field.value));
                     materialized_fields.push((field.name.clone(), val));
                 }
             }
         } else {
             for field in fields {
                 let val = self.lower_expr(func, &field.value)?;
+                materialized_value_tags.push(self.expr_type_tag(&field.value));
                 materialized_fields.push((field.name.clone(), val));
             }
         }
@@ -235,8 +246,16 @@ impl Lowering {
                 ));
             }
 
-            // A-4c: determine type tag from field_type_tags registry or TypeDef field types
-            let tag = self.type_field_type_tag(type_name, field_name);
+            // A-4c: determine type tag from field_type_tags registry or TypeDef
+            // field types; fall back to the initializer literal's own kind when
+            // unannotated so Str literals don't render as raw pointer ints.
+            let mut tag = self.type_field_type_tag(type_name, field_name);
+            if tag <= 0 {
+                let inferred = materialized_value_tags.get(i).copied().unwrap_or(0);
+                if inferred > 0 {
+                    tag = inferred;
+                }
+            }
             if tag != 0 {
                 func.push(IrInst::PackSetTag(pack_var, i, tag));
             }

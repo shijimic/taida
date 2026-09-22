@@ -42,7 +42,13 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(taida_allow_mock_github_ba
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order (IndexMap) keeps the
+# interpreter's jsonEncode HashMap output in the map's insertion order —
+# the default BTreeMap-backed Map silently alphabetised keys while native /
+# wasm emit insertion order (C23B-008 contract). Pack fields are sorted
+# explicitly in src/interpreter/json.rs so their wire order still matches
+# the compiled backends' alphabetical field sort.
+serde_json = { version = "1", features = ["preserve_order"] }
 httparse = "1"
 sha1 = "0.10"
 base64 = "0.22"

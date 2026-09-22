@@ -345,7 +345,10 @@ fn test_error_type_registration() {
         .registry
         .get_type_fields("ValidationError")
         .expect("ValidationError type should be registered after check");
-    assert_eq!(fields.len(), 4);
+    // type, message, kind, code inherited from the base Error (
+    // added kind/code) + field declared here; the declared code: Int
+    // merges with the inherited one
+    assert_eq!(fields.len(), 5);
 }
 
 #[test]
@@ -374,21 +377,22 @@ AppError => ValidationError = @(field: Str)
     assert!(checker.registry.is_error_type("AppError"));
     assert!(checker.registry.is_error_type("ValidationError"));
 
-    // AppError should have 3 fields: type, message, app_code
+    // AppError should have 5 fields: type, message, kind, code, app_code
+    // ( added kind/code to the base Error declaration)
     let app_fields = checker
         .registry
         .get_type_fields("AppError")
         .expect("AppError should be registered");
-    assert_eq!(app_fields.len(), 3, "AppError fields: {:?}", app_fields);
+    assert_eq!(app_fields.len(), 5, "AppError fields: {:?}", app_fields);
 
-    // ValidationError should have 4 fields: type, message, app_code, field
+    // ValidationError should have 6 fields: type, message, kind, code, app_code, field
     let val_fields = checker
         .registry
         .get_type_fields("ValidationError")
         .expect("ValidationError should be registered");
     assert_eq!(
         val_fields.len(),
-        4,
+        6,
         "ValidationError fields: {:?}",
         val_fields
     );
@@ -1046,11 +1050,13 @@ value <= m.get("a").getOrDefault(0)
 
 #[test]
 fn test_set_type() {
+    // setOf types its element from the source list so the
+    // Generic×Generic comparison can reject mismatched Set annotations.
     let source = "s <= setOf(@[1, 2, 3])\nresult <= s.has(1)";
     let (checker, _errors) = check(source);
     assert_eq!(
         checker.lookup_var("s"),
-        Some(Type::Named("Set".to_string()))
+        Some(Type::Generic("Set".to_string(), vec![Type::Int]))
     );
     assert_eq!(checker.lookup_var("result"), Some(Type::Bool));
 }
@@ -2716,9 +2722,9 @@ fn test_list_homogeneous_bool() {
 }
 
 #[test]
-fn test_list_homogeneous_packs() {
-    // @[@(x <= 1), @(y <= 2)] — BuchiPack 同士は構造的部分型で許容
-    let source = "packs <= @[@(x <= 1), @(y <= 2)]";
+fn test_list_pack_width_subtype() {
+    // 後続要素が先頭要素の全フィールドを含む（幅部分型）リストは許容
+    let source = "packs <= @[@(x <= 1), @(x <= 2, y <= \"a\")]";
     let (_, errors) = check(source);
     let e0401: Vec<_> = errors
         .iter()
@@ -2726,8 +2732,26 @@ fn test_list_homogeneous_packs() {
         .collect();
     assert!(
         e0401.is_empty(),
-        "BuchiPack list should not produce E0401, got: {:?}",
+        "Width-subtype BuchiPack list should not produce E0401, got: {:?}",
         e0401
+    );
+}
+
+#[test]
+fn test_list_disjoint_packs_rejected() {
+    // フィールドを欠くぶちパックの混在は E0401。
+    // 統一型は先頭要素の形なので、欠けたフィールドへのアクセスが
+    // checker 合法のまま実行時クラッシュになる穴を塞ぐ
+    let source = "packs <= @[@(x <= 1), @(y <= 2)]";
+    let (_, errors) = check(source);
+    let e0401: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E0401]"))
+        .collect();
+    assert!(
+        !e0401.is_empty(),
+        "Disjoint-field BuchiPack list must be rejected, got: {:?}",
+        errors
     );
 }
 
@@ -2906,19 +2930,19 @@ fn test_fl3_cond_branch_same_type_no_error() {
 }
 
 #[test]
-fn test_fl3_cond_branch_int_float_mix_allowed() {
-    // Int/Float mixing should be allowed (both are Num)
+fn test_fl3_cond_branch_int_float_mix_rejected() {
+    // Int/Float mixing in a cond branch is a type error. The old numeric
+    // pair exception kept the FIRST arm's type as the branch type, so the
+    // compiled backends reinterpreted the other representation's raw bits
+    // while the interpreter returned the dynamic value — Taida has no
+    // implicit numeric conversion.
     // C20-1 (ROOT-5): wrap in parens for the rhs multi-line guard.
     let source = "x <= 5\ny <= (\n  | x > 3 |> 1\n  | _ |> 2.5\n)";
     let (_, errors) = check(source);
-    let e1603: Vec<_> = errors
-        .iter()
-        .filter(|e| e.message.contains("[E1603]"))
-        .collect();
     assert!(
-        e1603.is_empty(),
-        "Should not produce E1603 for Int/Float mix, got: {:?}",
-        e1603
+        errors.iter().any(|e| e.message.contains("[E1603]")),
+        "Expected E1603 for Int/Float mix, got: {:?}",
+        errors
     );
 }
 
@@ -2953,18 +2977,43 @@ fn test_b11_if_mold_same_type_no_error() {
 }
 
 #[test]
-fn test_b11_if_mold_int_float_mix_allowed() {
-    // If[cond, Int, Float]() — Int/Float mix should be allowed
-    let source = "x <= If[true, 1, 2.5]()";
+fn test_b11_if_mold_int_float_mix_rejected() {
+    // a mixed Int/Float pair is rejected in BOTH
+    // directions. The old numeric-pair exception let If[false, 1.5, 2]
+    // through and the backends reinterpreted the other representation's
+    // raw bits at runtime while the interpreter returned the dynamic value.
+    for source in ["x <= If[true, 1, 2.5]()", "x <= If[false, 1.5, 2]()"] {
+        let (_, errors) = check(source);
+        assert!(
+            errors.iter().any(|e| e.message.contains("[E1603]")),
+            "Expected E1603 for Int/Float mix in If ({}), got: {:?}",
+            source,
+            errors
+        );
+    }
+}
+
+#[test]
+fn f64b004_pipeline_first_stage_expected_hint() {
+    // the FIRST pipeline stage gets the NEXT callable
+    // stage's first parameter as its expected type — the same hint a
+    // direct-call argument receives. An empty list literal can only type
+    // itself from that hint, so `@[] => total` used to die on the
+    // empty-literal-needs-annotation error while `total(@[])` passed.
+    let source = r#"
+total xs: @[Int] =
+  xs.length()
+=> :Int
+@[] => total => n3
+"#;
     let (_, errors) = check(source);
-    let e1603: Vec<_> = errors
-        .iter()
-        .filter(|e| e.message.contains("[E1603]"))
-        .collect();
     assert!(
-        e1603.is_empty(),
-        "Should not produce E1603 for Int/Float mix in If, got: {:?}",
-        e1603
+        !errors
+            .iter()
+            .any(|e| e.message.contains("Empty list literal")),
+        "empty-literal first stage should type from the next stage's \
+         parameter, got: {:?}",
+        errors
     );
 }
 
@@ -7286,5 +7335,99 @@ x <= Pilot[1]()"#;
             .any(|e| e.message.contains("[E1530] Unknown mold 'Pilot'")),
         "known class-like type must not fall through to unknown mold, got: {:?}",
         errors
+    );
+}
+
+#[test]
+fn f64b010_error_kind_code_declared_on_base_error() {
+    // catch sites canonicalize every caught error to the full
+    // ErrorInfo field set (interp / native / wasm), so `.kind` and `.code`
+    // are declared on the base Error registry entry instead of being typed
+    // by a silent special case. Handler access must type-check as
+    // Str / Int respectively.
+    let source = r#"
+handle x: Int =
+  |== err: Error =
+    | err.type == "ValidationError" |> err.kind
+    | _ |> err.code.toString()
+  => :Str
+  | x == 1 |> "ok"
+  | _ |> "other"
+=> :Str
+"#;
+    let (_, errors) = check(source);
+    assert!(
+        errors.is_empty(),
+        "kind/code access on a caught Error must type-check, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn f64b010_error_undeclared_field_still_rejected() {
+    // Fields outside the canonicalized ErrorInfo shape stay rejected with
+    // [E1602]; only type/message/kind/code are declared.
+    let source = r#"
+handle x: Int =
+  |== err: Error =
+    "sev: " + err.severity
+  => :Str
+  | x == 1 |> "ok"
+  | _ |> "other"
+=> :Str
+"#;
+    let (_, errors) = check(source);
+    assert_has_error(&errors, "[E1602]");
+    assert_has_error(&errors, "'severity'");
+}
+
+#[test]
+fn f64b010_error_type_message_access_still_allowed() {
+    // The base Error registry entry still declares type/message; those
+    // accesses must keep type-checking inside a catch scope.
+    let source = r#"
+handle x: Int =
+  |== err: Error =
+    | err.type == "ValidationError" |> "invalid"
+    | _ |> err.message
+  => :Str
+  | x == 1 |> "ok"
+  | _ |> "other"
+=> :Str
+"#;
+    let (_, errors) = check(source);
+    let e1602: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1602]"))
+        .collect();
+    assert!(
+        e1602.is_empty(),
+        "type/message access on Error must remain valid, got: {:?}",
+        e1602
+    );
+}
+
+#[test]
+fn f64b010_error_kind_via_errorinfo_still_allowed() {
+    // The documented route to kind/code is errorInfo, whose ErrorInfo
+    // pack declares type/message/kind/code. That path must keep passing.
+    let source = r#"
+handle =
+  |== err: Error =
+    info <= err.errorInfo()
+    "kind: " + info.kind
+  => :Str
+  "ok"
+=> :Str
+"#;
+    let (_, errors) = check(source);
+    let e1602: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("[E1602]"))
+        .collect();
+    assert!(
+        e1602.is_empty(),
+        "kind access via errorInfo() must remain valid, got: {:?}",
+        e1602
     );
 }

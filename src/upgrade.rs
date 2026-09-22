@@ -94,25 +94,10 @@ impl std::fmt::Display for TaidaVersion {
 
 impl Ord for TaidaVersion {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Compare generation lexicographically, then num descending.
-        self.generation
-            .cmp(&other.generation)
+        crate::util::compare_generation(&self.generation, &other.generation)
             .then(self.num.cmp(&other.num))
-            // Tie-break: label=None (stable) > label=Some("stable") > others
-            .then_with(|| match (&self.label, &other.label) {
-                (None, None) => std::cmp::Ordering::Equal,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (Some(a), Some(b)) => {
-                    // "stable" sorts above other labels
-                    let a_stable = a == "stable";
-                    let b_stable = b == "stable";
-                    match (a_stable, b_stable) {
-                        (true, false) => std::cmp::Ordering::Greater,
-                        (false, true) => std::cmp::Ordering::Less,
-                        _ => a.cmp(b),
-                    }
-                }
+            .then_with(|| {
+                crate::util::compare_version_labels(self.label.as_deref(), other.label.as_deref())
             })
     }
 }
@@ -223,7 +208,7 @@ pub fn api_url() -> &'static str {
 
 /// Build a blocking reqwest client without authentication.
 fn make_public_client() -> Result<reqwest::blocking::Client, String> {
-    reqwest::blocking::Client::builder()
+    crate::util::http_client_builder()
         .user_agent("taida-upgrade")
         .default_headers({
             let mut headers = reqwest::header::HeaderMap::new();
@@ -401,7 +386,7 @@ pub fn download_bytes_for_test(url: &str) -> Result<Vec<u8>, String> {
 }
 
 fn download_bytes_https(url: &str) -> Result<Vec<u8>, String> {
-    let client = reqwest::blocking::Client::builder()
+    let client = crate::util::http_client_builder()
         .user_agent("taida-upgrade")
         .build()
         .map_err(|e| {
@@ -1793,5 +1778,20 @@ def456  taida-@b.11-aarch64-apple-darwin.tar.gz\n";
         assert_ne!(actual_sha, wrong_sha);
         let err = verify_sha256_bytes(data, wrong_sha).unwrap_err();
         assert!(err.contains("[E32K1_UPGRADE_SHA256_MISMATCH]"));
+    }
+}
+
+#[cfg(test)]
+mod generation_regressions {
+    use super::*;
+    #[test]
+    fn upgrade_generation_order_matches_publish() {
+        let newer = TaidaVersion::parse("@aa.1").unwrap();
+        let older = TaidaVersion::parse("@z.99").unwrap();
+        assert!(newer > older);
+        assert_eq!(
+            crate::pkg::publish::latest_taida_tag(&["aa.1".into(), "z.99".into()]).as_deref(),
+            Some("aa.1")
+        );
     }
 }

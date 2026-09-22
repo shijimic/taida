@@ -1117,6 +1117,7 @@ static int taida_ptr_is_readable(taida_val ptr, size_t bytes);
 static int taida_read_cstr_len_safe(const char *s, size_t max_len, size_t *out_len);
 static int taida_is_string_value(taida_val v);
 static int taida_str_byte_len(const char *s, size_t *out_len);
+static taida_val taida_runtime_detect_tag(taida_val value);
 static taida_val taida_value_to_display_string(taida_val val);
 static taida_val taida_value_to_debug_string(taida_val val);
 static taida_val taida_throw_to_display_string(taida_val throw_val);
@@ -1126,6 +1127,7 @@ static int taida_safe_cstr(taida_val ptr, size_t max_len);
 static int taida_value_struct_eq(taida_val a, taida_val b);
 static taida_val taida_error_info_pack_from_error(taida_val error);
 static taida_val taida_make_error_with_kind_code(const char *error_type, const char *error_msg, const char *error_kind, taida_val error_code);
+static void taida_retain_and_tag_field(taida_val pack, taida_val field_idx, taida_val value);
 // E34B-017: `taida_result_map_error` materialises the mapped value's
 // display string via the polymorphic helper before wrapping it in a
 // `ResultError`. The helper is defined far below, so forward declare
@@ -1529,17 +1531,14 @@ taida_val taida_to_radix(taida_val value, taida_val base) {
 // FNV-1a hashes for error field names
 #define HASH_TYPE    0xa79439ef7bfa9c2dULL
 #define HASH_MESSAGE 0x546401b5d2a8d2a4ULL
+// kind/code are part of the canonical caught-error shape
+#define HASH_KIND    0xef9c96d721673243ULL
+#define HASH_CODE    0x0bb51791194b4414ULL
+
+static void taida_register_internal_field_names(void);
 
 static void taida_register_builtin_error_field_names(void) {
-    static int registered = 0;
-    if (registered) return;
-    registered = 1;
-
-    taida_register_field_name((taida_val)HASH_TYPE, (taida_val)"type");
-    taida_register_field_name((taida_val)HASH_MESSAGE, (taida_val)"message");
-    taida_register_field_name(taida_str_hash((taida_val)"field"), (taida_val)"field");
-    taida_register_field_name(taida_str_hash((taida_val)"code"), (taida_val)"code");
-    taida_register_field_name(taida_str_hash((taida_val)"kind"), (taida_val)"kind");
+    taida_register_internal_field_names();
 }
 
 static taida_val taida_make_error(const char *error_type, const char *error_msg) {
@@ -1605,6 +1604,72 @@ static taida_val taida_make_error_with_kind_code(const char *error_type, const c
     taida_pack_set(pack, 4, (taida_val)type_str2);
     taida_pack_set_tag(pack, 4, TAIDA_TAG_STR);
     return pack;
+}
+
+// catch-site canonicalization — a caught error
+// always exposes the full ErrorInfo field set (type/message/kind/code)
+// inside the handler scope. Runtime-raised errors already carry kind/code
+// so handlers can read `err.kind`. A
+// user throw like `Error(type <= "X", message <= "y").throw` builds a
+// bare @(type, message) pack, so `.kind` used to crash only on that path.
+// Mirrors the interpreter's canonicalize_caught_error; the wasm runtime
+// applies the identical normalization in its catch site.
+static taida_val taida_canonicalize_caught_error(taida_val error_val) {
+    if (!taida_is_buchi_pack(error_val)) return error_val;
+    if (taida_pack_has_hash(error_val, (taida_val)HASH_KIND)
+        && taida_pack_has_hash(error_val, (taida_val)HASH_CODE)
+        && taida_pack_has_hash(error_val, (taida_val)0x84d2d84b631f799bULL)) {
+        return error_val; /* already canonical — display / re-throw unchanged */
+    }
+    const char *type_str = "Error";
+    taida_val v = 0;
+    if (taida_pack_has_hash(error_val, (taida_val)HASH_TYPE)) {
+        v = taida_pack_get(error_val, (taida_val)HASH_TYPE);
+    } else if (taida_pack_has_hash(error_val, (taida_val)0x84d2d84b631f799bULL /* HASH___TYPE, defined below */)) {
+        v = taida_pack_get(error_val, (taida_val)0x84d2d84b631f799bULL);
+    }
+    if (v && taida_safe_cstr(v, 1024)) type_str = (const char *)v;
+    /* The thrown pack's OWN fields must survive canonicalization: a user
+       subtype like L2Error(l1, l2) keeps its declared slots in the handler
+       scope. Canonicalization only ADDS the missing ErrorInfo slots — it
+       never rebuilds the pack. Mirrors the interpreter's BuchiPack arm. */
+    taida_val *src = (taida_val *)error_val;
+    taida_val src_fc = src[1];
+    int has_kind_slot = taida_pack_has_hash(error_val, (taida_val)HASH_KIND);
+    int has_code_slot = taida_pack_has_hash(error_val, (taida_val)HASH_CODE);
+    int has_type_slot = taida_pack_has_hash(error_val, (taida_val)0x84d2d84b631f799bULL);
+    taida_val extra = (taida_val)(!has_kind_slot) + (taida_val)(!has_code_slot)
+                    + (taida_val)(!has_type_slot);
+    taida_val out = taida_pack_new(src_fc + extra);
+    for (taida_val i = 0; i < src_fc; i++) {
+        taida_val value = src[2 + i * 3 + 2];
+        taida_pack_set_hash(out, i, src[2 + i * 3]);
+        taida_pack_set_tag(out, i, src[2 + i * 3 + 1]); /* preserve original tag */
+        taida_retain_and_tag_field(out, i, value);      /* NO-4 RULE 1 */
+        taida_pack_set(out, i, value);
+    }
+    taida_val next = src_fc;
+    if (!has_kind_slot) {
+        char *kind_str = taida_str_new_copy(type_str);
+        taida_pack_set_hash(out, next, (taida_val)HASH_KIND);
+        taida_pack_set(out, next, (taida_val)kind_str);
+        taida_pack_set_tag(out, next, TAIDA_TAG_STR);
+        next++;
+    }
+    if (!has_code_slot) {
+        taida_pack_set_hash(out, next, (taida_val)HASH_CODE);
+        taida_pack_set(out, next, 0);
+        taida_pack_set_tag(out, next, TAIDA_TAG_INT);
+        next++;
+    }
+    if (!has_type_slot) {
+        char *type_str2 = taida_str_new_copy(type_str);
+        taida_pack_set_hash(out, next, (taida_val)0x84d2d84b631f799bULL);
+        taida_pack_set(out, next, (taida_val)type_str2);
+        taida_pack_set_tag(out, next, TAIDA_TAG_STR);
+        next++;
+    }
+    return out;
 }
 
 static int taida_os_msg_contains(const char *msg, const char *needle) {
@@ -1811,16 +1876,7 @@ static void taida_retain_and_tag_field(taida_val pack, taida_val field_idx, taid
 // so `taida_pack_to_display_string_full` emits those fields instead of
 // silently skipping them (was rendering `@()` for Gorillax `Str[...]()`).
 static void taida_register_lax_field_names(void) {
-    static int registered = 0;
-    if (registered) return;
-    registered = 1;
-    taida_register_field_name((taida_val)HASH_HAS_VALUE, (taida_val)"has_value");
-    taida_register_field_name((taida_val)HASH___VALUE, (taida_val)"__value");
-    taida_register_field_name((taida_val)HASH___DEFAULT, (taida_val)"__default");
-    taida_register_field_name((taida_val)HASH___ERROR, (taida_val)"__error");
-    taida_register_field_name((taida_val)HASH___TYPE, (taida_val)"__type");
-    // Register has_value as Bool type for correct display (true/false instead of 0/1)
-    taida_register_field_type((taida_val)HASH_HAS_VALUE, (taida_val)"has_value", 4);
+    taida_register_internal_field_names();
 }
 
 taida_val taida_lax_new(taida_val value, taida_val default_value) {
@@ -1961,17 +2017,19 @@ taida_val taida_redact(taida_val carrier) {
 //   field 0: hash = HASH_STREAM_STATUS, val = status tag (1 = Completed)
 //   field 1: hash = HASH_STREAM_COUNT,  val = item count (Int)
 //   plus a third slot carrying __type = "Stream" for display paths.
-#define HASH_STREAM_STATUS 0x6d32b928f2c5d8aeULL /* FNV-1a("__stream_status") */
-#define HASH_STREAM_COUNT  0x1c0dd3a9e6fd1178ULL /* FNV-1a("__stream_count")  */
+// Review-note (2026-08-22): these two constants are NOT FNV-1a digests of
+// the annotated names despite the original comment — they are legacy values
+// kept because every producer and consumer here uses them symmetrically
+// (taida_stream_new stamps the same constants that this registrar maps to
+// names). Do not "correct" them to real FNV-1a values without changing both
+// sides; the wasm runtime has its own independent pair.
+#define HASH_STREAM_STATUS 0x6d32b928f2c5d8aeULL /* legacy, self-consistent pair */
+#define HASH_STREAM_COUNT  0x1c0dd3a9e6fd1178ULL /* legacy, self-consistent pair */
 static const char __stream_type_str[] = "Stream";
 static const char __stream_status_completed[] = "completed";
 
-static int __stream_names_registered = 0;
 static void taida_register_stream_field_names(void) {
-    if (__stream_names_registered) return;
-    __stream_names_registered = 1;
-    taida_register_field_name((taida_val)HASH_STREAM_STATUS, (taida_val)"__stream_status");
-    taida_register_field_name((taida_val)HASH_STREAM_COUNT,  (taida_val)"__stream_count");
+    taida_register_internal_field_names();
 }
 
 taida_val taida_stream_new(taida_val inner_value) {
@@ -2021,20 +2079,42 @@ taida_val taida_stub_new(taida_val message) {
 
 taida_val taida_todo_new(taida_val id, taida_val task, taida_val sol, taida_val unm) {
     taida_val pack = taida_pack_new(7);
+    // stamp per-slot value tags. The
+    // full-form pack renderer renders tag-0 slots through its explicit INT
+    // branch, so untagged Str payloads used to surface as raw heap
+    // addresses (`id <= 4649840`). TODO fields accept any value type, and
+    // the lowering passes them untagged, so the tag comes from the NB-14
+    // runtime detector — the same one the error formatter relies on.
+    // Bool stays Int-tagged (unboxed i64, indistinguishable here); the
+    // legacy ftype-4 registry hint keeps Bool TODO fields rendering as
+    // true/false. Float payloads still have no unboxed runtime signature
+    // and remain on the per-entry value-tag track.
+    taida_val id_tag = taida_runtime_detect_tag(id);
+    taida_val task_tag = taida_runtime_detect_tag(task);
+    taida_val sol_tag = taida_runtime_detect_tag(sol);
+    taida_val unm_tag = taida_runtime_detect_tag(unm);
     taida_pack_set_hash(pack, 0, (taida_val)HASH_TODO_ID);
     taida_pack_set(pack, 0, id);
+    taida_pack_set_tag(pack, 0, id_tag);
     taida_pack_set_hash(pack, 1, (taida_val)HASH_TODO_TASK);
     taida_pack_set(pack, 1, task);
+    taida_pack_set_tag(pack, 1, task_tag);
     taida_pack_set_hash(pack, 2, (taida_val)HASH_TODO_SOL);
     taida_pack_set(pack, 2, sol);
+    taida_pack_set_tag(pack, 2, sol_tag);
     taida_pack_set_hash(pack, 3, (taida_val)HASH_TODO_UNM);
     taida_pack_set(pack, 3, unm);
+    taida_pack_set_tag(pack, 3, unm_tag);
+    // __value / __default mirror the sol / unm channels.
     taida_pack_set_hash(pack, 4, (taida_val)HASH___VALUE);
     taida_pack_set(pack, 4, sol);
+    taida_pack_set_tag(pack, 4, sol_tag);
     taida_pack_set_hash(pack, 5, (taida_val)HASH___DEFAULT);
     taida_pack_set(pack, 5, unm);
+    taida_pack_set_tag(pack, 5, unm_tag);
     taida_pack_set_hash(pack, 6, (taida_val)HASH___TYPE);
     taida_pack_set(pack, 6, (taida_val)__todo_type_str);
+    taida_pack_set_tag(pack, 6, TAIDA_TAG_STR);
     return pack;
 }
 
@@ -2063,8 +2143,8 @@ static int taida_moltenized_type_slot_matches(taida_val type_ptr) {
 }
 
 static int taida_is_molten(taida_val ptr) {
-    if (!TAIDA_IS_PACK(ptr)) return 0;
     if (!taida_ptr_is_readable(ptr, sizeof(taida_val) * 5)) return 0;
+    if (!TAIDA_IS_PACK(ptr)) return 0;
     taida_val *obj = (taida_val*)ptr;
     if (obj[1] != 1) return 0;
     if (obj[2] != (taida_val)HASH___TYPE) return 0;  // hash at stride-3 offset 0
@@ -2074,8 +2154,8 @@ static int taida_is_molten(taida_val ptr) {
 // F56: detect a Moltenized/Secret carrier pack (fc=2, __type = "Moltenized"
 // or "Secret"). Used by unmold and display to fail closed.
 static int taida_is_moltenized(taida_val ptr) {
-    if (!TAIDA_IS_PACK(ptr)) return 0;
     if (!taida_ptr_is_readable(ptr, sizeof(taida_val) * 5)) return 0;
+    if (!TAIDA_IS_PACK(ptr)) return 0;
     taida_val *obj = (taida_val*)ptr;
     if (obj[1] != 2) return 0;
     if (obj[2] != (taida_val)HASH___TYPE) return 0;
@@ -2799,7 +2879,7 @@ taida_val taida_bytes_mold(taida_val value, taida_val fill) {
 
     const char *s = (const char*)value;
     size_t slen = 0;
-    if (taida_is_string_value(value) && taida_read_cstr_len_safe(s, 65536, &slen)) {
+    if (taida_is_string_value(value) && taida_str_byte_len(s, &slen)) {
         taida_val out = taida_bytes_from_raw((const unsigned char*)s, (taida_val)slen);
         return taida_lax_new(out, taida_bytes_default_value());
     }
@@ -2978,7 +3058,7 @@ taida_val taida_bytes_cursor_u8(taida_val cursor_ptr) {
 taida_val taida_utf8_encode_mold(taida_val value) {
     const char *s = (const char*)value;
     size_t len = 0;
-    if (!taida_is_string_value(value) || !taida_read_cstr_len_safe(s, 65536, &len)) {
+    if (!taida_is_string_value(value) || !taida_str_byte_len(s, &len)) {
         return taida_lax_empty(taida_bytes_default_value());
     }
     taida_val out = taida_bytes_from_raw((const unsigned char*)s, (taida_val)len);
@@ -4832,7 +4912,7 @@ taida_val taida_str_split(const char* s, const char* sep) {
     if (!sep || strlen(sep) == 0) {
         // Split into Unicode codepoints (same logic as taida_str_chars)
         size_t slen = 0;
-        if (!taida_read_cstr_len_safe(s, 65536, &slen) || slen == 0) return list;
+        if (!taida_str_byte_len(s, &slen) || slen == 0) return list;
         const unsigned char *buf = (const unsigned char*)s;
         size_t offset = 0;
         while (offset < slen) {
@@ -4884,7 +4964,7 @@ taida_val taida_str_chars(const char* s) {
     if (!s) return list;
 
     size_t len = 0;
-    if (!taida_read_cstr_len_safe(s, 65536, &len) || len == 0) {
+    if (!taida_str_byte_len(s, &len) || len == 0) {
         return list;
     }
 
@@ -5137,20 +5217,28 @@ taida_val taida_str_replace_first(const char* s, const char* from, const char* t
 
 taida_val taida_str_pad(const char* s, taida_val target_len, const char* pad_char, taida_val pad_end) {
     if (!s) { char *r = taida_str_alloc(0); return (taida_val)r; }
-    taida_val slen = (taida_val)strlen(s);
+    // Pad measures characters (code points), not bytes, and
+    // repeats the whole pad string -- so multi-byte text and multi-byte
+    // pad characters match the interpreter's char-based behavior.
+    size_t sbytes = taida_str_byte_len_or_strlen(s);
+    taida_val slen = (taida_val)taida_utf8_count(s, sbytes);
     if (slen >= target_len || target_len > TAIDA_STRING_MOLD_MAX_LEN) {
         return (taida_val)taida_str_new_copy(s);
     }
-    taida_val pad_len = target_len - slen;
-    char pc = ' ';
-    if (pad_char && strlen(pad_char) > 0) pc = pad_char[0];
-    char *r = taida_str_alloc(target_len);
+    const char *pc = (pad_char && pad_char[0] != '\0') ? pad_char : " ";
+    size_t pc_bytes = taida_str_byte_len_or_strlen(pc);
+    taida_val pad_count = target_len - slen;
+    if ((size_t)pad_count > (size_t)TAIDA_STRING_MOLD_MAX_LEN / pc_bytes) {
+        return (taida_val)taida_str_new_copy(s);
+    }
+    size_t pad_bytes = (size_t)pad_count * pc_bytes;
+    char *r = taida_str_alloc(sbytes + pad_bytes);
     if (pad_end) {
-        memcpy(r, s, slen);
-        for (taida_val i = 0; i < pad_len; i++) r[slen + i] = pc;
+        memcpy(r, s, sbytes);
+        for (size_t i = 0; i < (size_t)pad_count; i++) memcpy(r + sbytes + i * pc_bytes, pc, pc_bytes);
     } else {
-        for (taida_val i = 0; i < pad_len; i++) r[i] = pc;
-        memcpy(r + pad_len, s, slen);
+        for (size_t i = 0; i < (size_t)pad_count; i++) memcpy(r + i * pc_bytes, pc, pc_bytes);
+        memcpy(r + pad_bytes, s, sbytes);
     }
     return (taida_val)r;
 }
@@ -5862,9 +5950,15 @@ taida_val taida_str_from_int(taida_val v) {
 }
 
 taida_val taida_str_from_float(double v) {
-    char tmp[64];
-    snprintf(tmp, sizeof(tmp), "%g", v);
-    return (taida_val)taida_str_new_copy(tmp);
+    char *rendered = (char*)taida_float_to_str(v);
+    size_t len = strlen(rendered);
+    if (len >= 2 && rendered[len - 2] == '.' && rendered[len - 1] == '0') {
+        char *result = taida_str_alloc(len - 2);
+        memcpy(result, rendered, len - 2);
+        taida_str_release((taida_val)rendered);
+        return (taida_val)result;
+    }
+    return (taida_val)rendered;
 }
 
 taida_val taida_str_from_bool(taida_val v) {
@@ -7682,13 +7776,7 @@ taida_val taida_list_drop_while(taida_val list_ptr, taida_val fn_ptr) {
 // Idempotent — follows the same pattern as
 // `taida_register_lax_field_names` + C23B-009's entries() registration.
 static void taida_register_zip_enumerate_field_names(void) {
-    static int registered = 0;
-    if (registered) return;
-    registered = 1;
-    taida_register_field_name((taida_val)HASH_FIRST,  (taida_val)"first");
-    taida_register_field_name((taida_val)HASH_SECOND, (taida_val)"second");
-    taida_register_field_name((taida_val)HASH_INDEX,  (taida_val)"index");
-    taida_register_field_name((taida_val)HASH_VALUE,  (taida_val)"value");
+    taida_register_internal_field_names();
 }
 
 taida_val taida_list_zip(taida_val list1, taida_val list2) {
@@ -7807,12 +7895,28 @@ static taida_val taida_is_hashmap(taida_val ptr) {
     return TAIDA_IS_HMAP(ptr);
 }
 
+#if defined(__SANITIZE_ADDRESS__)
+#define TAIDA_ADDRESS_SANITIZER 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define TAIDA_ADDRESS_SANITIZER 1
+#endif
+#endif
+#ifdef TAIDA_ADDRESS_SANITIZER
+extern void *__asan_region_is_poisoned(void *beg, size_t size);
+#endif
+
 static int taida_ptr_is_readable(taida_val ptr, size_t bytes) {
     TAIDA_PERF_INC(taida_perf_ptr_readable_calls);
     if (ptr == 0 || ptr < 4096) return 0;
     // Taida heap objects are always 8-byte aligned.
     if (ptr & 0x7) return 0;
     if (bytes == 0) return 1;
+#ifdef TAIDA_ADDRESS_SANITIZER
+    // Page mapping cannot establish allocation bounds. Honor sanitizer
+    // metadata before the arena/heap fast paths as well as before mincore.
+    if (__asan_region_is_poisoned((void*)(uintptr_t)ptr, bytes)) return 0;
+#endif
 
     // C26B-024 (Round 10 / wepsilon Step 4): arena-backed pointers are
     // known to lie inside a live mmap'd region (the chunk malloc'd by
@@ -7966,7 +8070,7 @@ static int taida_hashmap_key_valid(taida_val key_ptr) {
 taida_val taida_str_hash(taida_val str_ptr) {
     const unsigned char *s = (const unsigned char*)str_ptr;
     size_t len = 0;
-    if (!taida_read_cstr_len_safe((const char*)s, 8192, &len)) return 0;
+    if (!taida_str_byte_len((const char*)s, &len)) return 0;
 
     uint64_t hash = 0xcbf29ce484222325ULL;
     for (size_t i = 0; i < len; i++) {
@@ -7980,7 +8084,7 @@ taida_val taida_value_hash(taida_val val) {
     size_t len = 0;
     taida_val h = val;
     // Check if it's a valid string pointer
-    if (taida_is_string_value(val) && taida_read_cstr_len_safe((const char*)val, 8192, &len)) {
+    if (taida_is_string_value(val) && taida_str_byte_len((const char*)val, &len)) {
         h = taida_str_hash(val);
     }
     // Identity hash for scalars (ints/floats), or FNV-1a for strings.
@@ -7996,8 +8100,8 @@ static int taida_hashmap_key_eq(taida_val key_a, taida_val key_b) {
     const char *sa = (const char*)key_a;
     const char *sb = (const char*)key_b;
     size_t la = 0, lb = 0;
-    if (!taida_read_cstr_len_safe(sa, 8192, &la)) return 0;
-    if (!taida_read_cstr_len_safe(sb, 8192, &lb)) return 0;
+    if (!taida_str_byte_len(sa, &la)) return 0;
+    if (!taida_str_byte_len(sb, &lb)) return 0;
     if (la != lb) return 0;
     return memcmp(sa, sb, la) == 0;
 }
@@ -8471,12 +8575,7 @@ taida_val taida_hashmap_entries(taida_val hm_ptr) {
     // C23B-009: register pair field names once. `taida_register_field_name`
     // is idempotent (skips duplicates). Using static-string literals so the
     // registry can hold the pointer indefinitely without ownership issues.
-    static int __entries_names_registered = 0;
-    if (!__entries_names_registered) {
-        __entries_names_registered = 1;
-        taida_register_field_name((taida_val)HASH_KEY, (taida_val)"key");
-        taida_register_field_name((taida_val)HASH_VAL, (taida_val)"value");
-    }
+    taida_register_internal_field_names();
     taida_val next_ord = hm[TAIDA_HM_ORD_HEADER_SLOT(cap)];
     for (taida_val oi = 0; oi < next_ord; oi++) {
         taida_val slot = hm[TAIDA_HM_ORD_SLOT(cap, oi)];
@@ -9725,7 +9824,10 @@ taida_val taida_typeis_named(taida_val val, taida_val expected_type_str) {
 // If it does not match, calls taida_throw(error_val) which longjmps (never returns).
 taida_val taida_error_type_check_or_rethrow(taida_val error_val, taida_val handler_type_str) {
     if (taida_error_type_matches(error_val, handler_type_str)) {
-        return error_val;
+        // the handler variable always sees the full ErrorInfo
+        // field set (type/message/kind/code), regardless of how the error
+        // was thrown.
+        return taida_canonicalize_caught_error(error_val);
     }
     // Re-throw: this longjmps to the next outer error ceiling
     taida_throw(error_val);
@@ -9756,7 +9858,7 @@ static int taida_can_throw_payload(taida_val val) {
         return 1;
     }
     size_t sl = 0;
-    return taida_is_string_value(val) && taida_read_cstr_len_safe((const char*)val, 65536, &sl);
+    return taida_is_string_value(val) && taida_str_byte_len((const char*)val, &sl);
 }
 
 // ── Result constructors ──
@@ -9765,13 +9867,7 @@ static int taida_can_throw_payload(taida_val val) {
 // jsonEncode (and any other name-lookup based renderer) can see them.
 // Idempotent — C23B-009 pattern.
 static void taida_register_result_field_names(void) {
-    static int registered = 0;
-    if (registered) return;
-    registered = 1;
-    taida_register_field_name((taida_val)HASH_RES___VALUE, (taida_val)"__value");
-    taida_register_field_name((taida_val)HASH_RES___PREDICATE, (taida_val)"__predicate");
-    taida_register_field_name((taida_val)HASH_RES_THROW, (taida_val)"throw");
-    taida_register_field_name((taida_val)HASH___TYPE, (taida_val)"__type");
+    taida_register_internal_field_names();
 }
 
 // Result[value, predicate](throw <= error) — create Result with optional predicate
@@ -9977,7 +10073,7 @@ static taida_val taida_throw_to_display_string(taida_val throw_val) {
     // String error message
     const char *s = (const char*)throw_val;
     size_t sl = 0;
-    if (taida_is_string_value((taida_val)(intptr_t)s) && taida_read_cstr_len_safe(s, 65536, &sl)) {
+    if (taida_is_string_value((taida_val)(intptr_t)s) && taida_str_byte_len(s, &sl)) {
         return (taida_val)taida_str_new_copy(s);
     }
     return taida_value_to_display_string(throw_val);
@@ -10305,11 +10401,103 @@ static taida_val taida_bytes_to_display_string(taida_val bytes_ptr) {
 }
 
 // Convert a BuchiPack to display string: @(field <= value, ...)
+// Register the field names of every
+// runtime-internal pack shape (Todo / BytesCursor / StepIterator /
+// RegexMatch / ABI descriptors / Cage builders) so the pack renderers can
+// resolve them. User packs register their names at compile time; this covers
+// the shapes the C runtime builds itself. Registration is idempotent, so
+// re-registering names that already have a site-local call is safe. The
+// name pointers handed to the registry are static string literals.
+static void _taida_register_internal_field_names_once(void) {
+
+
+    taida_register_field_name((taida_val)HASH_TYPE, (taida_val)"type");
+    taida_register_field_name((taida_val)HASH_MESSAGE, (taida_val)"message");
+    taida_register_field_name(taida_str_hash((taida_val)"field"), (taida_val)"field");
+    taida_register_field_name(taida_str_hash((taida_val)"code"), (taida_val)"code");
+    taida_register_field_name(taida_str_hash((taida_val)"kind"), (taida_val)"kind");
+
+    taida_register_field_name((taida_val)HASH_HAS_VALUE, (taida_val)"has_value");
+    taida_register_field_name((taida_val)HASH___VALUE, (taida_val)"__value");
+    taida_register_field_name((taida_val)HASH___DEFAULT, (taida_val)"__default");
+    taida_register_field_name((taida_val)HASH___ERROR, (taida_val)"__error");
+    taida_register_field_name((taida_val)HASH___TYPE, (taida_val)"__type");
+    // Register has_value as Bool type for correct display (true/false instead of 0/1)
+    taida_register_field_type((taida_val)HASH_HAS_VALUE, (taida_val)"has_value", 4);
+
+    taida_register_field_name((taida_val)HASH_STREAM_STATUS, (taida_val)"__stream_status");
+    taida_register_field_name((taida_val)HASH_STREAM_COUNT,  (taida_val)"__stream_count");
+
+    taida_register_field_name((taida_val)HASH_FIRST,  (taida_val)"first");
+    taida_register_field_name((taida_val)HASH_SECOND, (taida_val)"second");
+    taida_register_field_name((taida_val)HASH_INDEX,  (taida_val)"index");
+    taida_register_field_name((taida_val)HASH_VALUE,  (taida_val)"value");
+
+    taida_register_field_name((taida_val)HASH_RES___VALUE, (taida_val)"__value");
+    taida_register_field_name((taida_val)HASH_RES___PREDICATE, (taida_val)"__predicate");
+    taida_register_field_name((taida_val)HASH_RES_THROW, (taida_val)"throw");
+    taida_register_field_name((taida_val)HASH___TYPE, (taida_val)"__type");
+    taida_register_field_name((taida_val)HASH_KEY, (taida_val)"key");
+    taida_register_field_name((taida_val)HASH_VAL, (taida_val)"value");
+
+    // Todo
+    taida_register_field_name((taida_val)HASH_TODO_ID,   (taida_val)"id");
+    taida_register_field_name((taida_val)HASH_TODO_TASK, (taida_val)"task");
+    taida_register_field_name((taida_val)HASH_TODO_SOL,  (taida_val)"sol");
+    taida_register_field_name((taida_val)HASH_TODO_UNM,  (taida_val)"unm");
+    // BytesCursor / StepIterator
+    taida_register_field_name((taida_val)HASH_CURSOR_BYTES,  (taida_val)"bytes");
+    taida_register_field_name((taida_val)HASH_CURSOR_OFFSET, (taida_val)"offset");
+    taida_register_field_name((taida_val)HASH_CURSOR_LENGTH, (taida_val)"length");
+    taida_register_field_name((taida_val)HASH_STEP_VALUE,    (taida_val)"value");
+    taida_register_field_name((taida_val)HASH_STEP_CURSOR,   (taida_val)"cursor");
+    // RegexMatch
+    taida_register_field_name((taida_val)HASH_PATTERN, (taida_val)"pattern");
+    taida_register_field_name((taida_val)HASH_FLAGS,   (taida_val)"flags");
+    taida_register_field_name((taida_val)HASH_FULL,    (taida_val)"full");
+    taida_register_field_name((taida_val)HASH_GROUPS,  (taida_val)"groups");
+    taida_register_field_name((taida_val)HASH_START,   (taida_val)"start");
+    // Monadic / internal shapes whose registrations are otherwise deferred to
+    // their own constructor's first call — the renderer must not depend on a
+    // constructor having run.
+    taida_register_field_name((taida_val)HASH_HAS_VALUE, (taida_val)"has_value");
+    taida_register_field_name((taida_val)HASH___VALUE,   (taida_val)"__value");
+    taida_register_field_name((taida_val)HASH___DEFAULT, (taida_val)"__default");
+    taida_register_field_name((taida_val)HASH___ERROR,   (taida_val)"__error");
+    taida_register_field_name((taida_val)HASH___TYPE,    (taida_val)"__type");
+    // ABI descriptor / Cage builder packs (runtime-computed hashes)
+    static const char *const abi_fields[] = {
+        "__cage_steps", "__cage_subject", "__unmold",
+        // the canonical caught-error shape adds
+        // kind / code slots at catch time — the renderer must resolve them
+        // without depending on taida_make_error having run.
+        "args", "args_schema", "body", "code", "headers", "kind", "message",
+        "method", "name", "path", "query", "rawQuery", "schema", "status",
+        "steps", "type",
+    };
+    for (size_t i = 0; i < sizeof(abi_fields) / sizeof(abi_fields[0]); i++) {
+        taida_register_field_name(
+            taida_str_hash((taida_val)(intptr_t)abi_fields[i]),
+            (taida_val)(intptr_t)abi_fields[i]);
+    }
+}
+
+// Review-fix (2026-08-22): display can run on async worker threads, so the
+// first-time bulk registration must be thread-safe — a plain check-then-set
+// flag races two first-callers into interleaved registry appends. pthread_once
+// guarantees exactly-once execution AND that concurrent callers block until
+// the registration has finished.
+static void taida_register_internal_field_names(void) {
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, _taida_register_internal_field_names_once);
+}
+
 static taida_val taida_pack_to_display_string(taida_val pack_ptr) {
     // F56: a sealed carrier (Moltenized/Secret) is a 2-field __type/__value
     // pack. Every display path converges here; render only the policy label so
     // the sealed __value can never reach stdout / Str[] / debug / nesting.
     if (taida_is_moltenized(pack_ptr)) return taida_moltenized_display(pack_ptr);
+    taida_register_internal_field_names();
     taida_val *pack = (taida_val*)pack_ptr;
     taida_val fc = pack[1];
     size_t cap = 128;
@@ -10325,8 +10513,6 @@ static taida_val taida_pack_to_display_string(taida_val pack_ptr) {
         taida_val field_val  = pack[2 + i * 3 + 2];
         const char *fname = taida_lookup_field_name(field_hash);
         if (!fname) continue;
-        // Skip internal __ fields for display
-        if (fname[0] == '_' && fname[1] == '_') continue;
         if (count > 0) {
             const char *s = ", "; size_t sl = 2; while (len + sl + 1 > cap) { cap *= 2; TAIDA_REALLOC(buf, cap, "to_string"); } memcpy(buf + len, s, sl); len += sl; buf[len] = '\0';
         }
@@ -10423,6 +10609,7 @@ static taida_val taida_pack_to_display_string_full(taida_val pack_ptr) {
     // F56: sealed carrier — policy label only (the full-form path keeps __
     // fields, so without this guard stdout(secret) would expose __value).
     if (taida_is_moltenized(pack_ptr)) return taida_moltenized_display(pack_ptr);
+    taida_register_internal_field_names();
     taida_val *pack = (taida_val*)pack_ptr;
     taida_val fc = pack[1];
     size_t cap = 128;
@@ -10576,7 +10763,7 @@ static taida_val taida_value_to_display_string(taida_val val) {
     // Check if it's a safely readable string (char*).
     const char *s = (const char*)val;
     size_t sl = 0;
-    if (taida_is_string_value((taida_val)(intptr_t)s) && taida_read_cstr_len_safe(s, 65536, &sl)) {
+    if (taida_is_string_value((taida_val)(intptr_t)s) && taida_str_byte_len(s, &sl)) {
         char *r = taida_str_alloc(sl);
         memcpy(r, s, sl);
         return (taida_val)r;
@@ -10609,7 +10796,7 @@ static taida_val taida_value_to_debug_string(taida_val val) {
     // Check for string (quoted in debug output)
     const char *s = (const char*)val;
     size_t sl = 0;
-    if (taida_is_string_value((taida_val)(intptr_t)s) && taida_read_cstr_len_safe(s, 65536, &sl)) {
+    if (taida_is_string_value((taida_val)(intptr_t)s) && taida_str_byte_len(s, &sl)) {
         char *r = taida_str_alloc(sl + 2);
         r[0] = '"';
         memcpy(r + 1, s, sl);
@@ -10688,7 +10875,7 @@ static taida_val taida_value_to_debug_string_full(taida_val val) {
     // Quoted string for non-pack Str (same as the short helper).
     const char *s = (const char*)val;
     size_t sl = 0;
-    if (taida_is_string_value((taida_val)(intptr_t)s) && taida_read_cstr_len_safe(s, 65536, &sl)) {
+    if (taida_is_string_value((taida_val)(intptr_t)s) && taida_str_byte_len(s, &sl)) {
         char *r = taida_str_alloc(sl + 2);
         r[0] = '"';
         memcpy(r + 1, s, sl);
@@ -10846,7 +11033,7 @@ taida_val taida_typeof(taida_val val, taida_val tag) {
         // Check if it's a string pointer
         const char *s = (const char*)val;
         size_t sl = 0;
-        if (taida_is_string_value((taida_val)(intptr_t)s) && taida_read_cstr_len_safe(s, 65536, &sl)) {
+        if (taida_is_string_value((taida_val)(intptr_t)s) && taida_str_byte_len(s, &sl)) {
             return (taida_val)taida_str_new_copy("Str");
         }
     }
@@ -11615,7 +11802,26 @@ typedef struct json_obj {
 } json_obj;
 
 // Forward declarations
-static json_val json_parse_value(const char **p);
+#define TAIDA_JSON_MAX_DEPTH 128
+
+static int json_nesting_within_limit(const char *s) {
+    int depth = 0, in_string = 0;
+    for (; *s; s++) {
+        if (in_string) {
+            if (*s == '\\' && s[1]) s++;
+            else if (*s == '"') in_string = 0;
+        } else if (*s == '"') {
+            in_string = 1;
+        } else if (*s == '[' || *s == '{') {
+            if (++depth > TAIDA_JSON_MAX_DEPTH) return 0;
+        } else if (*s == ']' || *s == '}') {
+            if (depth > 0) depth--;
+        }
+    }
+    return 1;
+}
+
+static json_val json_parse_value(const char **p, int depth);
 static void json_skip_ws(const char **p);
 static taida_val json_apply_schema(json_val *jval, const char **desc);
 
@@ -11732,7 +11938,7 @@ static json_val json_parse_number(const char **p) {
     return v;
 }
 
-static json_val json_parse_array(const char **p) {
+static json_val json_parse_array(const char **p, int depth) {
     // Zero-init all scalar fields so the return-by-value copy is fully
     // defined even on paths that do not populate int_val / float_val
     // (callers branch on `type` before reading those, but cppcheck
@@ -11751,7 +11957,7 @@ static json_val json_parse_array(const char **p) {
     json_skip_ws(p);
     if (**p == ']') { (*p)++; return v; }
     while (**p) {
-        json_val item = json_parse_value(p);
+        json_val item = json_parse_value(p, depth + 1);
         if (v.arr->count >= v.arr->cap) {
             v.arr->cap *= 2;
             json_val *_tmp = (json_val*)realloc(v.arr->items, v.arr->cap * sizeof(json_val));
@@ -11767,7 +11973,7 @@ static json_val json_parse_array(const char **p) {
     return v;
 }
 
-static json_val json_parse_object(const char **p) {
+static json_val json_parse_object(const char **p, int depth) {
     // Zero-init scalar fields; see json_parse_array for rationale.
     json_val v;
     v.type = JSON_OBJECT;
@@ -11788,7 +11994,7 @@ static json_val json_parse_object(const char **p) {
         json_skip_ws(p);
         if (**p == ':') (*p)++;
         json_skip_ws(p);
-        json_val val = json_parse_value(p);
+        json_val val = json_parse_value(p, depth + 1);
         if (v.obj->count >= v.obj->cap) {
             v.obj->cap *= 2;
             json_obj_entry *_tmp = (json_obj_entry*)realloc(v.obj->entries, v.obj->cap * sizeof(json_obj_entry));
@@ -11806,13 +12012,17 @@ static json_val json_parse_object(const char **p) {
     return v;
 }
 
-static json_val json_parse_value(const char **p) {
+static json_val json_parse_value(const char **p, int depth) {
+    if (depth > TAIDA_JSON_MAX_DEPTH) {
+        fprintf(stderr, "taida: JSON nesting depth limit exceeded\n");
+        exit(1);
+    }
     json_skip_ws(p);
     json_val v;
     v.str_val = NULL; v.str_len = 0; v.arr = NULL; v.obj = NULL;
     if (**p == '"') return json_parse_string(p);
-    if (**p == '{') return json_parse_object(p);
-    if (**p == '[') return json_parse_array(p);
+    if (**p == '{') return json_parse_object(p, depth);
+    if (**p == '[') return json_parse_array(p, depth);
     if (**p == 't' && strncmp(*p, "true", 4) == 0) {
         *p += 4; v.type = JSON_BOOL; v.int_val = 1; return v;
     }
@@ -12421,6 +12631,13 @@ taida_val taida_json_schema_cast(taida_val raw_ptr, taida_val schema_ptr) {
         return json_tag_lax_for_schema(lax, schema);
     }
 
+    if (!json_nesting_within_limit(raw)) {
+        taida_val def = json_default_value_for_desc(schema);
+        taida_val lax = taida_lax_empty_error(def, taida_make_error_with_kind(
+            "JsonError", "JSON parse error: nesting depth limit exceeded", "parse"));
+        return json_tag_lax_for_schema(lax, schema);
+    }
+
     // Parse JSON
     const char *p = raw;
     json_skip_ws(&p);
@@ -12432,7 +12649,7 @@ taida_val taida_json_schema_cast(taida_val raw_ptr, taida_val schema_ptr) {
     }
 
     const char *before_parse = p;
-    json_val jval = json_parse_value(&p);
+    json_val jval = json_parse_value(&p, 0);
 
     // Detect parse error: if parser didn't advance, or the input wasn't
     // valid JSON (non-null value that didn't consume input)
@@ -12594,6 +12811,12 @@ taida_val taida_float_gte(taida_val a, taida_val b) { return _to_double(a) >= _t
 // Global hash -> name table for BuchiPack field name lookup.
 // Populated by taida_register_field_name() calls emitted at compile time.
 
+// Review-note (2026-08-22): when the table is full, further registrations
+// are silently dropped — the affected field then has no resolvable name and
+// the pack renderers skip it entirely (display-only degradation; program
+// behaviour is unaffected). 256 entries comfortably covers the ~35
+// runtime-internal shapes plus a typical program's user-pack fields, so the
+// drop is a documented capacity bound rather than an expected runtime event.
 #define FIELD_REGISTRY_CAP 256
 // type_tag: 0=unknown, 1=Int, 2=Float, 3=Str, 4=Bool, 5=Enum (C18-2)
 // When type_tag == 5, `enum_desc` points to "VariantA,VariantB,..." so the
@@ -12605,8 +12828,9 @@ static struct {
     const char *enum_desc;
 } __field_registry[FIELD_REGISTRY_CAP];
 static int __field_registry_len = 0;
+static pthread_mutex_t taida_field_registry_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-taida_val taida_register_field_name(taida_val hash, taida_val name_ptr) {
+static taida_val taida_register_field_name_unlocked(taida_val hash, taida_val name_ptr) {
     // Check for duplicate
     for (int i = 0; i < __field_registry_len; i++) {
         if (__field_registry[i].hash == hash) return 0;
@@ -12621,8 +12845,15 @@ taida_val taida_register_field_name(taida_val hash, taida_val name_ptr) {
     return 0;
 }
 
+taida_val taida_register_field_name(taida_val hash, taida_val name_ptr) {
+    pthread_mutex_lock(&taida_field_registry_mutex);
+    taida_val result = taida_register_field_name_unlocked(hash, name_ptr);
+    pthread_mutex_unlock(&taida_field_registry_mutex);
+    return result;
+}
+
 // Extended version: register field with type tag
-taida_val taida_register_field_type(taida_val hash, taida_val name_ptr, taida_val type_tag) {
+static taida_val taida_register_field_type_unlocked(taida_val hash, taida_val name_ptr, taida_val type_tag) {
     for (int i = 0; i < __field_registry_len; i++) {
         if (__field_registry[i].hash == hash) {
             __field_registry[i].type_tag = (int)type_tag;
@@ -12639,10 +12870,17 @@ taida_val taida_register_field_type(taida_val hash, taida_val name_ptr, taida_va
     return 0;
 }
 
+taida_val taida_register_field_type(taida_val hash, taida_val name_ptr, taida_val type_tag) {
+    pthread_mutex_lock(&taida_field_registry_mutex);
+    taida_val result = taida_register_field_type_unlocked(hash, name_ptr, type_tag);
+    pthread_mutex_unlock(&taida_field_registry_mutex);
+    return result;
+}
+
 // C18-2: register a field as an Enum-typed field with variant descriptor.
 // `variants_ptr` points to a comma-separated list of variant names
 // (e.g. "Creating,Running,Stopped") emitted by the native lowering.
-taida_val taida_register_field_enum(taida_val hash, taida_val name_ptr, taida_val variants_ptr) {
+static taida_val taida_register_field_enum_unlocked(taida_val hash, taida_val name_ptr, taida_val variants_ptr) {
     for (int i = 0; i < __field_registry_len; i++) {
         if (__field_registry[i].hash == hash) {
             __field_registry[i].type_tag = 5;
@@ -12660,18 +12898,39 @@ taida_val taida_register_field_enum(taida_val hash, taida_val name_ptr, taida_va
     return 0;
 }
 
-static const char* taida_lookup_field_name(taida_val hash) {
+taida_val taida_register_field_enum(taida_val hash, taida_val name_ptr, taida_val variants_ptr) {
+    pthread_mutex_lock(&taida_field_registry_mutex);
+    taida_val result = taida_register_field_enum_unlocked(hash, name_ptr, variants_ptr);
+    pthread_mutex_unlock(&taida_field_registry_mutex);
+    return result;
+}
+
+static const char* taida_lookup_field_name_unlocked(taida_val hash) {
     for (int i = 0; i < __field_registry_len; i++) {
         if (__field_registry[i].hash == hash) return __field_registry[i].name;
     }
     return NULL;
 }
 
-static const char* taida_lookup_field_enum_desc(taida_val hash) {
+static const char* taida_lookup_field_name(taida_val hash) {
+    pthread_mutex_lock(&taida_field_registry_mutex);
+    const char* result = taida_lookup_field_name_unlocked(hash);
+    pthread_mutex_unlock(&taida_field_registry_mutex);
+    return result;
+}
+
+static const char* taida_lookup_field_enum_desc_unlocked(taida_val hash) {
     for (int i = 0; i < __field_registry_len; i++) {
         if (__field_registry[i].hash == hash) return __field_registry[i].enum_desc;
     }
     return NULL;
+}
+
+static const char* taida_lookup_field_enum_desc(taida_val hash) {
+    pthread_mutex_lock(&taida_field_registry_mutex);
+    const char* result = taida_lookup_field_enum_desc_unlocked(hash);
+    pthread_mutex_unlock(&taida_field_registry_mutex);
+    return result;
 }
 
 // C18B-003 fix: per-pack-instance enum descriptor registry.
@@ -12699,7 +12958,7 @@ static struct {
 } __pack_field_enum_registry[PACK_FIELD_ENUM_CAP];
 static int __pack_field_enum_registry_len = 0;
 
-taida_val taida_register_pack_field_enum(taida_val pack_ptr, taida_val field_hash, taida_val variants_ptr) {
+static taida_val taida_register_pack_field_enum_unlocked(taida_val pack_ptr, taida_val field_hash, taida_val variants_ptr) {
     if (pack_ptr == 0) return 0;
     // Update existing entry if present (most recent write wins for a
     // given (pack, field) pair — mirrors the single-writer contract of
@@ -12720,7 +12979,14 @@ taida_val taida_register_pack_field_enum(taida_val pack_ptr, taida_val field_has
     return 0;
 }
 
-static const char* taida_lookup_pack_field_enum_desc(taida_val pack_ptr, taida_val field_hash) {
+taida_val taida_register_pack_field_enum(taida_val pack_ptr, taida_val field_hash, taida_val variants_ptr) {
+    pthread_mutex_lock(&taida_field_registry_mutex);
+    taida_val result = taida_register_pack_field_enum_unlocked(pack_ptr, field_hash, variants_ptr);
+    pthread_mutex_unlock(&taida_field_registry_mutex);
+    return result;
+}
+
+static const char* taida_lookup_pack_field_enum_desc_unlocked(taida_val pack_ptr, taida_val field_hash) {
     if (pack_ptr == 0) return NULL;
     // Linear scan — tables are small (per-program, per-pack-instance).
     // Reverse order so the most recent registration wins if the same
@@ -12737,11 +13003,25 @@ static const char* taida_lookup_pack_field_enum_desc(taida_val pack_ptr, taida_v
     return NULL;
 }
 
-static int taida_lookup_field_type(taida_val hash) {
+static const char* taida_lookup_pack_field_enum_desc(taida_val pack_ptr, taida_val field_hash) {
+    pthread_mutex_lock(&taida_field_registry_mutex);
+    const char* result = taida_lookup_pack_field_enum_desc_unlocked(pack_ptr, field_hash);
+    pthread_mutex_unlock(&taida_field_registry_mutex);
+    return result;
+}
+
+static int taida_lookup_field_type_unlocked(taida_val hash) {
     for (int i = 0; i < __field_registry_len; i++) {
         if (__field_registry[i].hash == hash) return __field_registry[i].type_tag;
     }
     return 0; // unknown
+}
+
+static int taida_lookup_field_type(taida_val hash) {
+    pthread_mutex_lock(&taida_field_registry_mutex);
+    int result = taida_lookup_field_type_unlocked(hash);
+    pthread_mutex_unlock(&taida_field_registry_mutex);
+    return result;
 }
 
 // ── jsonEncode / jsonPretty (native) ──────────────────────
@@ -13021,7 +13301,27 @@ static void json_serialize_pack_fields(char **buf, size_t *cap, size_t *len, tai
     json_append_char(buf, cap, len, '}');
 }
 
+// Map a container element kind to the json
+// serializer's scalar type hint so Float/Bool elements inside nested
+// Lists/Sets serialize with their recorded tag instead of falling into
+// the pointer heuristics (raw f64 bits / 0-1 ints on the wire).
+// Structural or unknown kinds map to 0 (the heuristic walk), matching
+// the wasm runtime's `_wc_elem_hint_from_ekind`.
+static int taida_elem_kind_to_json_hint(uint32_t ek) {
+    switch (TAIDA_EKIND_KIND(ek)) {
+        case TAIDA_TAG_INT:   return 1;
+        case TAIDA_TAG_FLOAT: return 2;
+        case TAIDA_TAG_STR:   return 3;
+        case TAIDA_TAG_BOOL:  return 4;
+        default:              return 0;
+    }
+}
+
 static void json_serialize_typed(char **buf, size_t *cap, size_t *len, taida_val val, int indent, int depth, int type_hint) {
+    if (depth > TAIDA_JSON_MAX_DEPTH) {
+        fprintf(stderr, "taida: JSON nesting depth limit exceeded\n");
+        exit(1);
+    }
     // Bool type hint: serialize 0/1 as false/true
     if (type_hint == 4) {
         json_append(buf, cap, len, val ? "true" : "false");
@@ -13095,6 +13395,24 @@ static void json_serialize_typed(char **buf, size_t *cap, size_t *len, taida_val
     if (taida_is_hashmap(val)) {
         taida_val *hm = (taida_val*)val;
         taida_val hm_cap = hm[1];
+        // a homogeneous value tag is the
+        // only reliable kind signal the map carries — wire it into each
+        // value slot so direct Float/Bool values stop serializing as raw
+        // bits (`{"a":4609434218613702656}` / `{"b":1}`) and match the
+        // interpreter's typed output. UNKNOWN/HETEROGENEOUS maps keep the
+        // heuristic walk (hint 0); per-entry kinds for heterogeneous maps
+        // are on the value-tag track.
+        int value_hint = 0;
+        taida_val vtag = taida_elem_tag_kind(hm);
+        if (vtag >= 0) {
+            switch (vtag) {
+                case TAIDA_TAG_INT:   value_hint = 1; break;
+                case TAIDA_TAG_FLOAT: value_hint = 2; break;
+                case TAIDA_TAG_STR:   value_hint = 3; break;
+                case TAIDA_TAG_BOOL:  value_hint = 4; break;
+                default:              value_hint = 0; break;
+            }
+        }
         json_append_char(buf, cap, len, '{');
         taida_val count = 0;
         // C23B-008 (2026-04-22): walk the insertion-order side-index so
@@ -13106,14 +13424,19 @@ static void json_serialize_typed(char **buf, size_t *cap, size_t *len, taida_val
             taida_val slot_hash = hm[HM_HEADER + slot * 3];
             taida_val slot_key = hm[HM_HEADER + slot * 3 + 1];
             if (HM_SLOT_OCCUPIED(slot_hash, slot_key)) {
+                // only Str keys have a
+                // JSON object-key form. The interpreter skips non-Str keys
+                // silently; this path used to cast the key slot to
+                // `const char*` unconditionally and segfault on Int keys
+                // (a checker-legal program: `hashMap.set(7, "x")`).
+                // Skip matches the reference implementation.
+                if (!taida_is_string_value(slot_key)) continue;
                 if (count > 0) json_append_char(buf, cap, len, ',');
                 if (indent > 0) json_append_indent(buf, cap, len, indent, depth + 1);
-                const char *key_str = (const char*)slot_key;
-                if (!key_str) key_str = "";
-                json_append_escaped_str(buf, cap, len, key_str);
+                json_append_escaped_str(buf, cap, len, (const char*)slot_key);
                 json_append_char(buf, cap, len, ':');
                 if (indent > 0) json_append_char(buf, cap, len, ' ');
-                json_serialize_typed(buf, cap, len, hm[HM_HEADER + slot * 3 + 2], indent, depth + 1, 0);
+                json_serialize_typed(buf, cap, len, hm[HM_HEADER + slot * 3 + 2], indent, depth + 1, value_hint);
                 count++;
             }
         }
@@ -13130,7 +13453,8 @@ static void json_serialize_typed(char **buf, size_t *cap, size_t *len, taida_val
         for (taida_val i = 0; i < list_len; i++) {
             if (i > 0) json_append_char(buf, cap, len, ',');
             if (indent > 0) json_append_indent(buf, cap, len, indent, depth + 1);
-            json_serialize_typed(buf, cap, len, list[4 + i], indent, depth + 1, 0);
+            json_serialize_typed(buf, cap, len, list[4 + i], indent, depth + 1,
+                                 taida_elem_kind_to_json_hint(taida_elem_kind_at(list, i)));
         }
         if (indent > 0 && list_len > 0) json_append_indent(buf, cap, len, indent, depth);
         json_append_char(buf, cap, len, ']');
@@ -13155,7 +13479,8 @@ static void json_serialize_typed(char **buf, size_t *cap, size_t *len, taida_val
         for (taida_val i = 0; i < list_len; i++) {
             if (i > 0) json_append_char(buf, cap, len, ',');
             if (indent > 0) json_append_indent(buf, cap, len, indent, depth + 1);
-            json_serialize_typed(buf, cap, len, list[4 + i], indent, depth + 1, 0);
+            json_serialize_typed(buf, cap, len, list[4 + i], indent, depth + 1,
+                                 taida_elem_kind_to_json_hint(taida_elem_kind_at(list, i)));
         }
         if (indent > 0 && list_len > 0) json_append_indent(buf, cap, len, indent, depth);
         json_append_char(buf, cap, len, ']');
@@ -13172,7 +13497,7 @@ static void json_serialize_typed(char **buf, size_t *cap, size_t *len, taida_val
 
     // Default: only serialize as string when safely readable.
     size_t str_len = 0;
-    if (taida_is_string_value(val) && taida_read_cstr_len_safe((const char*)val, 65536, &str_len)) {
+    if (taida_is_string_value(val) && taida_str_byte_len((const char*)val, &str_len)) {
         json_append_escaped_str(buf, cap, len, (const char*)val);
     } else {
         // Not a safe C-string pointer — treat as integer

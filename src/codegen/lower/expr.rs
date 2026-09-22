@@ -56,6 +56,25 @@ impl Lowering {
                     func.push(IrInst::FuncAddr(var, mangled));
                     return Ok(var);
                 }
+                if !func.params.contains(name)
+                    && !Self::collect_defvar_names(&func.body).contains(name)
+                    && let Some(runtime) = self.stdlib_runtime_funcs.get(name).cloned()
+                    && let Some(arity) = crate::codegen::emit::runtime_callable_arity(&runtime)
+                {
+                    // A known builtin used as a value needs a callable address.
+                    // The wrapper applies runtime ABI conversions just like a
+                    // direct call, including boxed Float arguments and results.
+                    let symbol = self.next_lambda_symbol("builtin");
+                    let params = (0..arity).map(|i| format!("__arg_{i}")).collect();
+                    let mut wrapper = IrFunction::new_with_params(symbol.clone(), params);
+                    let result = wrapper.alloc_var();
+                    wrapper.push(IrInst::Call(result, runtime, (0..arity as u32).collect()));
+                    wrapper.push(IrInst::Return(result));
+                    self.lambda_funcs.push(wrapper);
+                    let value = func.alloc_var();
+                    func.push(IrInst::FuncAddr(value, symbol));
+                    return Ok(value);
+                }
                 let var = func.alloc_var();
                 func.push(IrInst::UseVar(var, name.clone()));
                 Ok(var)
@@ -284,23 +303,16 @@ impl Lowering {
                 ),
             });
         }
-        if hidden_schema_count > 0 {
+        if hidden_schema_count > 0 || explicit_arg_vars.len() == params.len() {
             // Hidden args are pre-resolved; defaults never apply to them.
             return Ok(explicit_arg_vars);
         }
 
-        // Materialize defaults in parameter order while exposing earlier params
-        // by their declared names for default-expression references.
-        let mut snapshots = Vec::<(String, IrVar)>::new();
-        let mut seen = std::collections::HashSet::<String>::new();
-        for param in &params {
-            if seen.insert(param.name.clone()) {
-                let prev = func.alloc_var();
-                func.push(IrInst::UseVar(prev, param.name.clone()));
-                snapshots.push((param.name.clone(), prev));
-            }
-        }
-
+        // Defaults can refer to earlier parameters. Give these temporary
+        // bindings their own names so absent caller variables are never read
+        // and existing caller bindings remain intact.
+        let body_start = func.body.len();
+        let scope_id = func.alloc_var();
         let mut effective_args = Vec::with_capacity(params.len());
         for (i, param) in params.iter().enumerate() {
             let val = if let Some(v) = explicit_arg_vars.get(i) {
@@ -319,9 +331,40 @@ impl Lowering {
             effective_args.push(val);
         }
 
-        for (name, prev) in snapshots {
-            func.push(IrInst::DefVar(name, prev));
+        let names: std::collections::HashMap<_, _> = params
+            .iter()
+            .map(|param| {
+                (
+                    param.name.clone(),
+                    format!("__taida_default_{scope_id}_{}", param.name),
+                )
+            })
+            .collect();
+        fn scope_bindings(insts: &mut [IrInst], names: &std::collections::HashMap<String, String>) {
+            for inst in insts {
+                match inst {
+                    IrInst::UseVar(_, name) | IrInst::DefVar(name, _) => {
+                        if let Some(scoped) = names.get(name) {
+                            *name = scoped.clone();
+                        }
+                    }
+                    IrInst::MakeClosure(_, _, captures) => {
+                        for name in captures {
+                            if let Some(scoped) = names.get(name) {
+                                *name = scoped.clone();
+                            }
+                        }
+                    }
+                    IrInst::CondBranch(_, arms) => {
+                        for arm in arms {
+                            scope_bindings(&mut arm.body, names);
+                        }
+                    }
+                    _ => {}
+                }
+            }
         }
+        scope_bindings(&mut func.body[body_start..], &names);
 
         Ok(effective_args)
     }
@@ -2355,6 +2398,7 @@ impl Lowering {
         let prev_lambda_param_counts = self.lambda_param_counts.clone();
         let prev_lambda_vars = self.lambda_vars.clone();
         let prev_closure_vars = self.closure_vars.clone();
+        let prev_heap_vars = std::mem::take(&mut self.current_heap_vars);
         let prev_int_vars = self.int_vars.clone();
         // Value-tag track: shadow kinds are IR variables of the ENCLOSING
         // body — a lambda body must not UseVar a parent's shadow (and its
@@ -2558,6 +2602,7 @@ impl Lowering {
             self.bool_vars = prev_bool_vars;
             self.pack_vars = prev_pack_vars;
             self.list_vars = prev_list_vars;
+            self.current_heap_vars = prev_heap_vars;
 
             Ok(dst)
         }
@@ -2686,11 +2731,15 @@ impl Lowering {
                         let expr_var = self.lower_expr(func, parsed_expr)?;
                         self.convert_to_string(func, parsed_expr, expr_var)?
                     } else {
-                        // Case 2: parsed as a non-expression statement; the
-                        // interpreter emits nothing, so produce the empty string.
-                        let lit = func.alloc_var();
-                        func.push(IrInst::ConstStr(lit, String::new()));
-                        lit
+                        // Case 2 is a non-expression statement — the
+                        // interpreter rejects it with [E1702] instead of
+                        // silently dropping the body, so the lowering must
+                        // reject it too rather than emit the empty string.
+                        return Err(LowerError {
+                            message: format!(
+                                "[E1702] Template interpolation `${{{expr_str}}}` must be an expression, not a statement."
+                            ),
+                        });
                     }
                 } else {
                     // Case 3: did not parse as a program (parser-rejected body)

@@ -48,7 +48,8 @@ impl Lexer {
     pub fn new(source: &str) -> Self {
         Self {
             source: source.chars().collect(),
-            pos: 0,
+            // Ignore a leading BOM without shifting source spans.
+            pos: usize::from(source.starts_with('\u{feff}')),
             line: 1,
             column: 1,
             at_line_start: true,
@@ -483,7 +484,18 @@ impl Lexer {
         let normalized = text.replace('_', "");
         if is_float || had_exponent {
             match normalized.parse::<f64>() {
-                Ok(val) => self.emit(TokenKind::FloatLiteral(val), start, start_line, start_col),
+                // `parse::<f64>` returns `Ok(inf)` on overflow, so
+                // `1e999` used to be silently accepted as an infinite value.
+                // Reject it the way integer overflow is rejected.
+                Ok(val) if val.is_finite() => {
+                    self.emit(TokenKind::FloatLiteral(val), start, start_line, start_col)
+                }
+                Ok(_) => self.error(
+                    &format!("Float literal overflows to infinity: {}", text),
+                    start,
+                    start_line,
+                    start_col,
+                ),
                 Err(_) => self.error(
                     &format!("Invalid float literal: {}", text),
                     start,
@@ -590,7 +602,13 @@ impl Lexer {
                 if let Some(decoded) =
                     self.scan_escape_sequence('`', true, true, start, start_line, start_col)
                 {
-                    value.push_str(&decoded);
+                    if decoded == "$" {
+                        // Preserve a literal dollar through interpolation splitting
+                        // without reserving a character from the user's text.
+                        value.push_str("${\"$\"}");
+                    } else {
+                        value.push_str(&decoded);
+                    }
                 } else {
                     return;
                 }
@@ -873,6 +891,13 @@ impl Lexer {
         }
     }
 
+    /// Remove the line ending from comment content in CRLF sources.
+    fn trim_trailing_carriage_return(content: &mut String) {
+        if content.ends_with('\r') {
+            content.pop();
+        }
+    }
+
     // ── Identifiers & Keywords ───────────────────────────────
 
     fn scan_identifier(&mut self, start: usize, start_line: usize, start_col: usize) {
@@ -906,6 +931,7 @@ impl Lexer {
             while !self.is_at_end() && self.peek() != '\n' {
                 content.push(self.advance());
             }
+            Self::trim_trailing_carriage_return(&mut content);
             self.emit(TokenKind::DocComment(content), start, start_line, start_col);
         } else {
             let mut content = String::new();
@@ -916,6 +942,7 @@ impl Lexer {
             while !self.is_at_end() && self.peek() != '\n' {
                 content.push(self.advance());
             }
+            Self::trim_trailing_carriage_return(&mut content);
             self.emit(
                 TokenKind::LineComment(content),
                 start,

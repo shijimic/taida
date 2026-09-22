@@ -2267,6 +2267,46 @@ static int64_t _wasm_list_to_string(int64_t list_ptr) {
 }
 
 /* W-4f2: Pack toString: @(field <= value, ...) */
+/* Register the field names of every
+   runtime-internal pack shape so the pack renderers can resolve them.
+   User packs register at compile time; this covers the shapes the wasm
+   runtime builds itself (ABI descriptors / Cage builders). Registration
+   is idempotent. The registry stores plain NUL-terminated literals (the
+   renderers append them as C strings); the hash input uses the same
+   FNV-1a over C strings as `abi_hash_cstr`. */
+int64_t taida_register_field_name(int64_t hash, int64_t name_ptr);
+int64_t taida_str_hash(int64_t str_ptr);
+static void _wasm_register_internal_field_names(void) {
+    static int registered = 0;
+    if (registered) return;
+    registered = 1;
+    /* Todo — without these, the TODO
+       pack renderer resolved no field names and printed only `@(__type <= …)`
+       while native/interp showed all seven fields. */
+    taida_register_field_name(WASM_HASH_TODO_ID,   WSTR("id"));
+    taida_register_field_name(WASM_HASH_TODO_TASK, WSTR("task"));
+    taida_register_field_name(WASM_HASH_TODO_SOL,  WSTR("sol"));
+    taida_register_field_name(WASM_HASH_TODO_UNM,  WSTR("unm"));
+    static const char *const abi_fields[] = {
+        /* Monadic / internal shapes : without these the
+           TODO renderer resolved no name for its __value / __default slots
+           and wasm printed two fields fewer than interp/native. */
+        "__default", "__error", "__type", "__unmold", "__value", "has_value",
+        "__cage_steps", "__cage_subject",
+        /* the canonical caught-error shape adds
+           kind / code slots at catch time — the renderer must resolve them
+           without depending on taida_make_error having run. */
+        "args", "args_schema", "body", "code", "headers", "kind", "message",
+        "method", "name", "path", "query", "rawQuery", "schema", "status",
+        "steps", "type", "value",
+    };
+    for (int i = 0; i < (int)(sizeof(abi_fields) / sizeof(abi_fields[0])); i++) {
+        taida_register_field_name(
+            taida_str_hash((int64_t)(intptr_t)abi_fields[i]),
+            (int64_t)(intptr_t)abi_fields[i]);
+    }
+}
+
 static int64_t _wasm_pack_to_string(int64_t pack_ptr) {
     /* F56: a sealed carrier (Moltenized/Secret) renders only its policy label;
        every pack display path converges here so the sealed __value can never
@@ -2276,6 +2316,7 @@ static int64_t _wasm_pack_to_string(int64_t pack_ptr) {
         if (ck == 1) return WSTR("<Moltenized>");
         if (ck == 2) return WSTR("<Secret>");
     }
+    _wasm_register_internal_field_names();
     int64_t *pack = (int64_t *)(intptr_t)pack_ptr;
     int64_t fc = pack[0];
     _wasm_strbuf sb;
@@ -2288,8 +2329,6 @@ static int64_t _wasm_pack_to_string(int64_t pack_ptr) {
         int64_t field_val  = pack[1 + i * 3 + 2];
         const char *fname = _wasm_lookup_field_name(field_hash);
         if (!fname) continue;
-        /* Skip internal __ fields for display (same as native) */
-        if (fname[0] == '_' && fname[1] == '_') continue;
         if (count > 0) _sb_append(&sb, ", ");
         _sb_append(&sb, fname);
         _sb_append(&sb, " <= ");
@@ -2365,6 +2404,7 @@ static int64_t _wasm_pack_to_string_full(int64_t pack_ptr) {
         if (ck == 1) return WSTR("<Moltenized>");
         if (ck == 2) return WSTR("<Secret>");
     }
+    _wasm_register_internal_field_names();
     int64_t *pack = (int64_t *)(intptr_t)pack_ptr;
     int64_t fc = pack[0];
     _wasm_strbuf sb;
@@ -2377,6 +2417,17 @@ static int64_t _wasm_pack_to_string_full(int64_t pack_ptr) {
         int64_t field_val  = pack[1 + i * 3 + 2];
         const char *fname = _wasm_lookup_field_name(field_hash);
         if (!fname) continue;
+        /* Lax hides its error slot from display — the error stays
+           reachable through `.errorInfo()`. Native twin: the
+           `fc >= 5 && slot-2 == __default` guard in
+           taida_pack_to_display_string_full. This guard predates the
+           monadic names joining the bulk registrar (which is what made
+           the missing skip observable on wasm-full). */
+        if (fc >= 5
+            && pack[1 + 2 * 3] == WASM_HASH___DEFAULT
+            && field_hash == WASM_HASH___ERROR) {
+            continue;
+        }
         /* Unlike `_wasm_pack_to_string`, we do NOT skip __ fields here. */
         if (count > 0) _sb_append(&sb, ", ");
         _sb_append(&sb, fname);

@@ -165,7 +165,7 @@ __attribute__((import_module("wasi_snapshot_preview1"), import_name("sock_shutdo
 extern int32_t __wasi_sock_shutdown(wasi_fd fd, int32_t how);
 
 #define WASI_ERRNO_BADF 8
-#define WASI_ERRNO_NOTSOCK 54
+#define WASI_ERRNO_NOTSOCK 57
 
 /* fd_seek: (fd, offset, whence, newoffset_ptr) -> errno */
 __attribute__((import_module("wasi_snapshot_preview1"), import_name("fd_seek")))
@@ -522,11 +522,11 @@ static const char *wasi_error_kind(int32_t wasi_errno, const char *msg) {
         case 44: /* ENOENT */   return "not_found";
         case 28: /* EINVAL */   return "invalid";
         case 73: /* ETIMEDOUT */return "timeout";
-        case 61: /* ECONNREFUSED */  return "refused";
-        case 54: /* ECONNRESET */    return "reset";
-        case 53: /* ECONNABORTED */
+        case 14: /* ECONNREFUSED */  return "refused";
+        case 15: /* ECONNRESET */    return "reset";
+        case 13: /* ECONNABORTED */
         case 64: /* EPIPE */
-        case 57: /* ENOTCONN */      return "peer_closed";
+        case 53: /* ENOTCONN */      return "peer_closed";
         default: break;
     }
     /* Fallback: check message content like native */

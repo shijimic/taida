@@ -38,7 +38,7 @@ struct GitHubUser {
 /// GitHub デバイス認可フローを開始する。
 /// 表示用のユーザーコードを含むデバイスコード情報を返す。
 pub fn start_device_flow() -> Result<DeviceFlowResponse, String> {
-    let client = reqwest::blocking::Client::new();
+    let client = crate::util::http_client()?;
 
     let mut params = HashMap::new();
     params.insert("client_id", GITHUB_CLIENT_ID);
@@ -68,7 +68,7 @@ pub fn start_device_flow() -> Result<DeviceFlowResponse, String> {
 /// ユーザーがコードを入力した後、GitHub にアクセストークンをポーリングする。
 /// 成功・期限切れ・エラーのいずれかまでブロックする。
 pub fn poll_for_token(device_code: &str, interval: u64, expires_in: u64) -> Result<String, String> {
-    let client = reqwest::blocking::Client::new();
+    let client = crate::util::http_client()?;
     let mut poll_interval = interval.clamp(1, 60);
     let deadline = Instant::now() + Duration::from_secs(expires_in.max(1));
 
@@ -131,7 +131,7 @@ pub fn poll_for_token(device_code: &str, interval: u64, expires_in: u64) -> Resu
 
 /// 指定されたアクセストークンに対応する GitHub ユーザー名を取得する。
 pub fn get_github_username(token: &str) -> Result<String, String> {
-    let client = reqwest::blocking::Client::new();
+    let client = crate::util::http_client()?;
 
     let resp = client
         .get("https://api.github.com/user")

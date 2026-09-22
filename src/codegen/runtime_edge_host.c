@@ -71,13 +71,13 @@ int64_t taida_os_env_var(int64_t name_ptr) {
 
     int32_t key_len = edge_strlen(key);
     int32_t buf_cap = 256;
-    char *buf = (char *)_wasm_str_alloc(buf_cap);
+    char *buf = (char *)_wasm_str_alloc(buf_cap + 1);
     int32_t actual = taida_host_env_get(
         (int32_t)(intptr_t)key, key_len,
         (int32_t)(intptr_t)buf, buf_cap
     );
 
-    if (actual == 0) {
+    if (actual < 0) {
         return taida_lax_empty(WSTR(""));
     }
 
@@ -90,6 +90,9 @@ int64_t taida_os_env_var(int64_t name_ptr) {
         );
     }
 
+    // The host may report a different size during the retry. Never index
+    // outside the supplied buffer, including on a missing-value sentinel.
+    if (actual < 0 || actual > buf_cap) return taida_lax_empty(WSTR(""));
     buf[actual] = '\0';
     return taida_lax_new((int64_t)(intptr_t)buf, WSTR(""));
 }
@@ -99,12 +102,12 @@ int64_t taida_os_all_env(void) {
     taida_hashmap_set_value_tag(hm, TAG_STR);
 
     int32_t buf_cap = 4096;
-    char *buf = (char *)_wasm_str_alloc(buf_cap);
+    char *buf = (char *)_wasm_str_alloc(buf_cap + 1);
     int32_t actual = taida_host_env_get_all(
         (int32_t)(intptr_t)buf, buf_cap
     );
 
-    if (actual == 0) {
+    if (actual <= 0) {
         return hm;
     }
 
@@ -116,6 +119,7 @@ int64_t taida_os_all_env(void) {
         );
     }
 
+    if (actual < 0 || actual > buf_cap) return hm;
     int32_t pos = 0;
     while (pos < actual) {
         int32_t entry_start = pos;

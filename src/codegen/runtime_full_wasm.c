@@ -470,7 +470,8 @@ int64_t taida_global_set(int64_t key, int64_t val) {
             return 0;
         }
     }
-    return 0;
+    // A missing write must never be observed as a successful zero value.
+    __builtin_trap();
 }
 
 int64_t taida_global_get(int64_t key) {

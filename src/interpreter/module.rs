@@ -362,6 +362,10 @@ impl Interpreter {
             let prev_type_defs = self.type_defs.clone();
             let prev_mold_defs = self.mold_defs.clone();
             let prev_type_methods = self.type_methods.clone();
+            // enum_defs も同様に退避しないと、モジュール内で定義された
+            // Enum（エクスポート対象外の私的 Enum 含む）がインポート側レジストリに
+            // 残存し、同名 Enum を上書きして ordinal を無音に入れ替える。
+            let prev_enum_defs = self.enum_defs.clone();
 
             // Set up for module execution
             self.current_file = Some(module_path.clone());
@@ -415,10 +419,10 @@ impl Interpreter {
                         }
                     }
                 } else if in_bundled("abi") {
-                    self.env
-                        .define_force("WebRequest", Value::str("WebRequest".to_string()));
-                    self.env
-                        .define_force("WebResponse", Value::str("WebResponse".to_string()));
+                    // WebRequest/WebResponse are defined by the
+                    // package body itself, so pre-injecting their names would
+                    // turn the body's definition into a redefinition error.
+                    // Only inject what the body does NOT define.
                     for sym in ["HostCall", "HostStep", "HostCapability"] {
                         self.env.define_force(sym, Value::str(sym.to_string()));
                     }
@@ -479,6 +483,9 @@ impl Interpreter {
             self.type_defs = prev_type_defs;
             self.mold_defs = prev_mold_defs;
             self.type_methods = prev_type_methods;
+            // restore the importer's enum registry (the module's own
+            // definitions live on in `module_enum_defs` below).
+            self.enum_defs = prev_enum_defs;
 
             // Check for module execution errors
             if let Err(e) = result {
@@ -609,12 +616,15 @@ impl Interpreter {
                 .into_iter()
                 .filter(|(k, _)| module_exports.contains_key(k))
                 .collect();
-            let exported_enum_defs: std::collections::HashMap<String, Vec<String>> = self
-                .enum_defs
-                .iter()
-                .filter(|(k, _)| module_exports.contains_key(*k))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
+            // filter the SNAPSHOT taken right after the module ran,
+            // not the (now-restored) importer registry — the importer's own
+            // enums must not leak into the module's export table.
+            let exported_enum_defs: std::collections::HashMap<String, Vec<String>> =
+                module_enum_defs
+                    .iter()
+                    .filter(|(k, _)| module_exports.contains_key(*k))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
             let exported_type_methods: std::collections::HashMap<
                 String,
                 std::collections::HashMap<String, crate::parser::FuncDef>,
@@ -1049,6 +1059,8 @@ impl Interpreter {
         let prev_type_defs = self.type_defs.clone();
         let prev_mold_defs = self.mold_defs.clone();
         let prev_type_methods = self.type_methods.clone();
+        // same enum-registry isolation as the plain import path.
+        let prev_enum_defs = self.enum_defs.clone();
         // E30B-007 / Lock-G: stash the previous facade context (if any) so
         // nested facade loads (currently disallowed but defensively handled)
         // restore correctly. The new context exposes the package id + arity
@@ -1087,6 +1099,8 @@ impl Interpreter {
         let module_type_defs = self.type_defs.clone();
         let module_mold_defs = self.mold_defs.clone();
         let module_type_methods = self.type_methods.clone();
+        // snapshot the facade's enums before restoring the caller's.
+        let module_enum_defs = self.enum_defs.clone();
 
         self.env = prev_env;
         self.current_file = prev_file;
@@ -1095,6 +1109,8 @@ impl Interpreter {
         self.type_defs = prev_type_defs;
         self.mold_defs = prev_mold_defs;
         self.type_methods = prev_type_methods;
+        // restore the importer's enum registry.
+        self.enum_defs = prev_enum_defs;
         self.loading_addon_facade_ctx = prev_addon_facade_ctx;
 
         if let Err(e) = exec_result {
@@ -1130,10 +1146,10 @@ impl Interpreter {
             } else {
                 Some(std::sync::Arc::new(module_type_defs.clone()))
             };
-            let facade_ed_arc = if self.enum_defs.is_empty() {
+            let facade_ed_arc = if module_enum_defs.is_empty() {
                 None
             } else {
-                Some(std::sync::Arc::new(self.enum_defs.clone()))
+                Some(std::sync::Arc::new(module_enum_defs.clone()))
             };
             for value in exports.values_mut() {
                 if let Value::Function(fv) = value {
@@ -1162,8 +1178,8 @@ impl Interpreter {
                 .into_iter()
                 .filter(|(k, _)| exports.contains_key(k))
                 .collect();
-        let exported_enum_defs: std::collections::HashMap<String, Vec<String>> = self
-            .enum_defs
+        // export from the facade's own snapshot.
+        let exported_enum_defs: std::collections::HashMap<String, Vec<String>> = module_enum_defs
             .iter()
             .filter(|(k, _)| exports.contains_key(*k))
             .map(|(k, v)| (k.clone(), v.clone()))

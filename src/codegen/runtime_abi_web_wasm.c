@@ -247,11 +247,15 @@ static int64_t abi_header_list_append(int64_t list, const char *name, const char
  * contract (interpreter keeps the input intact). Copy the spine before
  * appending — pair packs are immutable and stay shared. WASM layout:
  * [cap, len, elem_tag, magic, items...]. Arena allocation, no retain. */
+static int abi_is_list_value(int64_t value);
+
 static int64_t abi_pair_list_copy(int64_t list_ptr) {
     int64_t out = abi_pair_list_new();
     if (!list_ptr) return out;
+    if (!abi_is_list_value(list_ptr)) return 0;
     int64_t *src = (int64_t *)(intptr_t)list_ptr;
     int64_t len = src[1];
+    if (len > TAIDA_ABI_WEB_MAX_HEADERS) return 0;
     for (int64_t i = 0; i < len; i++) {
         out = taida_list_push(out, src[4 + i]);
     }
@@ -391,6 +395,7 @@ int64_t taida_abi_response_header(int64_t name_ptr, int64_t value_ptr, int64_t r
         return abi_error_response(500, "invalid response header");
     }
     int64_t headers = abi_pair_list_copy(taida_pack_get(response, abi_hash_cstr("headers")));
+    if (!headers) return abi_error_response(500, "invalid response headers");
     headers = abi_header_list_append(
         headers,
         name,
@@ -1094,7 +1099,7 @@ static void abi_jb_append_base64_bytes(TaidaAbiJsonBuilder *jb, int64_t bytes_va
 
 static void abi_jb_append_headers(TaidaAbiJsonBuilder *jb, int64_t headers) {
     abi_jb_append(jb, "[");
-    if (headers && abi_wasm_is_readable(headers, ABI_WASM_LIST_ELEMS * 8u)) {
+    if (headers && abi_is_list_value(headers)) {
         int64_t *list = (int64_t *)(intptr_t)headers;
         int64_t len = list[1];
         if (len < 0 || len > TAIDA_ABI_WEB_MAX_HEADERS) len = 0;

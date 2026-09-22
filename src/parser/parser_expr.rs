@@ -321,7 +321,10 @@ impl Parser {
                                 }
                             };
                             type_args.push(Expr::TypeLiteral(type_name, None, lit_span));
-                            self.match_token(&TokenKind::Comma);
+                            if let Err(error) = self.require_bracket_separator() {
+                                self.mold_bracket_args_depth -= 1;
+                                return Err(error);
+                            }
                             continue;
                         }
                         // B11-6a: `EnumName:Variant` without `()` → TypeLiteral
@@ -354,7 +357,10 @@ impl Parser {
                                 Some(variant_name),
                                 lit_span,
                             ));
-                            self.match_token(&TokenKind::Comma);
+                            if let Err(error) = self.require_bracket_separator() {
+                                self.mold_bracket_args_depth -= 1;
+                                return Err(error);
+                            }
                             continue;
                         }
                         match self.parse_expression() {
@@ -364,7 +370,15 @@ impl Parser {
                                 break;
                             }
                         }
-                        self.match_token(&TokenKind::Comma);
+                        // a missing comma between bracket arguments
+                        // used to be silently accepted (`Mold[A B]` parsed as
+                        // two arguments) and only blew up far away as a
+                        // confusing checker/runtime error. Require an explicit
+                        // separator after every argument.
+                        if let Err(error) = self.require_bracket_separator() {
+                            self.mold_bracket_args_depth -= 1;
+                            return Err(error);
+                        }
                     }
 
                     self.mold_bracket_args_depth -= 1;
@@ -974,10 +988,10 @@ impl Parser {
                 // C26B-019: newlines after a comma are also continuation
                 // whitespace (trailing comma + closing paren on the next line).
                 self.skip_newlines();
-                // If RParen follows, there's one more trailing hole
+                // An empty trailing slot is partial application, including
+                // when the closing parenthesis is on the next line.
                 if self.check(&TokenKind::RParen) {
-                    let span = self.current_span();
-                    args.push(Expr::Hole(span));
+                    args.push(Expr::Hole(self.current_span()));
                     break;
                 }
                 // Otherwise continue to parse next slot
@@ -987,6 +1001,21 @@ impl Parser {
             }
         }
         Ok(args)
+    }
+
+    /// Require a separator between mold arguments, allowing line breaks.
+    fn require_bracket_separator(&mut self) -> Result<(), ParseError> {
+        self.skip_newlines();
+        if self.match_token(&TokenKind::Comma) {
+            self.skip_newlines();
+            Ok(())
+        } else if self.check(&TokenKind::RBracket) {
+            Ok(())
+        } else {
+            Err(self.error_at_current(
+                "Expected ',' between mold arguments, or ']' to close the argument list",
+            ))
+        }
     }
 
     pub(super) fn parse_buchi_field_list(&mut self) -> Result<Vec<BuchiField>, ParseError> {

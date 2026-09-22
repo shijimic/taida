@@ -1109,6 +1109,12 @@ taida_val taida_os_tcp_connect(taida_val host_ptr, taida_val port, taida_val tim
 }
 
 taida_val taida_os_tcp_listen(taida_val port, taida_val timeout_ms) {
+    // reject out-of-range ports instead of silently truncating
+    // through `(unsigned short)` (-1 would otherwise bind as 65535).
+    if (port < 0 || port > 65535) {
+        return taida_async_resolved(taida_os_result_failure(EINVAL,
+            "tcpListen: port must be within 0..=65535"));
+    }
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) {
         return taida_async_resolved(taida_os_result_failure(errno, strerror(errno)));
@@ -1312,8 +1318,9 @@ taida_val taida_os_socket_recv_exact(taida_val socket_fd, taida_val size, taida_
         taida_val empty = taida_bytes_default_value();
         return taida_async_resolved(taida_lax_new(empty, empty));
     }
-    // M-11: Cap recv size to 256MB to prevent unbounded malloc from user input.
-    if (size > (taida_val)(256 * 1024 * 1024)) {
+    // M-11 / Cap recv size to 64MB (MAX_READ_SIZE parity with the
+    // interpreter) to prevent unbounded malloc from user input.
+    if (size > (taida_val)(64 * 1024 * 1024)) {
         taida_val error = taida_make_error_with_kind_code("IoError", "SocketRecvExact error", "too_large", 0);
         return taida_async_resolved(taida_lax_empty_error(taida_bytes_default_value(), error));
     }
@@ -1374,6 +1381,13 @@ static taida_val taida_os_udp_default_payload(void) {
 taida_val taida_os_udp_bind(taida_val host_ptr, taida_val port, taida_val timeout_ms) {
     const char *host = (const char*)host_ptr;
     if (!host) return taida_async_resolved(taida_os_result_failure(EINVAL, "udpBind: invalid host"));
+
+    // reject out-of-range ports instead of silently truncating
+    // through `(unsigned short)` (-1 would otherwise bind as 65535).
+    if (port < 0 || port > 65535) {
+        return taida_async_resolved(taida_os_result_failure(EINVAL,
+            "udpBind: port must be within 0..=65535"));
+    }
 
     int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sockfd < 0) {

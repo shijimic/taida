@@ -309,6 +309,13 @@ pub struct TypeChecker {
     /// a subtree. Main inference paths use this to avoid recursively
     /// re-starting the same E1605-only walk from nested containers.
     in_comparison_error_walk: bool,
+    /// Spans of arguments seen at `setOf(...)` call sites. A heterogeneous
+    /// literal fed straight into `setOf` is a legitimate value-tagged Set
+    /// (per-element kind array), so the `[E0401]` the literal itself reports
+    /// must not reject the whole program; `check_program` excuses exactly
+    /// these spans at the end. Direct bindings (`xs <= @[1, "x"]`) and
+    /// unrelated diagnostics stay reported.
+    setof_arg_spans: Vec<Span>,
     /// Source file path — used for resolving import paths to validate export symbols.
     source_file: Option<std::path::PathBuf>,
     /// Compile target for backend-aware diagnostics.
@@ -471,6 +478,7 @@ impl TypeChecker {
             declared_header_arities: HashMap::new(),
             in_pipeline: false,
             in_comparison_error_walk: false,
+            setof_arg_spans: Vec::new(),
             source_file: None,
             compile_target: CompileTarget::Neutral,
             net_http_serve_symbols: HashSet::new(),
@@ -875,6 +883,20 @@ impl TypeChecker {
         Self::is_core_builtin_name(name)
     }
 
+    /// the statically-known Function type of a
+    /// callable pipeline stage name — locals via `lookup_var`, user and
+    /// prelude functions via `func_types`. Returns None for molds and
+    /// constructors whose pipeline call form is not a plain function value,
+    /// so their first stages keep inferring without a hint.
+    fn pipeline_stage_function_type(&self, name: &str) -> Option<Type> {
+        if let Some(ty) = self.lookup_var(name)
+            && matches!(ty, Type::Function(_, _))
+        {
+            return Some(ty);
+        }
+        self.func_types.get(name).cloned()
+    }
+
     /// Get all variable names and types visible in the current scope (for LSP completion).
     pub fn all_visible_vars(&self) -> Vec<(String, Type)> {
         let mut result = Vec::new();
@@ -1047,22 +1069,68 @@ impl TypeChecker {
         // from its source TypeExpr until the table is stable — each round
         // can pick up names registered later in the file; the round count
         // is bounded by the alias count (a cycle simply stops expanding).
-        let alias_defs: Vec<(String, crate::parser::TypeExpr)> = program
+        let alias_defs: Vec<(String, crate::parser::TypeExpr, Span)> = program
             .statements
             .iter()
             .filter_map(|stmt| match stmt {
                 Statement::ClassLikeDef(cl) => match &cl.kind {
                     crate::parser::ClassLikeKind::Alias { target } => {
-                        Some((cl.name.clone(), target.clone()))
+                        Some((cl.name.clone(), target.clone(), cl.span.clone()))
                     }
                     _ => None,
                 },
                 _ => None,
             })
             .collect();
+        // report alias expansion cycles with a dedicated
+        // diagnostic. The fixpoint loop below simply stops expanding on a
+        // cycle, which used to leave a half-expanded table whose only
+        // symptom was a baffling nested-List expectation on unrelated
+        // assignments (`expected @[@[@[B]]], got @[@[Int]]`).
+        let alias_names: HashSet<String> =
+            alias_defs.iter().map(|(name, _, _)| name.clone()).collect();
+        let mut deps: HashMap<&str, Vec<String>> = HashMap::new();
+        for (name, target, _) in &alias_defs {
+            deps.insert(name.as_str(), collect_alias_refs(target, &alias_names));
+        }
+        let spans: HashMap<&str, Span> = alias_defs
+            .iter()
+            .map(|(n, _, s)| (n.as_str(), s.clone()))
+            .collect();
+        // DFS with gray/black marking: a back edge to a gray node closes a
+        // cycle; the chain from that node around is reported once. Roots are
+        // visited in name order so the reported chain is deterministic.
+        // Missing color key means unvisited (white).
+        const WHITE: u8 = 0;
+        let mut color: HashMap<&str, u8> = HashMap::new();
+        let mut stack: Vec<&str> = Vec::new();
+        let mut roots: Vec<&str> = deps.keys().copied().collect();
+        roots.sort_unstable();
+        for root in roots {
+            if color.get(root).copied().unwrap_or(WHITE) == WHITE {
+                stack.clear();
+                if let Err(chain) = dfs_alias_cycle(root, &deps, &mut color, &mut stack) {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1632] Type alias expansion cycle detected: {}. \
+                             Hint: break the cycle so every alias expands to a finite type.",
+                            chain
+                        ),
+                        span: spans
+                            .get(root)
+                            .cloned()
+                            .unwrap_or_else(|| Span::new(0, 0, 0, 0)),
+                    });
+                    // The DFS bailed out mid-walk, leaving its nodes GRAY.
+                    // Blacken them so the next root starts from a clean
+                    // marking state instead of seeing phantom back edges.
+                    blacken_stale_gray_alias_nodes(&mut color);
+                }
+            }
+        }
         for _ in 0..alias_defs.len().saturating_sub(1) {
             let mut changed = false;
-            for (name, target) in &alias_defs {
+            for (name, target, _) in &alias_defs {
                 let resolved = self.registry.resolve_type(target);
                 if self.registry.type_aliases.get(name) != Some(&resolved) {
                     self.registry.register_type_alias(name, resolved);
@@ -1194,6 +1262,18 @@ impl TypeChecker {
                 err.message.clone(),
             ))
         });
+
+        // A heterogeneous list literal fed straight into `setOf` is a
+        // legitimate value-tagged Set (the runtime keeps per-element kinds),
+        // so the literal's own `[E0401]` must not reject the program.
+        // Exactly the recorded argument spans are excused: direct bindings
+        // (`xs <= @[1, "x"]`) keep their diagnostic, and errors from other
+        // statements are untouched.
+        if !self.setof_arg_spans.is_empty() {
+            let excused = &self.setof_arg_spans;
+            self.errors
+                .retain(|err| !(err.message.contains("[E0401]") && excused.contains(&err.span)));
+        }
     }
 
     fn type_expr_to_string(ty: &TypeExpr) -> String {
@@ -1443,6 +1523,90 @@ pub fn default_fn_generatable(
             // can be constructed. Argument types do not affect generability.
             default_fn_generatable(ret, registry, visiting)
         }
+    }
+}
+
+/// alias names referenced anywhere inside a target type
+/// expression (nested lists, generics, function types included).
+fn collect_alias_refs(ty: &crate::parser::TypeExpr, alias_names: &HashSet<String>) -> Vec<String> {
+    use crate::parser::TypeExpr;
+    let mut refs: Vec<String> = Vec::new();
+    match ty {
+        TypeExpr::Named(name) => {
+            if alias_names.contains(name) {
+                refs.push(name.clone());
+            }
+        }
+        TypeExpr::List(inner) => refs.extend(collect_alias_refs(inner, alias_names)),
+        TypeExpr::Generic(_, args) => {
+            for arg in args {
+                refs.extend(collect_alias_refs(arg, alias_names));
+            }
+        }
+        TypeExpr::Function(params, ret) => {
+            for p in params {
+                refs.extend(collect_alias_refs(p, alias_names));
+            }
+            refs.extend(collect_alias_refs(ret, alias_names));
+        }
+        TypeExpr::BuchiPack(fields) => {
+            for field in fields {
+                if let Some(annotation) = &field.type_annotation {
+                    refs.extend(collect_alias_refs(annotation, alias_names));
+                }
+            }
+        }
+    }
+    refs
+}
+
+/// DFS returning Err(cycle chain) when a back edge closes a
+/// cycle. Gray nodes are on the current path; black nodes are done.
+fn dfs_alias_cycle<'a>(
+    node: &'a str,
+    deps: &'a HashMap<&'a str, Vec<String>>,
+    color: &mut HashMap<&'a str, u8>,
+    stack: &mut Vec<&'a str>,
+) -> Result<(), String> {
+    const WHITE: u8 = 0;
+    const GRAY: u8 = 1;
+    const BLACK: u8 = 2;
+    color.insert(node, GRAY);
+    stack.push(node);
+    for next in deps.get(node).into_iter().flatten() {
+        match color.get(next.as_str()).copied().unwrap_or(WHITE) {
+            GRAY => {
+                // Cycle: from `next` (first occurrence on the stack) around.
+                let start = stack.iter().position(|n| *n == next.as_str()).unwrap_or(0);
+                let mut chain: Vec<String> = stack[start..].iter().map(|n| n.to_string()).collect();
+                chain.push(next.clone());
+                return Err(chain.join(" -> "));
+            }
+            BLACK => {}
+            _ => dfs_alias_cycle(next, deps, color, stack)?,
+        }
+    }
+    stack.pop();
+    color.insert(node, BLACK);
+    Ok(())
+}
+
+/// F64 review-fix: an early `Err` return from `dfs_alias_cycle` leaves the
+/// nodes it walked marked GRAY. A later root must not mistake one of those
+/// stale grays for a back edge (`D=@[A] A=@[B] B=@[C] C=@[B]` reported a
+/// phantom `D -> A` cycle after the real `B -> C -> B`). After each cycle
+/// report, promote every remaining GRAY node to BLACK — the cycle they sit
+/// on has already been reported once.
+fn blacken_stale_gray_alias_nodes(color: &mut HashMap<&str, u8>) {
+    const GRAY: u8 = 1;
+    const BLACK: u8 = 2;
+    let gray_keys: Vec<&str> = color
+        .iter()
+        .filter(|(_, c)| **c == GRAY)
+        .map(|(n, _)| *n)
+        .collect();
+    for key in gray_keys {
+        color.insert(key, BLACK);
     }
 }
 

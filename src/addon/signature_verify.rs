@@ -249,9 +249,8 @@ pub fn fetch_bundle(src_url: &str, dest: &Path) -> Result<bool, VerifyError> {
 #[cfg(feature = "community")]
 fn fetch_bundle_https(src_url: &str, dest: &Path) -> Result<bool, VerifyError> {
     use reqwest::StatusCode;
-    use reqwest::blocking::Client;
 
-    let client = Client::builder()
+    let client = crate::util::http_client_builder()
         .timeout(std::time::Duration::from_secs(60))
         .build()
         .map_err(|e| VerifyError::InvocationError(format!("cannot build HTTP client: {e}")))?;

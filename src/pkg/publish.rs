@@ -298,16 +298,7 @@ pub fn read_git_tags(project_dir: &Path) -> Result<Vec<String>, String> {
         .collect())
 }
 
-/// Compare two Taida generation strings using the base-26-like
-/// progression that `next_generation` walks forward (`a..z`, then
-/// `aa..zz`, then `aaa..`,...). Ordering is length-first, then
-/// lexicographic within the same length, so `"z" < "aa" < "ab" < "zz" < "aaa"`.
-///
-/// Plain `str::cmp` would put `"aa" < "z"` and silently re-age any
-/// repo that has crossed the `z -> aa` boundary.
-fn compare_generation(a: &str, b: &str) -> std::cmp::Ordering {
-    a.len().cmp(&b.len()).then_with(|| a.cmp(b))
-}
+use crate::util::compare_generation;
 
 pub fn latest_taida_tag(tags: &[String]) -> Option<String> {
     let mut parsed: Vec<(String, String, u64, Option<String>)> = tags
@@ -318,7 +309,12 @@ pub fn latest_taida_tag(tags: &[String]) -> Option<String> {
             num.map(|n| (t.clone(), generation, n, label))
         })
         .collect();
-    parsed.sort_by(|a, b| compare_generation(&a.1, &b.1).then(a.2.cmp(&b.2)));
+    parsed.sort_by(|a, b| {
+        compare_generation(&a.1, &b.1)
+            .then(a.2.cmp(&b.2))
+            .then_with(|| crate::util::compare_version_labels(a.3.as_deref(), b.3.as_deref()))
+            .then_with(|| a.0.cmp(&b.0))
+    });
     parsed.last().map(|t| t.0.clone())
 }
 

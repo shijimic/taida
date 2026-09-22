@@ -144,9 +144,7 @@ fn noop_progress(_: u64, _: Option<u64>) {}
 /// can locate the directory without duplicating the path
 /// logic.
 pub(crate) fn cache_root() -> Result<PathBuf, FetchError> {
-    let home = std::env::var("HOME")
-        .map(PathBuf::from)
-        .map_err(|_| cache_io("cannot determine home directory ($HOME not set)"))?;
+    let home = crate::util::taida_home_dir().map_err(cache_io)?;
     Ok(home.join(".taida/addon-cache"))
 }
 
@@ -317,13 +315,15 @@ fn verify_sha256(path: &Path, expected: &str) -> Result<(), FetchError> {
 /// # Security///
 /// Both `org` and `name` must match `[a-zA-Z0-9._-]+` to prevent
 /// cache directory traversal (e.g. `"../../../malicious"`).
-fn split_package_id(package_id: &str) -> Option<(&str, &str)> {
+pub(crate) fn split_package_id(package_id: &str) -> Option<(&str, &str)> {
     let (org, name) = package_id.split_once('/')?;
     if org.is_empty() || name.is_empty() {
         return None;
     }
     let valid = |s: &str| {
         !s.is_empty()
+            && s != "."
+            && s != ".."
             && s.chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
     };
@@ -399,15 +399,18 @@ pub fn fetch_prebuild_with_progress(
     let lib_filename = format!("lib{lib_name}.{ext}");
     let dest_path = cache_dir.join(&lib_filename);
 
-    // 1. Cache hit: verify SHA-256 and return.
+    // Revalidate cache hits; an integrity failure falls through to a fresh,
+    // independently verified download in the same invocation.
     if dest_path.exists() {
-        if let Err(e) = verify_sha256(&dest_path, expected_sha256) {
-            // Corrupted cache, remove and re-download.
-            let _ = std::fs::remove_file(&dest_path);
-            let _ = std::fs::remove_file(sha256_sidecar(&cache_dir));
-            return Err(e);
+        match verify_sha256(&dest_path, expected_sha256) {
+            Ok(()) => return Ok(dest_path),
+            Err(FetchError::IntegrityMismatch { .. }) => {
+                std::fs::remove_file(&dest_path)
+                    .map_err(|e| cache_io(format!("cannot remove corrupt cache: {e}")))?;
+                let _ = std::fs::remove_file(sha256_sidecar(&cache_dir));
+            }
+            Err(error) => return Err(error),
         }
-        return Ok(dest_path);
     }
 
     // 2. Download / copy with streaming SHA-256.
@@ -544,11 +547,10 @@ fn download_from_https(
     expected_sha256: &str,
     progress: &mut ProgressCallback<'_>,
 ) -> Result<Vec<u8>, FetchError> {
-    use reqwest::blocking::Client;
     use reqwest::redirect::Policy;
     use std::io::Read;
 
-    let client = Client::builder()
+    let client = crate::util::http_client_builder()
         .timeout(std::time::Duration::from_secs(120))
         .redirect(Policy::limited(HTTPS_MAX_REDIRECTS))
         .build()
@@ -666,7 +668,7 @@ pub fn fetch_release_lockfile(package_name: &str, version: &str) -> Result<Strin
         version,
     );
 
-    let response = reqwest::blocking::Client::new()
+    let response = crate::util::http_client()?
         .get(&url)
         .header("User-Agent", "taida-install")
         .send()
@@ -690,21 +692,25 @@ pub fn fetch_release_lockfile(package_name: &str, version: &str) -> Result<Strin
         ));
     }
 
-    let body = response
-        .text()
-        .map_err(|e| format!("Failed to read addon.lock.toml response body: {}", e))?;
-
-    // Sanity check: lockfile should be small text
-    if body.len() > 1_048_576 {
-        return Err(format!(
-            "addon.lock.toml for '{}@{}' is too large ({} bytes, limit 1 MB)",
-            package_name,
-            version,
-            body.len()
-        ));
-    }
+    let body = read_release_lockfile_body(response)
+        .map_err(|e| format!("addon.lock.toml for '{}@{}': {}", package_name, version, e))?;
 
     Ok(body)
+}
+
+#[cfg(feature = "community")]
+fn read_release_lockfile_body(reader: impl std::io::Read) -> Result<String, String> {
+    use std::io::Read;
+    const LIMIT: u64 = 1_048_576;
+    let mut bytes = Vec::new();
+    reader
+        .take(LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("Failed to read response body: {e}"))?;
+    if bytes.len() as u64 > LIMIT {
+        return Err("response is too large (limit 1 MB)".to_string());
+    }
+    String::from_utf8(bytes).map_err(|e| format!("Invalid UTF-8 response body: {e}"))
 }
 
 /// Fetch release metadata for receiving-side freshness and publisher checks.
@@ -727,7 +733,7 @@ pub fn fetch_release_metadata(
         version,
     );
 
-    let response = reqwest::blocking::Client::builder()
+    let response = crate::util::http_client_builder()
         .user_agent("taida-install")
         .build()
         .map_err(|e| format!("Failed to build GitHub API client: {}", e))?
@@ -1238,5 +1244,64 @@ mod tests {
         let wrong_sha = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         assert!(verify_sha256(&path, wrong_sha).is_err());
         let _ = std::fs::remove_file(&path);
+    }
+    #[test]
+    fn package_dot_components_are_rejected() {
+        for id in ["../pkg", "org/..", "./pkg", "org/.", "../.."] {
+            assert!(split_package_id(id).is_none(), "{id}");
+        }
+        assert_eq!(
+            split_package_id("org.name/my-pkg"),
+            Some(("org.name", "my-pkg"))
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "community")]
+    fn lockfile_read_stops_at_the_limit() {
+        assert!(
+            read_release_lockfile_body(std::io::repeat(b'x'))
+                .unwrap_err()
+                .contains("too large")
+        );
+        let exact = vec![b'a'; 1_048_576];
+        assert_eq!(
+            read_release_lockfile_body(exact.as_slice()).unwrap().len(),
+            exact.len()
+        );
+        assert_eq!(read_release_lockfile_body(&b"hello"[..]).unwrap(), "hello");
+    }
+
+    #[test]
+    fn corrupt_cache_is_repaired_in_one_fetch() {
+        let _guard = crate::util::env_test_guard();
+        let (_source_guard, path, sha) = make_relative_temp_file(b"verified-binary");
+        let home_dir =
+            std::env::temp_dir().join(format!("taida-cache-repair-{}", std::process::id()));
+        let saved = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", &home_dir);
+        }
+        let cache = cache_dir_for("audit", "pkg", "a.1", "x86_64-unknown-linux-gnu").unwrap();
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("libpkg.so"), b"corrupt").unwrap();
+        let result = fetch_prebuild(
+            "audit/pkg",
+            "a.1",
+            "x86_64-unknown-linux-gnu",
+            "pkg",
+            "so",
+            &format!("file://{}", path.display()),
+            &sha,
+        );
+        unsafe {
+            match saved {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        let result = result.unwrap();
+        assert_eq!(std::fs::read(result).unwrap(), b"verified-binary");
+        std::fs::remove_dir_all(home_dir).unwrap();
     }
 }

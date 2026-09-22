@@ -707,6 +707,11 @@ const DIVERGENT_JSON: &[&str] = &[
 /// native; WASM has no setjmp and uses its own unwind strategy, and the
 /// Lax/Result/Gorillax constructors sit on the divergent allocators.
 const DIVERGENT_ERROR_CEILING: &[&str] = &[
+    // same canonicalization semantics on both runtimes (the
+    // f64b010 pin test asserts identical 3-backend output), but the body
+    // leans on target-specific string validation (taida_safe_cstr vs
+    // _wasm_is_string_ptr) and WASM-only pack tag stamping.
+    "taida_canonicalize_caught_error",
     "taida_error_ceiling_pop",
     "taida_error_ceiling_push",
     "taida_error_get_value",

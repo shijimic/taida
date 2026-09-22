@@ -34,3 +34,34 @@ pub fn env_test_guard() -> std::sync::MutexGuard<'static, ()> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
+
+/// Compare generations in their published order: a..z, aa..zz, aaa...
+pub(crate) fn compare_generation(a: &str, b: &str) -> std::cmp::Ordering {
+    a.len().cmp(&b.len()).then_with(|| a.cmp(b))
+}
+
+/// Prefer an unlabelled release, then the stable label, then lexical labels.
+pub(crate) fn compare_version_labels(a: Option<&str>, b: Option<&str>) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (a, b) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Greater,
+        (Some(_), None) => Ordering::Less,
+        (Some(a), Some(b)) => (a == "stable").cmp(&(b == "stable")).then_with(|| a.cmp(b)),
+    }
+}
+
+/// CLI HTTP requests have finite connection and response deadlines.
+#[cfg(feature = "community")]
+pub(crate) fn http_client_builder() -> reqwest::blocking::ClientBuilder {
+    reqwest::blocking::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(120))
+}
+
+#[cfg(feature = "community")]
+pub(crate) fn http_client() -> Result<reqwest::blocking::Client, String> {
+    http_client_builder()
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {e}"))
+}

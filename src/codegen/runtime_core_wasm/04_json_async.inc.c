@@ -1399,6 +1399,14 @@ static void _wc_json_serialize_typed(_wc_json_buf *jb, int64_t val, int indent, 
     if (_wc_is_hashmap(val)) {
         int64_t *hm = (int64_t *)(intptr_t)val;
         int64_t cap = hm[0];
+        /* wire a homogeneous value tag
+           into each value slot so direct Float/Bool values stop
+           serializing as raw bits and match the interpreter's typed
+           output. UNKNOWN(-1)/HETEROGENEOUS(-2) maps keep the heuristic
+           walk (hint 0); per-entry kinds for heterogeneous maps are on
+           the value-tag track. Layout: [0]=cap, [1]=len, [2]=value_tag,
+           [3]=marker — same slot the `.set()` tag latch writes. */
+        int value_hint = _wc_elem_hint_from_ekind((uint32_t)hm[2]);
         _wc_jb_append_char(jb, '{');
         int64_t count = 0;
         /* C23B-008 (2026-04-22): insertion-order walk via the new
@@ -1412,14 +1420,17 @@ static void _wc_json_serialize_typed(_wc_json_buf *jb, int64_t val, int indent, 
             int64_t sh = hm[WASM_HM_HEADER + slot * 3];
             int64_t sk = hm[WASM_HM_HEADER + slot * 3 + 1];
             if (sh != 0 && !(sh == 1 && sk == 0)) {
+                /* only Str keys have a
+                   JSON object-key form. The interpreter skips non-Str keys
+                   silently; skip here too instead of emitting whatever the
+                   key slot holds as a char*. */
+                if (!_wasm_is_string_ptr(sk)) continue;
                 if (count > 0) _wc_jb_append_char(jb, ',');
                 if (indent > 0) _wc_jb_append_indent(jb, indent, depth + 1);
-                const char *key_str = (const char *)(intptr_t)sk;
-                if (!key_str) key_str = "";
-                _wc_jb_append_escaped_str(jb, key_str);
+                _wc_jb_append_escaped_str(jb, (const char *)(intptr_t)sk);
                 _wc_jb_append_char(jb, ':');
                 if (indent > 0) _wc_jb_append_char(jb, ' ');
-                _wc_json_serialize_typed(jb, hm[WASM_HM_HEADER + slot * 3 + 2], indent, depth + 1, 0);
+                _wc_json_serialize_typed(jb, hm[WASM_HM_HEADER + slot * 3 + 2], indent, depth + 1, value_hint);
                 count++;
             }
         }
@@ -1468,6 +1479,22 @@ static void _wc_json_serialize_typed(_wc_json_buf *jb, int64_t val, int indent, 
         return;
     }
 
+    /* String pointer check moved BEFORE the
+       BuchiPack heuristic. A static-literal string sits in the data
+       segment right next to other literals; reading its first payload
+       word as an fc and the next word as a hash made any string whose
+       neighbour carried a large header magic (every WSTR literal does)
+       serialize as an empty `{}` object. The string identification is
+       positive-only (`_wasm_is_string_ptr` checks the hidden magic
+       word), which makes a false positive on well-formed packs
+       implausible rather than impossible — the pack heuristic below
+       still has the final word for anything the string check lets
+       through. */
+    if (_wc_looks_like_string(val)) {
+        _wc_jb_append_escaped_str(jb, (const char *)(intptr_t)val);
+        return;
+    }
+
     /* Check BuchiPack */
     if (_wc_is_valid_ptr(val, 8)) {
         int64_t *obj = (int64_t *)(intptr_t)val;
@@ -1486,12 +1513,6 @@ static void _wc_json_serialize_typed(_wc_json_buf *jb, int64_t val, int indent, 
                 return;
             }
         }
-    }
-
-    /* String pointer */
-    if (_wc_looks_like_string(val)) {
-        _wc_jb_append_escaped_str(jb, (const char *)(intptr_t)val);
-        return;
     }
 
     /* Default: integer */
