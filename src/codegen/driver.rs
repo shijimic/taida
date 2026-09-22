@@ -1092,7 +1092,7 @@ fn which_command(name: &str) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 /// wasm-ld の実行パスを検出する
-fn find_wasm_ld() -> Result<PathBuf, CompileError> {
+pub fn find_wasm_ld() -> Result<PathBuf, CompileError> {
     // 1. PATH 上の wasm-ld
     if let Some(path) = which_command("wasm-ld") {
         return Ok(PathBuf::from(path));
