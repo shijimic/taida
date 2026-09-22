@@ -268,16 +268,29 @@ pub fn run_interpreter_normalized(td_path: &Path) -> Option<String> {
 
 /// Create a unique temporary directory with the given prefix.
 ///
-/// The directory name includes the process ID and nanosecond timestamp to avoid
-/// collisions when tests run in parallel.
+/// Names include the process ID, timestamp, and an atomic counter. Creation
+/// retries on collisions so parallel tests never reuse an existing directory.
 pub fn unique_temp_dir(prefix: &str) -> PathBuf {
+    static NEXT_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock should be after unix epoch")
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!("{}_{}_{}", prefix, std::process::id(), nanos));
-    std::fs::create_dir_all(&dir).expect("failed to create temp dir");
-    dir
+    loop {
+        let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "{}_{}_{}_{}",
+            prefix,
+            std::process::id(),
+            nanos,
+            id
+        ));
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return dir,
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => panic!("failed to create temp dir {}: {err}", dir.display()),
+        }
+    }
 }
 
 /// Mark a directory as a Taida project root without taking over packages.tdm.

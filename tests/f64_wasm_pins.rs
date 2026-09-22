@@ -3,7 +3,6 @@
 mod common;
 use common::{taida_bin, unique_temp_dir, wasmtime_bin};
 use std::process::{Command, Output};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use taida::codegen::driver::{WasmRuntimeCache, find_wasm_ld};
 use taida::codegen::emit_wasm_c::{WasmProfile, emit_c};
 use taida::codegen::ir::{IrFunction, IrInst, IrModule};
@@ -13,9 +12,7 @@ fn wasm_harness(source: &str) -> Option<Output> {
         eprintln!("SKIP: wasmtime is unavailable");
         return None;
     };
-    static HARNESS_ID: AtomicUsize = AtomicUsize::new(0);
-    let id = HARNESS_ID.fetch_add(1, Ordering::Relaxed);
-    let dir = unique_temp_dir(&format!("wasm_runtime_contract_{id}"));
+    let dir = unique_temp_dir("wasm_runtime_contract");
     let cache = WasmRuntimeCache::new(dir.join("cache")).unwrap();
     let core = cache.rt_core(WasmProfile::Min).unwrap();
     let src = dir.join("check.c");
