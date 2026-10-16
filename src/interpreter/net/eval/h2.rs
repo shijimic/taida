@@ -19,7 +19,132 @@ use super::types::{ActiveStreamingWriter, ConnStream, RequestBodyState, Streamin
 use crate::interpreter::eval::{Interpreter, RuntimeError, Signal};
 use crate::interpreter::value::Value;
 
+/// Outcome of reading and processing one HTTP/2 frame.
+enum H2Step {
+    /// The frame was processed; it may have completed a request.
+    Frame(Option<super::super::h2::CompletedRequest>),
+    /// The connection is over: the peer closed it, the read timed out, or a
+    /// connection error was answered with GOAWAY.
+    Close,
+}
+
 impl Interpreter {
+    /// Read one frame, run it through the HTTP/2 state machine and send the
+    /// replies it calls for (SETTINGS ACK, PING ACK, RST_STREAM, GOAWAY and
+    /// WINDOW_UPDATE). Shared by the connection loop and by a response that
+    /// waits for the peer to open its flow-control window.
+    fn h2_step(
+        stream: &mut ConnStream,
+        h2_conn: &mut super::super::h2::H2Connection,
+        frame_buf: &mut Vec<u8>,
+    ) -> H2Step {
+        use super::super::h2::*;
+
+        // Read next frame (NB6-38: reuse frame_buf to avoid per-frame heap alloc)
+        let (header, payload) =
+            match read_frame_reuse(stream, h2_conn.local_settings.max_frame_size, frame_buf) {
+                Ok(frame) => frame,
+                Err(H2Error::Connection(error_code, ref msg)) => {
+                    // Protocol error — send GOAWAY and close
+                    let _ = send_goaway(
+                        stream,
+                        h2_conn.last_peer_stream_id,
+                        error_code,
+                        msg.as_bytes(),
+                    );
+                    h2_conn.goaway_sent = true;
+                    return H2Step::Close;
+                }
+                // Clean close, reset, timeout or any other I/O failure.
+                Err(_) => return H2Step::Close,
+            };
+
+        // Check if we need to send SETTINGS ACK after receiving client's SETTINGS
+        let settings_ack_pending =
+            header.frame_type == FRAME_SETTINGS && header.flags & FLAG_ACK == 0;
+
+        // Check for PING that needs response (NB6-38: minimal copy — PING is always 8 bytes)
+        let ping_data = if header.frame_type == FRAME_PING && header.flags & FLAG_ACK == 0 {
+            Some(payload.to_vec())
+        } else {
+            None
+        };
+
+        // Process frame through the h2 state machine
+        let completed_request = match process_frame(h2_conn, &header, payload) {
+            Ok(req) => req,
+            Err(H2Error::Connection(error_code, ref msg)) => {
+                let _ = send_goaway(
+                    stream,
+                    h2_conn.last_peer_stream_id,
+                    error_code,
+                    msg.as_bytes(),
+                );
+                h2_conn.goaway_sent = true;
+                return H2Step::Close;
+            }
+            Err(H2Error::Stream(stream_id, error_code, _)) => {
+                let _ = send_rst_stream(stream, stream_id, error_code);
+                // Drop the reset stream so its accumulated `request_body`
+                // is freed immediately (parity with native
+                // `h2_conn_remove_closed_streams`). Without this, a body
+                // accumulated up to MAX_REQUEST_BODY_SIZE before the cap
+                // tripped would linger in the `streams` map until the
+                // connection closed, undermining the OOM cap (G1).
+                h2_conn.streams.remove(&stream_id);
+                None
+            }
+            Err(H2Error::Compression(ref msg)) => {
+                let _ = send_goaway(
+                    stream,
+                    h2_conn.last_peer_stream_id,
+                    0x9, // COMPRESSION_ERROR
+                    msg.as_bytes(),
+                );
+                h2_conn.goaway_sent = true;
+                return H2Step::Close;
+            }
+            Err(H2Error::Io(_)) => return H2Step::Close,
+        };
+
+        // Send SETTINGS ACK if needed
+        if settings_ack_pending && send_settings_ack(stream).is_err() {
+            return H2Step::Close;
+        }
+
+        // Send PING ACK if needed
+        if ping_data
+            .as_ref()
+            .is_some_and(|data| send_ping_ack(stream, data).is_err())
+        {
+            return H2Step::Close;
+        }
+
+        // Replenish the receive windows when they drop below half of the
+        // initial size, after every DATA frame (not on every frame, to avoid a
+        // WINDOW_UPDATE per small body). Doing this only once a request had
+        // completed left a body larger than the initial window (65535 bytes)
+        // stuck: the peer stopped sending and the request never completed.
+        if header.frame_type == FRAME_DATA && header.length > 0 {
+            let initial_window = DEFAULT_INITIAL_WINDOW_SIZE as i64;
+            if h2_conn.conn_recv_window < initial_window / 2 {
+                let replenish = initial_window - h2_conn.conn_recv_window;
+                let _ = send_window_update(stream, 0, replenish as u32);
+                h2_conn.conn_recv_window += replenish;
+            }
+            if let Some(s) = h2_conn.streams.get_mut(&header.stream_id)
+                && !s.end_stream_received
+                && s.recv_window < initial_window / 2
+            {
+                let replenish = initial_window - s.recv_window;
+                let _ = send_window_update(stream, header.stream_id, replenish as u32);
+                s.recv_window += replenish;
+            }
+        }
+
+        H2Step::Frame(completed_request)
+    }
+
     /// 2b/2c: HTTP/2 serve loop (Interpreter reference implementation).
     ///
     /// Accepts TLS connections with ALPN h2 negotiation, validates the HTTP/2
@@ -192,7 +317,6 @@ impl Interpreter {
     ) -> Result<(), RuntimeError> {
         use super::super::h2::*;
 
-        let mut settings_ack_pending = false;
         // NB6-38: Reusable buffer for frame reading — avoids per-frame heap allocation
         // on the hot path. read_frame_reuse() writes into this buffer and returns a
         // borrowed slice, so no allocation occurs after the initial capacity is reached.
@@ -204,132 +328,22 @@ impl Interpreter {
                 return Ok(());
             }
 
-            // Read next frame (NB6-38: reuse frame_buf to avoid per-frame heap alloc)
-            let (header, payload) = match read_frame_reuse(
-                stream,
-                h2_conn.local_settings.max_frame_size,
-                &mut frame_buf,
-            ) {
-                Ok(frame) => frame,
-                Err(H2Error::Io(ref e))
-                    if e.kind() == std::io::ErrorKind::UnexpectedEof
-                        || e.kind() == std::io::ErrorKind::ConnectionReset
-                        || e.kind() == std::io::ErrorKind::BrokenPipe =>
-                {
-                    // Clean connection close
-                    return Ok(());
-                }
-                Err(H2Error::Io(ref e))
-                    if e.kind() == std::io::ErrorKind::WouldBlock
-                        || e.kind() == std::io::ErrorKind::TimedOut =>
-                {
-                    // Timeout — close connection
-                    return Ok(());
-                }
-                Err(H2Error::Connection(error_code, ref msg)) => {
-                    // Protocol error — send GOAWAY and close
-                    let _ = send_goaway(
-                        stream,
-                        h2_conn.last_peer_stream_id,
-                        error_code,
-                        msg.as_bytes(),
-                    );
-                    h2_conn.goaway_sent = true;
-                    return Ok(());
-                }
-                Err(_) => return Ok(()),
+            // Requests that completed while a response waited for the peer's
+            // flow-control window go first, in arrival order.
+            let completed_request = match h2_conn.pending_requests.pop_front() {
+                Some(request) => Some(request),
+                None => match Self::h2_step(stream, h2_conn, &mut frame_buf) {
+                    H2Step::Frame(request) => request,
+                    H2Step::Close => return Ok(()),
+                },
             };
-
-            // Check if we need to send SETTINGS ACK after receiving client's SETTINGS
-            if header.frame_type == super::super::h2::FRAME_SETTINGS
-                && header.flags & super::super::h2::FLAG_ACK == 0
-            {
-                settings_ack_pending = true;
-            }
-
-            // Check for PING that needs response (NB6-38: minimal copy — PING is always 8 bytes)
-            let is_ping_needing_ack = header.frame_type == super::super::h2::FRAME_PING
-                && header.flags & super::super::h2::FLAG_ACK == 0;
-            let ping_data = if is_ping_needing_ack {
-                Some(payload.to_vec())
-            } else {
-                None
-            };
-
-            // Process frame through the h2 state machine
-            let completed_request = match process_frame(h2_conn, &header, payload) {
-                Ok(req) => req,
-                Err(H2Error::Connection(error_code, ref msg)) => {
-                    let _ = send_goaway(
-                        stream,
-                        h2_conn.last_peer_stream_id,
-                        error_code,
-                        msg.as_bytes(),
-                    );
-                    h2_conn.goaway_sent = true;
-                    return Ok(());
-                }
-                Err(H2Error::Stream(stream_id, error_code, _)) => {
-                    let _ = send_rst_stream(stream, stream_id, error_code);
-                    // Drop the reset stream so its accumulated `request_body`
-                    // is freed immediately (parity with native
-                    // `h2_conn_remove_closed_streams`). Without this, a body
-                    // accumulated up to MAX_REQUEST_BODY_SIZE before the cap
-                    // tripped would linger in the `streams` map until the
-                    // connection closed, undermining the OOM cap (G1).
-                    h2_conn.streams.remove(&stream_id);
-                    continue;
-                }
-                Err(H2Error::Compression(ref msg)) => {
-                    let _ = send_goaway(
-                        stream,
-                        h2_conn.last_peer_stream_id,
-                        0x9, // COMPRESSION_ERROR
-                        msg.as_bytes(),
-                    );
-                    h2_conn.goaway_sent = true;
-                    return Ok(());
-                }
-                Err(H2Error::Io(_)) => return Ok(()),
-            };
-
-            // Send SETTINGS ACK if needed
-            if settings_ack_pending {
-                if send_settings_ack(stream).is_err() {
-                    return Ok(());
-                }
-                settings_ack_pending = false;
-            }
-
-            // Send PING ACK if needed
-            if ping_data
-                .as_ref()
-                .is_some_and(|data| send_ping_ack(stream, data).is_err())
-            {
-                return Ok(());
-            }
 
             // If a request is complete, dispatch to handler
             if let Some((stream_id, h2_headers, body)) = completed_request {
-                // NB6-42: Only send WINDOW_UPDATE when window drops below half of initial.
-                // Avoids per-DATA-frame WINDOW_UPDATE overhead for small bodies.
-                let data_received = body.len() as u32;
-                if data_received > 0 {
-                    let initial_window = DEFAULT_INITIAL_WINDOW_SIZE as i64;
-                    // Connection window
-                    if h2_conn.conn_recv_window < initial_window / 2 {
-                        let replenish = initial_window - h2_conn.conn_recv_window;
-                        let _ = send_window_update(stream, 0, replenish as u32);
-                        h2_conn.conn_recv_window += replenish;
-                    }
-                    // Stream window
-                    if let Some(s) = h2_conn.streams.get_mut(&stream_id)
-                        && s.recv_window < initial_window / 2
-                    {
-                        let replenish = initial_window - s.recv_window;
-                        let _ = send_window_update(stream, stream_id, replenish as u32);
-                        s.recv_window += replenish;
-                    }
+                // A pending request whose stream the peer reset in the
+                // meantime gets no response.
+                if !h2_conn.streams.contains_key(&stream_id) {
+                    continue;
                 }
 
                 // Convert h2 pseudo-headers + headers into request pack
@@ -728,40 +742,63 @@ impl Interpreter {
             }
 
             // Send DATA with END_STREAM, respecting flow control windows.
-            // We need mutable access to both conn_send_window and
-            // stream.send_window. To satisfy the borrow checker, copy
-            // the stream window out, call the function, then write it back.
-            let mut stream_sw = h2_conn
-                .streams
-                .get(&stream_id)
-                .map_or(i64::MAX, |s| s.send_window);
-            let data_result = send_response_data(
-                stream,
-                stream_id,
-                &body_bytes,
-                true,
-                h2_conn.peer_settings.max_frame_size,
-                &mut h2_conn.conn_send_window,
-                &mut stream_sw,
-            );
-            // Write back the updated stream send window.
-            if let Some(s) = h2_conn.streams.get_mut(&stream_id) {
-                s.send_window = stream_sw;
-            }
-
-            if let Err(e) = data_result {
-                // Flow control window exhausted or I/O error.
-                // In a full async implementation we would wait for WINDOW_UPDATE,
-                // but this blocking interpreter cannot read frames during a
-                // synchronous write path. Send RST_STREAM to cleanly abort the
-                // stream so the peer does not hang waiting for the remaining body.
-                let _ = send_rst_stream(stream, stream_id, ERROR_FLOW_CONTROL_ERROR);
-                return Err(RuntimeError {
-                    message: format!(
-                        "httpServe h2: failed to send response body on stream {}: {}",
-                        stream_id, e
-                    ),
-                });
+            // When a window is used up, keep reading frames until the peer
+            // opens it again (WINDOW_UPDATE, or SETTINGS changing the initial
+            // window). Requests that complete in the meantime are queued in
+            // `pending_requests`. Giving up instead (RST_STREAM) cut every
+            // response larger than the peer's window, 65535 bytes by default.
+            let total = body_bytes.len();
+            let mut sent = 0usize;
+            let mut wait_buf: Vec<u8> = Vec::new();
+            while sent < total {
+                let Some(stream_window) = h2_conn.streams.get(&stream_id).map(|s| s.send_window)
+                else {
+                    // The peer reset the stream while we waited.
+                    return Ok(());
+                };
+                let chunk = (total - sent)
+                    .min(h2_conn.conn_send_window.max(0) as usize)
+                    .min(stream_window.max(0) as usize);
+                if chunk == 0 {
+                    match Self::h2_step(stream, h2_conn, &mut wait_buf) {
+                        H2Step::Frame(Some(request)) => h2_conn.pending_requests.push_back(request),
+                        H2Step::Frame(None) => {}
+                        H2Step::Close => {
+                            return Err(RuntimeError {
+                                message: format!(
+                                    "httpServe h2: connection closed while waiting to send the response body on stream {}",
+                                    stream_id
+                                ),
+                            });
+                        }
+                    }
+                    continue;
+                }
+                // Everything in `sent..end` fits both windows, so the call
+                // below writes it all (split by the peer's max frame size).
+                let end = sent + chunk;
+                let mut stream_sw = stream_window;
+                let data_result = send_response_data(
+                    stream,
+                    stream_id,
+                    &body_bytes[sent..end],
+                    end == total,
+                    h2_conn.peer_settings.max_frame_size,
+                    &mut h2_conn.conn_send_window,
+                    &mut stream_sw,
+                );
+                if let Some(s) = h2_conn.streams.get_mut(&stream_id) {
+                    s.send_window = stream_sw;
+                }
+                if let Err(e) = data_result {
+                    return Err(RuntimeError {
+                        message: format!(
+                            "httpServe h2: failed to send response body on stream {}: {}",
+                            stream_id, e
+                        ),
+                    });
+                }
+                sent = end;
             }
         }
 

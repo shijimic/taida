@@ -133,6 +133,8 @@ rejected `Async[Out]` になります。通常の `Async` と同じく error cei
 受けられます。
 
 ```taida
+>>> taida-lang/abi => @(WebRequest, WebResponse, text, HostCapability, HostStep, HostCall)
+
 handle req: WebRequest =
   |== error: Error =
     text("host error: " + error.message)
@@ -344,6 +346,12 @@ Native / WASM の bridge は、欠落または解釈できない request フィ�
 
 Native / WASM handler bridge は 1 request の wire JSON を最大 16MiB として
 扱います。上限を超える request は 413 response に変換されます。
+
+WASM の生成済み Edge glue は、response の `status` をそのまま Fetch の
+`Response` に渡します。`204` / `205` / `304` は本文を持てない status なので、
+glue は本文を付けずに返します。Fetch の `Response` は `100`〜`199` の
+status を表せないため、handler がこの範囲を返した場合、glue は理由を本文に
+書いた `500` (`x-taida-error: abi`) を返します。
 
 WASM の生成済み Edge glue は fetch ごとに新しい WebAssembly instance を作り、
 request 完了時に破棄します。独自 host で同じ instance を複数 request に再利用

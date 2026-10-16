@@ -52,7 +52,7 @@ impl Interpreter {
                     Value::Json(j) => j.clone(),
                     _ => crate::interpreter::json::taida_value_to_json_with_enum_defs(
                         &value,
-                        &self.enum_defs,
+                        &self.enum_variants,
                     ),
                 };
                 let body = serde_json::to_vec(&json).unwrap_or_default();

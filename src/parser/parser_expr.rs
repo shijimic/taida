@@ -759,6 +759,7 @@ impl Parser {
                     value,
                     doc_comments: Vec::new(),
                     span: first_span,
+                    forward: true,
                 })];
                 Self::validate_cond_arm_body(&body)?;
                 return Ok(body);

@@ -218,9 +218,10 @@ Graph = @(
 
 | `kind` | 説明 | 抽出元 |
 |--------|------|--------|
-| `Calls` | 関数呼び出し | `func(args)` |
+| `Calls` | 関数呼び出し。関数値としての使用も含む | `func(args)`、`Map[xs, funcB]()`、`f <= funcB` |
 | `TailCalls` | 末尾呼び出し | 末尾位置での `func(args)` |
 | `CallsLambda` | 無名関数の呼び出し | `Map[..., _ x = ...]()` |
+| `References` | 呼び出しを伴わない参照 | 入れ子の関数の本体・パラメータの既定値にある `funcB(args)` |
 
 ### 抽出規則
 
@@ -229,6 +230,10 @@ Graph = @(
 | 関数A内の `funcB(args)` | `A -> funcB`: Calls |
 | 関数A内の末尾位置の `funcB(args)` | `A -> funcB`: TailCalls |
 | 関数A内の `Map[data, _ x = ...]()` | `A -> _lambda_N`: CallsLambda |
+| 関数A内の関数値としての `funcB`(引数・束縛など) | `A -> funcB`: Calls |
+| 関数A内の入れ子の関数の本体にある `funcB(args)` | `A -> funcB`: References |
+
+呼び出しは、演算子の中・ぶちパックや型のフィールド値・テンプレートの補間・分岐の腕・メソッド本体など、式の書かれた位置によらず拾います。パイプラインの 2 段目以降に関数名だけを置いた段 (`x => funcB => y`) は `funcB` の呼び出しなので `Calls` です。関数の中で束縛した名前(パラメータ・ローカル変数・ラムダのパラメータ・入れ子の関数)を呼んだ場合は、その値を呼んでいるので、同名のトップレベル関数へのエッジは作りません(束縛は、束縛した文の後ろ、またはそのブロックの終わりまで有効です。入れ子の関数の名前は、その関数自身の本体の中でも有効です)。関数値として使った関数(`Map[xs, funcB]()` のような引数、`f <= funcB` のような束縛)は、関数が動いている間に呼ばれうるので、ラムダの本体からの呼び出しと同じく、末尾でない `Calls` として扱います。トップレベルの関数の中で定義した型のメソッドやフィールド既定値、入れ子の関数の本体、パラメータの既定値から呼ぶ関数は、呼び出しではなく `References` になります。`References` は関数を到達可能にしますが呼び出しではないので、再帰の検査(`mutual-recursion` / `mutual-recursion-native`)のサイクルには数えません。型のメソッドの本体とトップレベルの式は `Entrypoint` から呼ばれるものとして扱います。
 
 ---
 
@@ -463,6 +468,9 @@ taida way verify [--check CHECK] [--format FORMAT] <PATH>
 | `no-circular-deps` | error | モジュール循環依存検出 |
 | `dead-code` | warning | 到達不能関数検出 |
 | `type-consistency` | error | 型階層の循環検出 |
+| `mutual-recursion` | error | 相互再帰構造の検証 |
+| `mutual-recursion-native` | error | Native / WASM で末尾のみの相互再帰サイクルに含まれない相互再帰の拒否 |
+| `direct-non-tail-recursion` | error | 末尾位置にない直接再帰の拒否 |
 | `unchecked-division` | warning | 除算安全性チェック枠（現行構文では通常 finding なし） |
 | `direction-constraint` | error | 単一方向制約の検証 |
 | `unchecked-lax` | warning | Lax 未検査利用検出 |

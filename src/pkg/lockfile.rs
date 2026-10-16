@@ -451,7 +451,11 @@ impl Lockfile {
                     dep_path.display()
                 ));
             }
-            pkg.integrity = compute_dir_hash(&dep_path).map_err(|e| {
+            // An addon's installed directory holds links plus the project's
+            // own prebuild binary; the integrity is that of the package it
+            // links to.
+            let package_dir = super::resolver::installed_package_dir(&dep_path);
+            pkg.integrity = compute_dir_hash(&package_dir).map_err(|e| {
                 format!(
                     "[E32K2_LOCKFILE_MIGRATE_FAIL] cannot compute SHA-256 for '{}': {}",
                     pkg.name, e

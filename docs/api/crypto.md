@@ -50,6 +50,8 @@ sha224 value: Str => :Str
 **Example**:
 
 ```taida
+>>> taida-lang/crypto => @(sha256, sha512)
+
 sha256("abc") => h256
 // h256 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
 sha512("abc") => h512
@@ -87,6 +89,8 @@ hmacSha256 key: Bytes, data: Bytes => :Str
 **Example**:
 
 ```taida
+>>> taida-lang/crypto => @(hmacSha256)
+
 hmacSha256("Jefe", "what do ya want for nothing?") => mac
 // mac = "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
 ```
@@ -124,6 +128,8 @@ constantTimeEquals a: Bytes, b: Bytes => :Bool
 **Example**:
 
 ```taida
+>>> taida-lang/crypto => @(constantTimeEquals)
+
 constantTimeEquals(expectedMac, actualMac) => ok
 ```
 
@@ -148,6 +154,8 @@ RFC 4648 標準アルファベット (`A–Z a–z 0–9 + /`) + `=` パディ�
 **Example**:
 
 ```taida
+>>> taida-lang/crypto => @(hexEncode, base64Encode)
+
 hexEncode("Hi") => h        // h = "4869"
 base64Encode("foobar") => b // b = "Zm9vYmFy"
 ```
@@ -180,6 +188,8 @@ base64Decode b64: Str => :Lax[Bytes]
 **Example**:
 
 ```taida
+>>> taida-lang/crypto => @(hexDecode, hexEncode, base64Decode)
+
 hexDecode("4869") >=> raw          // raw = Bytes["Hi"]
 hexEncode(raw) => back             // back = "4869"
 
@@ -217,6 +227,8 @@ randomBytes n: Int => :Bytes
 **Example**:
 
 ```taida
+>>> taida-lang/crypto => @(randomBytes, hexEncode)
+
 randomBytes(32) => token         // 32 バイトのトークン
 hexEncode(token) => tokenHex
 ```

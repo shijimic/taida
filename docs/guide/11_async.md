@@ -18,7 +18,7 @@
 
 `>=>` でアンモールドすると、暗黙的に await として機能します。待ち方を考える必要はありません。
 
-```taida
+```taida fragment
 // 非同期操作の結果を取得します
 result <= someAsyncOp()
 result >=> data  // ここでブロックして解決を待ちます
@@ -54,7 +54,7 @@ rejected <= AsyncReject["timeout error"]()
 
 複数の非同期操作を順番に実行するには、`>=>` で一つずつ結果を取り出します。
 
-```taida
+```taida fragment
 // ユーザーを取得して、そのユーザーの投稿を取得します
 userAsync <= fetchUser(1)
 userAsync >=> user
@@ -65,7 +65,7 @@ stdout(posts)
 
 関数にまとめることもできます。
 
-```taida
+```taida fragment
 fetchUserPosts userId: Int =
   |== error: Error =
     @[]
@@ -85,7 +85,7 @@ fetchUserPosts userId: Int =
 
 `map` メソッドで、非同期値を同期的に変換できます。非同期操作自体は増えません。
 
-```taida
+```taida fragment
 nameAsync <= fetchUser(1).map(_ user = Upper[user.name]())
 // nameAsync: Async[Str]
 
@@ -99,7 +99,7 @@ stdout(name)  // 大文字に変換されたユーザー名
 
 `getOrDefault` を使うと、解決を待たずにデフォルト値を返すことができます。
 
-```taida
+```taida fragment
 result <= someAsyncOp()
 data <= result.getOrDefault(@(items <= @[]))
 // pending や rejected の場合はデフォルト値を返します
@@ -111,7 +111,7 @@ data <= result.getOrDefault(@(items <= @[]))
 
 エラー天井 `|==` を使って非同期操作のエラーを処理します。`>=>` でアンモールドした際にエラーが発生すると、エラー天井にジャンプします。
 
-```taida
+```taida fragment
 fetchData id: Int =
   |== error: Error =
     @(found <= false, data <= "")
@@ -150,7 +150,7 @@ waitAnswer =
 
 末尾再帰と組み合わせたリトライパターンです。
 
-```taida
+```taida fragment
 retryLoop maxRetries: Int attempt: Int =
   |== error: Error =
     | attempt < maxRetries |> retryLoop(maxRetries, attempt + 1)

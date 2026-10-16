@@ -5,7 +5,7 @@
 // placement table). All methods keep their
 // original signatures, bodies, and privacy; only the enclosing file changes.
 
-use super::{LowerError, Lowering};
+use super::{HIDDEN, LowerError, Lowering};
 use crate::codegen::ir::*;
 use crate::parser::*;
 
@@ -18,6 +18,9 @@ impl Lowering {
     /// Lambda は除外: キャプチャありのクロージャのみヒープ（closure_vars で判定）
     /// 式が float 値を返すかどうかを判定
     pub(crate) fn expr_returns_float(&self, expr: &Expr) -> bool {
+        if let Some(tag) = self.checked_tag(expr) {
+            return tag == crate::codegen::tag_prop::TAG_FLOAT;
+        }
         match expr {
             Expr::FloatLit(_, _) => true,
             Expr::FuncCall(callee, _, _) => {
@@ -129,6 +132,20 @@ impl Lowering {
     /// literal or a variable tracked via `list_element_types` (literal
     /// binding or parameter annotation).
     pub(crate) fn static_list_elem_kind(&self, expr: &Expr) -> Option<&'static str> {
+        use crate::types::Type;
+        match self.typed_expr_table.lookup(expr) {
+            Some(Type::List(elem)) => {
+                return match elem.as_ref() {
+                    Type::Float => Some("Float"),
+                    Type::Int => Some("Int"),
+                    Type::Str => Some("Str"),
+                    Type::Bool => Some("Bool"),
+                    _ => None,
+                };
+            }
+            Some(Type::Unknown | Type::Any) | None => {}
+            Some(_) => return None,
+        }
         match expr {
             Expr::ListLit(items, _) if !items.is_empty() => {
                 if items.iter().all(|i| self.expr_returns_float(i)) {
@@ -158,6 +175,12 @@ impl Lowering {
     /// Float expression, or a variable tracked as `@[Float]` (literal
     /// binding or parameter annotation) via `list_element_types`.
     pub(crate) fn expr_is_float_list(&self, expr: &Expr) -> bool {
+        use crate::types::Type;
+        match self.typed_expr_table.lookup(expr) {
+            Some(Type::List(elem)) => return matches!(elem.as_ref(), Type::Float),
+            Some(Type::Unknown | Type::Any) | None => {}
+            Some(_) => return false,
+        }
         match expr {
             Expr::ListLit(items, _) => {
                 !items.is_empty() && items.iter().all(|i| self.expr_returns_float(i))
@@ -172,6 +195,9 @@ impl Lowering {
 
     /// 式が文字列を返すかどうかを判定（静的に推測可能な場合のみ、変数名の追跡あり）
     pub(crate) fn expr_is_string_full(&self, expr: &Expr) -> bool {
+        if let Some(tag) = self.checked_tag(expr) {
+            return tag == crate::codegen::tag_prop::TAG_STR;
+        }
         match expr {
             Expr::StringLit(_, _) | Expr::TemplateLit(_, _) => true,
             Expr::Ident(name, _) => self.string_vars.contains(name),
@@ -263,6 +289,9 @@ impl Lowering {
 
     /// FL-16: 式の型がコンパイル時に不明かどうかを判定（untyped パラメータ等）
     pub(super) fn expr_type_is_unknown(&self, expr: &Expr) -> bool {
+        if self.checked_tag(expr).is_some() {
+            return false;
+        }
         match expr {
             Expr::Ident(name, _) => {
                 !self.int_vars.contains(name)
@@ -275,6 +304,18 @@ impl Lowering {
                     && !self.top_level_vars.contains(name)
                     && !self.user_funcs.contains(name)
                     && !self.stdlib_constants.contains_key(name)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the checker typed `expr` as a value of `Error` or of a type
+    /// that inherits from it.
+    pub(crate) fn expr_is_error_value(&self, expr: &Expr) -> bool {
+        match self.typed_expr_table.lookup(expr) {
+            Some(crate::types::Type::Error(_)) => true,
+            Some(crate::types::Type::Named(name)) => {
+                name == "Error" || self.check_type_inheritance(name, "Error")
             }
             _ => false,
         }
@@ -501,6 +542,15 @@ impl Lowering {
     /// F-58: 式が BuchiPack/TypeInst を返すかどうかを判定
     /// BuchiPack フィールドの関数呼び出しが組み込みメソッド名と衝突するのを防ぐため
     pub(crate) fn expr_is_pack(&self, expr: &Expr) -> bool {
+        use crate::types::Type;
+        match self.typed_expr_table.lookup(expr) {
+            Some(Type::BuchiPack(_) | Type::Error(_)) => return true,
+            Some(ty @ Type::Named(_)) => {
+                return self.type_runtime_tag(ty) == Some(crate::codegen::tag_prop::TAG_PACK);
+            }
+            Some(Type::Unknown | Type::Any) | None => {}
+            Some(_) => return false,
+        }
         match expr {
             Expr::BuchiPack(_, _) => true,
             Expr::TypeInst(_, _, _) => true,
@@ -523,6 +573,9 @@ impl Lowering {
 
     /// retain-on-store: 式が List を返すかどうかを判定
     pub(crate) fn expr_is_list(&self, expr: &Expr) -> bool {
+        if let Some(tag) = self.checked_tag(expr) {
+            return tag == crate::codegen::tag_prop::TAG_LIST;
+        }
         match expr {
             Expr::ListLit(_, _) => true,
             Expr::Ident(name, _) => self.list_vars.contains(name),
@@ -563,6 +616,9 @@ impl Lowering {
     /// use the richer Int check in the `Str[x]()` fast-path dispatch.
     /// No behavioural change — only the call surface widened.
     pub(crate) fn expr_is_int(&self, expr: &Expr) -> bool {
+        if let Some(tag) = self.checked_tag(expr) {
+            return tag == crate::codegen::tag_prop::TAG_INT;
+        }
         match expr {
             Expr::IntLit(_, _) => true,
             Expr::UnaryOp(UnaryOp::Neg, inner, _) => self.expr_is_int(inner),
@@ -595,7 +651,7 @@ impl Lowering {
     /// Value-tag track: capture a runtime "shadow kind" for an unmold
     /// target whose payload kind is only known at runtime — i.e. the
     /// source is a Lax-returning list accessor over a possibly mixed
-    /// list. The companion `__ekind__<name>` IR variable holds the kind
+    /// list. The companion `#ekind_<name>` IR variable holds the kind
     /// the runtime recorded on the Lax's `__value` field; tagged poly
     /// comparisons read it back so e.g. a Float pulled out of
     /// `@[1, 1.0]` compares to an Int literal under f64 semantics.
@@ -633,7 +689,7 @@ impl Lowering {
             "taida_lax_value_ekind".to_string(),
             vec![source_var],
         ));
-        func.push(IrInst::DefVar(format!("__ekind__{}", target), kind_var));
+        func.push(IrInst::DefVar(format!("{HIDDEN}ekind_{target}"), kind_var));
         self.shadow_kind_vars.insert(target.to_string());
     }
 
@@ -895,6 +951,16 @@ impl Lowering {
                 vec![var],
             ));
             Ok(result)
+        } else if self.expr_type_tag(expr) == crate::codegen::tag_prop::TAG_CLOSURE {
+            // A function value: WASM holds a named function as a table
+            // index, which only the static type tells apart from an Int.
+            let result = func.alloc_var();
+            func.push(IrInst::Call(
+                result,
+                "taida_function_to_string".to_string(),
+                vec![var],
+            ));
+            Ok(result)
         } else {
             // Default: polymorphic to_string (handles int, monadic types, etc.)
             let result = func.alloc_var();
@@ -912,6 +978,9 @@ impl Lowering {
     pub(crate) fn expr_is_likely_bool(&self, expr: &Expr) -> bool {
         if self.expr_is_bool(expr) {
             return true;
+        }
+        if let Some(tag) = self.checked_tag(expr) {
+            return tag == crate::codegen::tag_prop::TAG_BOOL;
         }
 
         match expr {

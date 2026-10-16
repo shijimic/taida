@@ -44,14 +44,30 @@ impl Sha256 {
 
     pub fn update(&mut self, data: &[u8]) {
         self.total_len += data.len() as u64;
-        self.buffer.extend_from_slice(data);
+        let mut block = [0u8; 64];
+        let mut data = data;
 
-        while self.buffer.len() >= 64 {
-            let chunk = self.buffer.drain(..64).collect::<Vec<_>>();
-            let mut block = [0u8; 64];
-            block.copy_from_slice(&chunk);
+        // Complete a block left partially filled by an earlier call.
+        if !self.buffer.is_empty() {
+            let take = (64 - self.buffer.len()).min(data.len());
+            self.buffer.extend_from_slice(&data[..take]);
+            data = &data[take..];
+            if self.buffer.len() < 64 {
+                return;
+            }
+            block.copy_from_slice(&self.buffer);
+            Self::process_block(&mut self.h, &block);
+            self.buffer.clear();
+        }
+
+        // Hash whole blocks straight from the input and buffer only the
+        // tail, so one call over a large input stays linear in its length.
+        let mut blocks = data.chunks_exact(64);
+        for chunk in &mut blocks {
+            block.copy_from_slice(chunk);
             Self::process_block(&mut self.h, &block);
         }
+        self.buffer.extend_from_slice(blocks.remainder());
     }
 
     pub fn finalize(mut self) -> [u8; 32] {
@@ -270,13 +286,29 @@ impl Sha512Core {
 
     fn update(&mut self, data: &[u8]) {
         self.total_len += data.len() as u128;
-        self.buffer.extend_from_slice(data);
-        while self.buffer.len() >= 128 {
-            let chunk = self.buffer.drain(..128).collect::<Vec<_>>();
-            let mut block = [0u8; 128];
-            block.copy_from_slice(&chunk);
+        let mut block = [0u8; 128];
+        let mut data = data;
+
+        // Same scheme as `Sha256::update`: finish the pending block, then
+        // hash whole blocks from the input and buffer only the tail.
+        if !self.buffer.is_empty() {
+            let take = (128 - self.buffer.len()).min(data.len());
+            self.buffer.extend_from_slice(&data[..take]);
+            data = &data[take..];
+            if self.buffer.len() < 128 {
+                return;
+            }
+            block.copy_from_slice(&self.buffer);
+            Self::process_block(&mut self.h, &block);
+            self.buffer.clear();
+        }
+
+        let mut blocks = data.chunks_exact(128);
+        for chunk in &mut blocks {
+            block.copy_from_slice(chunk);
             Self::process_block(&mut self.h, &block);
         }
+        self.buffer.extend_from_slice(blocks.remainder());
     }
 
     fn finalize(mut self) -> Vec<u8> {
@@ -620,7 +652,11 @@ fn b64_val(c: u8) -> Option<u8> {
 /// throw to the Taida surface.
 pub fn random_bytes(n: usize) -> Result<Vec<u8>, String> {
     use std::io::Read;
-    let mut buf = vec![0u8; n];
+    let mut buf = Vec::new();
+    if buf.try_reserve_exact(n).is_err() {
+        return Err(format!("randomBytes: cannot allocate {} bytes", n));
+    }
+    buf.resize(n, 0);
     if n == 0 {
         return Ok(buf);
     }
@@ -744,6 +780,57 @@ mod tests {
         c.update(b" ");
         c.update(b"world");
         assert_eq!(c.finalize_hex(), sha512_hex_bytes(b"hello world"));
+    }
+
+    #[test]
+    fn sha_split_points_match_one_shot() {
+        // Every split of inputs around the block sizes must give the same
+        // digest as hashing the whole input at once.
+        let data: Vec<u8> = (0..300u32).map(|i| (i * 7 + 3) as u8).collect();
+        for len in [0usize, 1, 63, 64, 65, 127, 128, 129, 191, 255, 256, 300] {
+            let input = &data[..len];
+            let one_shot_256 = sha256_hex_bytes(input);
+            let one_shot_512 = sha512_hex_bytes(input);
+            for split in 0..=len {
+                for second in [split, (split + len) / 2] {
+                    let (a, rest) = input.split_at(split);
+                    let (b, c) = rest.split_at(second - split);
+                    let mut h256 = Sha256::new();
+                    let mut h512 = Sha512Core::new(SHA512_IV, 64);
+                    for part in [a, b, c] {
+                        h256.update(part);
+                        h512.update(part);
+                    }
+                    assert_eq!(h256.finalize_hex(), one_shot_256, "len={len} split={split}");
+                    assert_eq!(h512.finalize_hex(), one_shot_512, "len={len} split={split}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sha_million_a_vectors() {
+        // NIST long-message vectors; also a one-call input far larger
+        // than one block.
+        let data = vec![b'a'; 1_000_000];
+        assert_eq!(
+            sha256_hex_bytes(&data),
+            "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
+        );
+        assert_eq!(
+            sha224_hex_bytes(&data),
+            "20794655980c91d8bbb4c1ea97618a4bf03f42581948b2ee4ee7ad67"
+        );
+        assert_eq!(
+            sha512_hex_bytes(&data),
+            "e718483d0ce769644e2e42c7bc15b4638e1f98b13b2044285632a803afa973eb\
+             de0ff244877ea60a4cb0432ce577c31beb009c5c2c49aa2e4eadb217ad8cc09b"
+        );
+        assert_eq!(
+            sha384_hex_bytes(&data),
+            "9d0e1809716474cb086e834e310a4a1ced149e9c00f24852\
+             7972cec5704c2a5b07b8b3dc38ecc4ebae97ddd87f3d8985"
+        );
     }
 
     // ── HMAC-SHA256 RFC 4231 ───────────────────────────────────────────

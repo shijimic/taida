@@ -2,15 +2,16 @@ use std::path::{Path, PathBuf};
 
 /// Find a Taida project root by walking up from `start_dir`.
 ///
-/// `.taida/` is state/config storage, not a project-root marker. A `.git`
-/// directory is accepted for normal projects, but not when it is the ambient
-/// marker on the system temp directory itself.
+/// `.taida/` is state/config storage, not a project-root marker. Markers
+/// (`packages.tdm`, `taida.toml`, `.git`) are ignored when they sit directly
+/// in a shared temporary directory (see [`is_shared_temp_dir`]).
 pub(crate) fn find_project_root(start_dir: &Path) -> PathBuf {
     let mut dir = start_dir.to_path_buf();
     loop {
-        if dir.join("packages.tdm").exists()
+        if (dir.join("packages.tdm").exists()
             || dir.join("taida.toml").exists()
-            || has_project_git_marker(&dir)
+            || has_project_git_marker(&dir))
+            && !is_shared_temp_dir(&dir)
         {
             return dir;
         }
@@ -21,14 +22,33 @@ pub(crate) fn find_project_root(start_dir: &Path) -> PathBuf {
     start_dir.to_path_buf()
 }
 
+/// Whether `dir` is a shared temporary directory: the system temp
+/// directory itself, or (on Unix) any world-writable directory with the
+/// sticky bit, such as `/tmp`, `/var/tmp` or `/dev/shm`.
+///
+/// Every local user can create entries in such a directory, so a
+/// `packages.tdm`, `taida.toml`, `.git` or `.taida/deps/` found there says
+/// nothing about the project of a script below it. It is never used as a
+/// project root, and its `.taida/deps/` is never searched for packages.
+pub fn is_shared_temp_dir(dir: &Path) -> bool {
+    if paths_equal(dir, &std::env::temp_dir()) {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        const STICKY_AND_WORLD_WRITABLE: u32 = 0o1002;
+        if let Ok(meta) = std::fs::metadata(dir) {
+            return meta.permissions().mode() & STICKY_AND_WORLD_WRITABLE
+                == STICKY_AND_WORLD_WRITABLE;
+        }
+    }
+    false
+}
+
 fn has_project_git_marker(dir: &Path) -> bool {
     let git = dir.join(".git");
     if !git.exists() {
-        return false;
-    }
-
-    let temp_dir = std::env::temp_dir();
-    if paths_equal(dir, &temp_dir) {
         return false;
     }
 

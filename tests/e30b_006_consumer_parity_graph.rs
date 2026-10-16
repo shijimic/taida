@@ -51,8 +51,9 @@ fn test_e30b_006_structural_summary_mold_kind() {
     let (program, _) = parse(source);
     let summary = structural_summary(&program, "test.td");
 
-    // Mold[T] base node + Box node の 2 nodes (両方 ClassLikeType)
-    assert!(summary.contains("\"types\": 2"), "summary: {}", summary);
+    // One definition. The `Mold[T]` base node of the hierarchy graph is not
+    // a definition of this program and is not counted.
+    assert!(summary.contains("\"types\": 1"), "summary: {}", summary);
     // mold_types は子 ("Box") のみ含む — base node "Mold[T]" は除外
     assert!(
         summary.contains("\"mold_types\": [\"Box\"]"),
@@ -74,8 +75,9 @@ fn test_e30b_006_structural_summary_error_inheritance() {
     let (program, _) = parse(source);
     let summary = structural_summary(&program, "test.td");
 
-    // Error base + NotFound child の 2 nodes
-    assert!(summary.contains("\"types\": 2"), "summary: {}", summary);
+    // One definition. The `Error` base node of the hierarchy graph is not a
+    // definition of this program and is not counted.
+    assert!(summary.contains("\"types\": 1"), "summary: {}", summary);
     assert!(
         summary.contains("\"error_types\": [\"NotFound\"]"),
         "summary: {}",

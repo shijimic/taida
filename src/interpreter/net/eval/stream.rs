@@ -949,7 +949,12 @@ impl Interpreter {
                                 .into(),
                         });
                     }
-                    break;
+                    // The rest of the line may still arrive; returning the
+                    // fragment as a whole line would mis-frame the body (a
+                    // chunk-size `10` split as `1` + `0` read as size 1).
+                    return Err(RuntimeError {
+                        message: "chunked body error: read timeout inside a chunk line".into(),
+                    });
                 }
                 Err(e) => {
                     return Err(RuntimeError {

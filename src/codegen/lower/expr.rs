@@ -5,12 +5,184 @@
 // placement table). All methods keep their
 // original signatures, bodies, and privacy; only the enclosing file changes.
 
-use super::{LowerError, Lowering, OS_NET_DEFAULT_TIMEOUT_MS, simple_hash};
+use super::{HIDDEN, LowerError, Lowering, OS_NET_DEFAULT_TIMEOUT_MS, PIPE_PREV, simple_hash};
 use crate::codegen::ir::*;
 use crate::parser::*;
 
 impl Lowering {
     pub(crate) fn lower_expr(
+        &mut self,
+        func: &mut IrFunction,
+        expr: &Expr,
+    ) -> Result<IrVar, LowerError> {
+        let value = self.lower_expr_value(func, expr)?;
+        if matches!(
+            expr,
+            Expr::MoldInst(..) | Expr::MethodCall(..) | Expr::FuncCall(..)
+        ) {
+            self.stamp_payload_kind(func, expr, value);
+        }
+        if let Expr::MethodCall(obj, method, _, _) = expr
+            && matches!(method.as_str(), "get" | "first" | "last")
+        {
+            self.fill_static_miss_default(func, obj, method, value)?;
+        }
+        if let Expr::MoldInst(name, type_args, _, _) = expr
+            && name == "Find"
+            && let Some(list) = type_args.first()
+        {
+            self.fill_static_miss_default(func, list, "first", value)?;
+        }
+        Ok(value)
+    }
+
+    /// A lookup that finds nothing (`get` / `first` / `last` / `Find` on a
+    /// list, `get` on a HashMap) yields the default of the element's static
+    /// type, as the interpreter's does. The runtime knows only the element's
+    /// kind (none for an empty map), which fixes no pack, list or map, so the
+    /// lowering builds the default — only when the lookup found nothing.
+    fn fill_static_miss_default(
+        &mut self,
+        func: &mut IrFunction,
+        obj: &Expr,
+        method: &str,
+        lax: IrVar,
+    ) -> Result<(), LowerError> {
+        use crate::types::Type;
+        let elem = match self.typed_expr_table.lookup(obj) {
+            Some(Type::List(elem)) => (**elem).clone(),
+            Some(Type::Generic(name, args))
+                if name == "HashMap" && args.len() == 2 && method == "get" =>
+            {
+                args[1].clone()
+            }
+            _ => return Ok(()),
+        };
+        let Some(type_expr) = Self::type_expr_of(&elem) else {
+            return Ok(());
+        };
+        let slot = func.alloc_var();
+        func.push(IrInst::ConstInt(slot, 0));
+        let found = func.alloc_var();
+        func.push(IrInst::Call(
+            found,
+            "taida_pack_get_idx".to_string(),
+            vec![lax, slot],
+        ));
+        let saved = std::mem::take(&mut func.body);
+        let default = self.lower_default_for_type_expr(
+            func,
+            &type_expr,
+            &mut std::collections::HashSet::new(),
+        )?;
+        let tag = func.alloc_var();
+        func.push(IrInst::ConstInt(tag, self.type_expr_to_tag(&type_expr)));
+        let filled = func.alloc_var();
+        func.push(IrInst::Call(
+            filled,
+            "taida_lax_fill_default".to_string(),
+            vec![lax, default, tag],
+        ));
+        let fill = std::mem::replace(&mut func.body, saved);
+        let out = func.alloc_var();
+        func.push(IrInst::CondBranch(
+            out,
+            vec![
+                crate::codegen::ir::CondArm {
+                    condition: Some(found),
+                    body: Vec::new(),
+                    result: lax,
+                },
+                crate::codegen::ir::CondArm {
+                    condition: None,
+                    body: fill,
+                    result: filled,
+                },
+            ],
+        ));
+        Ok(())
+    }
+
+    /// The type annotation naming the checker type `ty`, for the default
+    /// builder; `None` for a type it has no annotation for.
+    fn type_expr_of(ty: &crate::types::Type) -> Option<TypeExpr> {
+        use crate::types::Type;
+        Some(match ty {
+            Type::Int => TypeExpr::Named("Int".to_string()),
+            Type::Float => TypeExpr::Named("Float".to_string()),
+            Type::Str => TypeExpr::Named("Str".to_string()),
+            Type::Bool => TypeExpr::Named("Bool".to_string()),
+            Type::List(inner) => TypeExpr::List(Box::new(Self::type_expr_of(inner)?)),
+            Type::BuchiPack(fields) => TypeExpr::BuchiPack(
+                fields
+                    .iter()
+                    .map(|(name, field_ty)| {
+                        Some(FieldDef {
+                            name: name.clone(),
+                            type_annotation: Some(Self::type_expr_of(field_ty)?),
+                            default_value: None,
+                            is_method: false,
+                            method_def: None,
+                            doc_comments: Vec::new(),
+                            span: crate::lexer::Span::new(0, 0, 0, 0),
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()?,
+            ),
+            Type::Named(name) => TypeExpr::Named(name.clone()),
+            // An empty map or set, whatever it would hold.
+            Type::Generic(name, _) if name == "HashMap" || name == "Set" => {
+                TypeExpr::Named(name.clone())
+            }
+            Type::Generic(name, args) => TypeExpr::Generic(
+                name.clone(),
+                args.iter()
+                    .map(Self::type_expr_of)
+                    .collect::<Option<Vec<_>>>()?,
+            ),
+            // A function returning its return type's default; the parameters
+            // are only counted.
+            Type::Function(params, ret) => TypeExpr::Function(
+                params
+                    .iter()
+                    .map(|p| {
+                        Self::type_expr_of(p).unwrap_or_else(|| TypeExpr::Named("Int".to_string()))
+                    })
+                    .collect(),
+                Box::new(Self::type_expr_of(ret)?),
+            ),
+            _ => return None,
+        })
+    }
+
+    /// A Lax, Gorillax or Result the checker knows to carry a Float, Bool or
+    /// Str: tag the slots holding it (`__value`, and a Lax's `__default`)
+    /// with that kind. The runtime cannot always tell the kind from the
+    /// payload (a Float's bits, a Str literal on native, any Str on WASM)
+    /// and would show it as a number.
+    fn stamp_payload_kind(&self, func: &mut IrFunction, expr: &Expr, mold: IrVar) {
+        use crate::types::Type;
+        let Some(Type::Generic(name, args)) = self.typed_expr_table.lookup(expr) else {
+            return;
+        };
+        let slots: &[usize] = match name.as_str() {
+            "Lax" => &[1, 2],
+            "Gorillax" | "RelaxedGorillax" => &[1],
+            "Result" => &[0],
+            _ => return,
+        };
+        let tag = match args.first() {
+            Some(Type::Float) => crate::codegen::tag_prop::TAG_FLOAT,
+            Some(Type::Bool) => crate::codegen::tag_prop::TAG_BOOL,
+            Some(Type::Str) => crate::codegen::tag_prop::TAG_STR,
+            _ => return,
+        };
+        for &slot in slots {
+            func.push(IrInst::PackSetTag(mold, slot, tag));
+        }
+    }
+
+    fn lower_expr_value(
         &mut self,
         func: &mut IrFunction,
         expr: &Expr,
@@ -49,15 +221,29 @@ impl Lowering {
                     func.push(IrInst::ConstFloat(var, val));
                     return Ok(var);
                 }
+                // 引数・局所変数は、同名のユーザー関数や組み込みより優先する
+                let locally_bound = Self::is_local_binding(func, name);
                 // ユーザー定義関数を値として参照する場合は FuncAddr を使う
-                if self.user_funcs.contains(name) {
+                if !locally_bound
+                    && (self.inner_func_symbol(name).is_some() || self.user_funcs.contains(name))
+                {
                     let mangled = self.resolve_user_func_symbol(name);
                     let var = func.alloc_var();
                     func.push(IrInst::FuncAddr(var, mangled));
-                    return Ok(var);
+                    // The value shows as `<function name>`.
+                    let name_var = func.alloc_var();
+                    func.push(IrInst::ConstStr(name_var, name.clone()));
+                    let named = func.alloc_var();
+                    func.push(IrInst::Call(
+                        named,
+                        "taida_register_fn_name".to_string(),
+                        vec![var, name_var],
+                    ));
+                    return Ok(named);
                 }
-                if !func.params.contains(name)
-                    && !Self::collect_defvar_names(&func.body).contains(name)
+                if !locally_bound
+                    && !self.top_level_vars.contains(name)
+                    && self.inner_func_symbol(name).is_none()
                     && let Some(runtime) = self.stdlib_runtime_funcs.get(name).cloned()
                     && let Some(arity) = crate::codegen::emit::runtime_callable_arity(&runtime)
                 {
@@ -73,7 +259,16 @@ impl Lowering {
                     self.lambda_funcs.push(wrapper);
                     let value = func.alloc_var();
                     func.push(IrInst::FuncAddr(value, symbol));
-                    return Ok(value);
+                    // The value shows as `<function name>`, like a user function.
+                    let name_var = func.alloc_var();
+                    func.push(IrInst::ConstStr(name_var, name.clone()));
+                    let named = func.alloc_var();
+                    func.push(IrInst::Call(
+                        named,
+                        "taida_register_fn_name".to_string(),
+                        vec![value, name_var],
+                    ));
+                    return Ok(named);
                 }
                 let var = func.alloc_var();
                 func.push(IrInst::UseVar(var, name.clone()));
@@ -150,7 +345,7 @@ impl Lowering {
                 ));
                 Ok(result)
             }
-            Expr::TemplateLit(template, _) => self.lower_template_lit(func, template),
+            Expr::TemplateLit(template, span) => self.lower_template_lit(func, template, span),
             // IndexAccess removed in v0.5.0 — use .get(i) instead
             Expr::Throw(inner, _) => {
                 let val = self.lower_expr(func, inner)?;
@@ -196,10 +391,28 @@ impl Lowering {
             Expr::FuncCall(callee, args, _) => {
                 if let Expr::Ident(name, _) = callee.as_ref()
                     && self.current_func_name.as_deref() == Some(name)
+                    && !Self::is_local_binding(func, name)
                 {
                     // 末尾位置の自己再帰 → TailCall
                     let arg_vars =
                         self.lower_user_call_effective_args_from_exprs(func, name, args)?;
+                    // Inside the body an error ceiling guards: the
+                    // parameters live in the body's environment. Update
+                    // them in place and re-enter the body, still under the
+                    // same ceiling.
+                    if let Some(param_count) = self.ceiling_tail_params
+                        && arg_vars.len() == param_count
+                    {
+                        let env = func.alloc_var();
+                        func.push(IrInst::UseVar(env, "__env".to_string()));
+                        for (i, arg) in arg_vars.iter().enumerate() {
+                            func.push(IrInst::PackSet(env, i, *arg));
+                        }
+                        func.push(IrInst::TailCall(vec![env]));
+                        let dummy = func.alloc_var();
+                        func.push(IrInst::ConstInt(dummy, 0));
+                        return Ok(dummy);
+                    }
                     // TailCall は戻り値を持たないが、IRVar は必要
                     // (Return と組み合わされるため、ダミーの var を使う)
                     func.push(IrInst::TailCall(arg_vars));
@@ -218,6 +431,9 @@ impl Lowering {
             }
             // CondBranch: 各アームの末尾を再帰的にチェック
             Expr::CondBranch(arms, _) => self.lower_cond_branch_tail(func, arms),
+            // A pipeline in tail position: a last stage that calls a function
+            // with the piped value at its `_` is that call, in tail position.
+            Expr::Pipeline(exprs, _) => self.lower_pipeline_in(func, exprs, true),
             // その他の式は通常の lowering
             _ => self.lower_expr(func, expr),
         }
@@ -235,8 +451,28 @@ impl Lowering {
         let result_var = func.alloc_var();
         let mut ir_arms = Vec::new();
 
-        for arm in arms {
+        for (i, arm) in arms.iter().enumerate() {
+            // A later guard that could have an effect runs only after the
+            // arms before it did not match (see `lower_cond_branch`).
+            if i > 0
+                && arm
+                    .condition
+                    .as_ref()
+                    .is_some_and(|cond| !Self::expr_is_effect_free(cond))
+            {
+                let saved = std::mem::take(&mut func.body);
+                let nested = self.lower_cond_branch_tail(func, &arms[i..])?;
+                let insts = std::mem::replace(&mut func.body, saved);
+                ir_arms.push(IrCondArm {
+                    condition: None,
+                    body: insts,
+                    result: nested,
+                });
+                break;
+            }
             let condition = match &arm.condition {
+                // `| true |>` is a default arm.
+                Some(Expr::BoolLit(true, _)) => None,
                 Some(cond_expr) => {
                     let cond_var = self.lower_expr(func, cond_expr)?;
                     Some(cond_var)
@@ -252,11 +488,16 @@ impl Lowering {
                 (insts, body_result)
             };
 
+            let is_default = condition.is_none();
             ir_arms.push(IrCondArm {
                 condition,
                 body: body_insts,
                 result: body_var,
             });
+            // Arms after a default arm are never reached.
+            if is_default {
+                break;
+            }
         }
 
         func.push(IrInst::CondBranch(result_var, ir_arms));
@@ -276,16 +517,69 @@ impl Lowering {
         self.lower_user_call_effective_args_from_vars(func, name, explicit_arg_vars)
     }
 
+    /// The default entry a call of the user function `name` with `argc`
+    /// explicit arguments goes through, when it omits parameters that declare
+    /// defaults.
+    /// The user function `name` is bound to through plain aliases
+    /// (`f <= add3`, `g <= f`).
+    fn alias_target_function(&self, name: &str) -> Option<String> {
+        let mut current = name;
+        for _ in 0..8 {
+            let source = self.var_aliases.get(current)?;
+            if self.user_funcs.contains(source)
+                || self.inner_func_symbol(source).is_some()
+                || self.local_closure_symbol(source).is_some()
+            {
+                return Some(source.clone());
+            }
+            current = source;
+        }
+        None
+    }
+
+    pub(super) fn default_arity_entry_for(&self, name: &str, argc: usize) -> Option<String> {
+        let key = self
+            .inner_func_symbol(name)
+            .unwrap_or_else(|| name.to_string());
+        let params = self.func_param_defs.get(&key)?;
+        if self.generic_schema_params.contains_key(name)
+            || !Self::default_arity_range(params).contains(&argc)
+        {
+            return None;
+        }
+        Some(Self::default_arity_symbol(
+            &self.resolve_user_func_symbol(name),
+            argc,
+        ))
+    }
+
     pub(super) fn lower_user_call_effective_args_from_vars(
         &mut self,
         func: &mut IrFunction,
         name: &str,
         explicit_arg_vars: Vec<IrVar>,
     ) -> Result<Vec<IrVar>, LowerError> {
-        let Some(params) = self.func_param_defs.get(name).cloned() else {
+        let key = self
+            .inner_func_symbol(name)
+            .unwrap_or_else(|| name.to_string());
+        let Some(params) = self.func_param_defs.get(&key).cloned() else {
             return Ok(explicit_arg_vars);
         };
+        self.complete_args_with_param_defaults(func, name, &params, explicit_arg_vars)
+    }
 
+    /// Fill the arguments a call omits from `params`' defaults (or their
+    /// types' default values), evaluated in the calling function. Only
+    /// correct where the call's scope sees what the defaults refer to: the
+    /// defining function's own tail calls, and local functions called from
+    /// the body that defines them.
+    fn complete_args_with_param_defaults(
+        &mut self,
+        func: &mut IrFunction,
+        name: &str,
+        params: &[crate::parser::Param],
+        explicit_arg_vars: Vec<IrVar>,
+    ) -> Result<Vec<IrVar>, LowerError> {
         // F62B-021: schema-passing generics carry hidden schema parameters
         // appended after the declared ones; explicit call sites supply them.
         let hidden_schema_count = self
@@ -336,7 +630,7 @@ impl Lowering {
             .map(|param| {
                 (
                     param.name.clone(),
-                    format!("__taida_default_{scope_id}_{}", param.name),
+                    format!("{HIDDEN}default_{scope_id}_{}", param.name),
                 )
             })
             .collect();
@@ -369,6 +663,759 @@ impl Lowering {
         Ok(effective_args)
     }
 
+    /// Whether `name` is bound as a parameter or a local of the function
+    /// being lowered (captured values are re-bound as locals on entry).
+    pub(super) fn is_local_binding(func: &IrFunction, name: &str) -> bool {
+        fn defines(insts: &[IrInst], name: &str) -> bool {
+            insts.iter().any(|inst| match inst {
+                IrInst::DefVar(defined, _) => defined == name,
+                IrInst::CondBranch(_, arms) => arms.iter().any(|arm| defines(&arm.body, name)),
+                _ => false,
+            })
+        }
+        func.params.iter().any(|p| p == name) || defines(&func.body, name)
+    }
+
+    /// Lower a call to the prelude / core-package builtin `name`, or return
+    /// `None` when `name` is not one. Callers only ask for names the
+    /// program does not bind itself.
+    fn lower_builtin_func_call(
+        &mut self,
+        func: &mut IrFunction,
+        name: &str,
+        args: &[Expr],
+    ) -> Result<Option<IrVar>, LowerError> {
+        // OS network APIs with unified timeout argument (optional last arg).
+        // Native backend uses fixed runtime signatures, so we inject defaults here.
+        if matches!(
+            name,
+            "dnsResolve"
+                | "poolAcquire"
+                | "tcpConnect"
+                | "tcpListen"
+                | "tcpAccept"
+                | "socketSend"
+                | "socketSendAll"
+                | "socketRecv"
+                | "socketSendBytes"
+                | "socketRecvBytes"
+                | "socketRecvExact"
+                | "udpBind"
+                | "udpSendTo"
+                | "udpRecvFrom"
+        ) {
+            let timeout_var = |this: &mut Self, f: &mut IrFunction, idx: usize| {
+                if let Some(arg) = args.get(idx) {
+                    this.lower_expr(f, arg)
+                } else {
+                    let t = f.alloc_var();
+                    f.push(IrInst::ConstInt(t, OS_NET_DEFAULT_TIMEOUT_MS));
+                    Ok(t)
+                }
+            };
+
+            match name {
+                "dnsResolve" => {
+                    if args.is_empty() || args.len() > 2 {
+                        return Err(LowerError {
+                            message:
+                                "dnsResolve requires 1 or 2 arguments: dnsResolve(host[, timeoutMs])"
+                                    .to_string(),
+                        });
+                    }
+                    let host = self.lower_expr(func, &args[0])?;
+                    let timeout = timeout_var(self, func, 1)?;
+                    let result = func.alloc_var();
+                    func.push(IrInst::Call(
+                        result,
+                        "taida_os_dns_resolve".to_string(),
+                        vec![host, timeout],
+                    ));
+                    return Ok(Some(result));
+                }
+                "poolAcquire" => {
+                    if args.is_empty() || args.len() > 2 {
+                        return Err(LowerError {
+                            message:
+                                "poolAcquire requires 1 or 2 arguments: poolAcquire(pool[, timeoutMs])"
+                                    .to_string(),
+                        });
+                    }
+                    let pool = self.lower_expr(func, &args[0])?;
+                    // Unlike the socket APIs above, the pool carries its
+                    // own configured acquireTimeoutMs. Injecting
+                    // OS_NET_DEFAULT_TIMEOUT_MS here made the omitted-arg
+                    // call always pass an explicit 30s, silently dead-
+                    // lettering poolCreate's acquireTimeoutMs (interpreter
+                    // falls back to the pool config). i64::MIN is the
+                    // omitted-argument sentinel the runtime maps to the
+                    // pool's configured timeout.
+                    let timeout = if let Some(arg) = args.get(1) {
+                        self.lower_expr(func, arg)?
+                    } else {
+                        let t = func.alloc_var();
+                        func.push(IrInst::ConstInt(t, i64::MIN));
+                        t
+                    };
+                    let result = func.alloc_var();
+                    func.push(IrInst::Call(
+                        result,
+                        "taida_pool_acquire".to_string(),
+                        vec![pool, timeout],
+                    ));
+                    return Ok(Some(result));
+                }
+                "tcpConnect" => {
+                    if args.len() < 2 || args.len() > 3 {
+                        return Err(LowerError {
+                            message:
+                                "tcpConnect requires 2 or 3 arguments: tcpConnect(host, port[, timeoutMs])"
+                                    .to_string(),
+                        });
+                    }
+                    let host = self.lower_expr(func, &args[0])?;
+                    let port = self.lower_expr(func, &args[1])?;
+                    let timeout = timeout_var(self, func, 2)?;
+                    let result = func.alloc_var();
+                    func.push(IrInst::Call(
+                        result,
+                        "taida_os_tcp_connect".to_string(),
+                        vec![host, port, timeout],
+                    ));
+                    return Ok(Some(result));
+                }
+                "tcpListen" => {
+                    if args.is_empty() || args.len() > 2 {
+                        return Err(LowerError {
+                            message:
+                                "tcpListen requires 1 or 2 arguments: tcpListen(port[, timeoutMs])"
+                                    .to_string(),
+                        });
+                    }
+                    let port = self.lower_expr(func, &args[0])?;
+                    let timeout = timeout_var(self, func, 1)?;
+                    let result = func.alloc_var();
+                    func.push(IrInst::Call(
+                        result,
+                        "taida_os_tcp_listen".to_string(),
+                        vec![port, timeout],
+                    ));
+                    return Ok(Some(result));
+                }
+                "tcpAccept" => {
+                    if args.is_empty() || args.len() > 2 {
+                        return Err(LowerError {
+                            message:
+                                "tcpAccept requires 1 or 2 arguments: tcpAccept(listener[, timeoutMs])"
+                                    .to_string(),
+                        });
+                    }
+                    let listener = self.lower_expr(func, &args[0])?;
+                    let timeout = timeout_var(self, func, 1)?;
+                    let result = func.alloc_var();
+                    func.push(IrInst::Call(
+                        result,
+                        "taida_os_tcp_accept".to_string(),
+                        vec![listener, timeout],
+                    ));
+                    return Ok(Some(result));
+                }
+                "socketSend" => {
+                    if args.len() < 2 || args.len() > 3 {
+                        return Err(LowerError {
+                            message:
+                                "socketSend requires 2 or 3 arguments: socketSend(socket, data[, timeoutMs])"
+                                    .to_string(),
+                        });
+                    }
+                    let socket = self.lower_expr(func, &args[0])?;
+                    let data = self.lower_expr(func, &args[1])?;
+                    let timeout = timeout_var(self, func, 2)?;
+                    let result = func.alloc_var();
+                    func.push(IrInst::Call(
+                        result,
+                        "taida_os_socket_send".to_string(),
+                        vec![socket, data, timeout],
+                    ));
+                    return Ok(Some(result));
+                }
+                "socketSendAll" => {
+                    if args.len() < 2 || args.len() > 3 {
+                        return Err(LowerError {
+                            message:
+                                "socketSendAll requires 2 or 3 arguments: socketSendAll(socket, data[, timeoutMs])"
+                                    .to_string(),
+                        });
+                    }
+                    let socket = self.lower_expr(func, &args[0])?;
+                    let data = self.lower_expr(func, &args[1])?;
+                    let timeout = timeout_var(self, func, 2)?;
+                    let result = func.alloc_var();
+                    func.push(IrInst::Call(
+                        result,
+                        "taida_os_socket_send_all".to_string(),
+                        vec![socket, data, timeout],
+                    ));
+                    return Ok(Some(result));
+                }
+                "socketRecv" => {
+                    if args.is_empty() || args.len() > 2 {
+                        return Err(LowerError {
+                            message:
+                                "socketRecv requires 1 or 2 arguments: socketRecv(socket[, timeoutMs])"
+                                    .to_string(),
+                        });
+                    }
+                    let socket = self.lower_expr(func, &args[0])?;
+                    let timeout = timeout_var(self, func, 1)?;
+                    let result = func.alloc_var();
+                    func.push(IrInst::Call(
+                        result,
+                        "taida_os_socket_recv".to_string(),
+                        vec![socket, timeout],
+                    ));
+                    return Ok(Some(result));
+                }
+                "socketRecvExact" => {
+                    if args.len() < 2 || args.len() > 3 {
+                        return Err(LowerError {
+                            message:
+                                "socketRecvExact requires 2 or 3 arguments: socketRecvExact(socket, size[, timeoutMs])"
+                                    .to_string(),
+                        });
+                    }
+                    let socket = self.lower_expr(func, &args[0])?;
+                    let size = self.lower_expr(func, &args[1])?;
+                    let timeout = timeout_var(self, func, 2)?;
+                    let result = func.alloc_var();
+                    func.push(IrInst::Call(
+                        result,
+                        "taida_os_socket_recv_exact".to_string(),
+                        vec![socket, size, timeout],
+                    ));
+                    return Ok(Some(result));
+                }
+                "socketSendBytes" => {
+                    if args.len() < 2 || args.len() > 3 {
+                        return Err(LowerError {
+                            message: "socketSendBytes requires 2 or 3 arguments: socketSendBytes(socket, data[, timeoutMs])".to_string(),
+                        });
+                    }
+                    let socket = self.lower_expr(func, &args[0])?;
+                    let data = self.lower_expr(func, &args[1])?;
+                    let timeout = timeout_var(self, func, 2)?;
+                    let result = func.alloc_var();
+                    func.push(IrInst::Call(
+                        result,
+                        "taida_os_socket_send_bytes".to_string(),
+                        vec![socket, data, timeout],
+                    ));
+                    return Ok(Some(result));
+                }
+                "socketRecvBytes" => {
+                    if args.is_empty() || args.len() > 2 {
+                        return Err(LowerError {
+                            message: "socketRecvBytes requires 1 or 2 arguments: socketRecvBytes(socket[, timeoutMs])".to_string(),
+                        });
+                    }
+                    let socket = self.lower_expr(func, &args[0])?;
+                    let timeout = timeout_var(self, func, 1)?;
+                    let result = func.alloc_var();
+                    func.push(IrInst::Call(
+                        result,
+                        "taida_os_socket_recv_bytes".to_string(),
+                        vec![socket, timeout],
+                    ));
+                    return Ok(Some(result));
+                }
+                "udpBind" => {
+                    if args.len() < 2 || args.len() > 3 {
+                        return Err(LowerError {
+                            message:
+                                "udpBind requires 2 or 3 arguments: udpBind(host, port[, timeoutMs])"
+                                    .to_string(),
+                        });
+                    }
+                    let host = self.lower_expr(func, &args[0])?;
+                    let port = self.lower_expr(func, &args[1])?;
+                    let timeout = timeout_var(self, func, 2)?;
+                    let result = func.alloc_var();
+                    func.push(IrInst::Call(
+                        result,
+                        "taida_os_udp_bind".to_string(),
+                        vec![host, port, timeout],
+                    ));
+                    return Ok(Some(result));
+                }
+                "udpSendTo" => {
+                    if args.len() < 4 || args.len() > 5 {
+                        return Err(LowerError {
+                            message:
+                                "udpSendTo requires 4 or 5 arguments: udpSendTo(socket, host, port, data[, timeoutMs])"
+                                    .to_string(),
+                        });
+                    }
+                    let socket = self.lower_expr(func, &args[0])?;
+                    let host = self.lower_expr(func, &args[1])?;
+                    let port = self.lower_expr(func, &args[2])?;
+                    let data = self.lower_expr(func, &args[3])?;
+                    let timeout = timeout_var(self, func, 4)?;
+                    let result = func.alloc_var();
+                    func.push(IrInst::Call(
+                        result,
+                        "taida_os_udp_send_to".to_string(),
+                        vec![socket, host, port, data, timeout],
+                    ));
+                    return Ok(Some(result));
+                }
+                "udpRecvFrom" => {
+                    if args.is_empty() || args.len() > 2 {
+                        return Err(LowerError {
+                            message:
+                                "udpRecvFrom requires 1 or 2 arguments: udpRecvFrom(socket[, timeoutMs])"
+                                    .to_string(),
+                        });
+                    }
+                    let socket = self.lower_expr(func, &args[0])?;
+                    let timeout = timeout_var(self, func, 1)?;
+                    let result = func.alloc_var();
+                    func.push(IrInst::Call(
+                        result,
+                        "taida_os_udp_recv_from".to_string(),
+                        vec![socket, timeout],
+                    ));
+                    return Ok(Some(result));
+                }
+                _ => {}
+            }
+        }
+
+        // httpServe(port, handler, maxRequests <= 0, timeoutMs <= 5000, maxConnections <= 128)
+        // handler is a function/closure, passed as a function pointer.
+        // maxRequests, timeoutMs, and maxConnections are optional with defaults.
+        // Skip if the name is shadowed by a parameter in the current function scope.
+        if name == "httpServe"
+            && !self.is_net_builtin_shadowed("httpServe")
+            && self
+                .stdlib_runtime_funcs
+                .get("httpServe")
+                .is_some_and(|v| v == "taida_net_http_serve")
+        {
+            if args.is_empty() || args.len() > 6 {
+                return Err(LowerError {
+                    message:
+                        "httpServe requires 2 to 6 arguments: httpServe(port, handler[, maxRequests, timeoutMs, maxConnections, tls])"
+                            .to_string(),
+                });
+            }
+            let port = self.lower_expr(func, &args[0])?;
+            let handler = self.lower_expr(func, &args[1])?;
+            let max_requests = if let Some(arg) = args.get(2) {
+                self.lower_expr(func, arg)?
+            } else {
+                let v = func.alloc_var();
+                func.push(IrInst::ConstInt(v, 0)); // default: 0 = unlimited
+                v
+            };
+            let timeout_ms = if let Some(arg) = args.get(3) {
+                self.lower_expr(func, arg)?
+            } else {
+                let v = func.alloc_var();
+                func.push(IrInst::ConstInt(v, 5000)); // default: 5000ms
+                v
+            };
+            // NET2-5d: maxConnections (optional, default 128)
+            let max_connections = if let Some(arg) = args.get(4) {
+                self.lower_expr(func, arg)?
+            } else {
+                let v = func.alloc_var();
+                func.push(IrInst::ConstInt(v, 128)); // default: 128
+                v
+            };
+            // v5: tls parameter (optional, default 0 = plaintext)
+            // When omitted, pass 0 (tagged int 0 = plaintext).
+            // When provided, it's a BuchiPack expression (@() or @(cert, key)).
+            let tls_var = if let Some(arg) = args.get(5) {
+                self.lower_expr(func, arg)?
+            } else {
+                let v = func.alloc_var();
+                func.push(IrInst::ConstInt(v, 0)); // default: 0 = plaintext
+                v
+            };
+            // NB-31: Pass compile-time handler type tag so the C runtime
+            // can reject non-callable values (large ints, strings, packs)
+            // without relying on the heuristic _taida_is_callable_impl.
+            // Tag 6 = CLOSURE, 10 = named function ref, -1 = unknown.
+            let handler_tag = self.callable_type_tag(&args[1]);
+            let handler_tag_var = func.alloc_var();
+            func.push(IrInst::ConstInt(handler_tag_var, handler_tag));
+            // NET3-5a: Pass compile-time handler arity so the C runtime
+            // can distinguish 1-arg (one-shot) vs 2-arg (streaming) handlers.
+            // -1 = unknown (dynamic).
+            let handler_arity = self.handler_arity(&args[1]);
+            let handler_arity_var = func.alloc_var();
+            func.push(IrInst::ConstInt(handler_arity_var, handler_arity));
+            let result = func.alloc_var();
+            func.push(IrInst::Call(
+                result,
+                "taida_net_http_serve".to_string(),
+                vec![
+                    port,
+                    handler,
+                    max_requests,
+                    timeout_ms,
+                    max_connections,
+                    tls_var,
+                    handler_tag_var,
+                    handler_arity_var,
+                ],
+            ));
+            return Ok(Some(result));
+        }
+
+        if name == "debug" {
+            for arg in args {
+                self.reject_untyped_addon_value(func, arg)?;
+            }
+            return self.lower_debug_call(func, args).map(Some);
+        }
+
+        // ── D28B-015: `strOf(span, raw)` lowercase function-form ──
+        // Lowers identically to the existing `StrOf[span, raw]()` mold
+        // (`lower/molds_inst.rs::StrOf` arm) — pure IR composition with no new
+        // C runtime symbol. Naming Lock D28B-001: function form is
+        // camelCase, mold form is PascalCase, both valid prelude entries
+        // with bit-identical 4-backend semantics.
+        //
+        // User-defined `strOf` shadows the prelude builtin: only intercept
+        // when the name is NOT a user FuncDef (matches the interpreter's
+        // try_builtin_func dispatch order: user functions resolve first).
+        if name == "strOf" && !self.user_funcs.contains(name) {
+            if args.len() != 2 {
+                return Err(LowerError {
+                    message: format!(
+                        "strOf requires exactly 2 arguments: strOf(span, raw), got {}",
+                        args.len()
+                    ),
+                });
+            }
+            let span = self.lower_expr(func, &args[0])?;
+            let raw_is_str = self.expr_is_string_full(&args[1]);
+            let raw = self.lower_expr(func, &args[1])?;
+
+            // start = taida_pack_get(span, hash("start"))
+            let start_hash_var = func.alloc_var();
+            let start_hash = crate::codegen::lower::simple_hash("start") as i64;
+            func.push(IrInst::ConstInt(start_hash_var, start_hash));
+            let start_val = func.alloc_var();
+            func.push(IrInst::Call(
+                start_val,
+                "taida_pack_get".to_string(),
+                vec![span, start_hash_var],
+            ));
+
+            // len = taida_pack_get(span, hash("len"))
+            let len_hash_var = func.alloc_var();
+            let len_hash = crate::codegen::lower::simple_hash("len") as i64;
+            func.push(IrInst::ConstInt(len_hash_var, len_hash));
+            let len_val = func.alloc_var();
+            func.push(IrInst::Call(
+                len_val,
+                "taida_pack_get".to_string(),
+                vec![span, len_hash_var],
+            ));
+
+            // end = taida_int_add(start, len)
+            let end_val = func.alloc_var();
+            func.push(IrInst::Call(
+                end_val,
+                "taida_int_add".to_string(),
+                vec![start_val, len_val],
+            ));
+
+            // raw_bytes = (raw_is_str ? utf8_encode_mold(raw) lax-default to "" : raw)
+            let raw_bytes = if raw_is_str {
+                let enc_lax = func.alloc_var();
+                func.push(IrInst::Call(
+                    enc_lax,
+                    "taida_utf8_encode_mold".to_string(),
+                    vec![raw],
+                ));
+                let empty_bytes_default = func.alloc_var();
+                func.push(IrInst::ConstStr(empty_bytes_default, String::new()));
+                let bytes_from_str = func.alloc_var();
+                func.push(IrInst::Call(
+                    bytes_from_str,
+                    "taida_lax_get_or_default".to_string(),
+                    vec![enc_lax, empty_bytes_default],
+                ));
+                bytes_from_str
+            } else {
+                raw
+            };
+
+            // bytes = taida_slice_mold(raw_bytes, start, end)
+            let bytes_val = func.alloc_var();
+            func.push(IrInst::Call(
+                bytes_val,
+                "taida_slice_mold".to_string(),
+                vec![raw_bytes, start_val, end_val],
+            ));
+
+            // lax = taida_utf8_decode_mold(bytes)
+            let lax_val = func.alloc_var();
+            func.push(IrInst::Call(
+                lax_val,
+                "taida_utf8_decode_mold".to_string(),
+                vec![bytes_val],
+            ));
+
+            // str = taida_lax_get_or_default(lax, "")
+            let default_val = func.alloc_var();
+            func.push(IrInst::ConstStr(default_val, String::new()));
+            let result = func.alloc_var();
+            func.push(IrInst::Call(
+                result,
+                "taida_lax_get_or_default".to_string(),
+                vec![lax_val, default_val],
+            ));
+            return Ok(Some(result));
+        }
+
+        if name == "typeof" || name == "typeOf" {
+            if args.len() != 1 {
+                return Err(LowerError {
+                    message: format!("typeof requires exactly 1 argument, got {}", args.len()),
+                });
+            }
+            let arg = &args[0];
+            let arg_var = self.lower_expr(func, arg)?;
+            // Pass compile-time type tag as second argument to disambiguate
+            // Int/Float/Bool which are all i64 at runtime
+            let tag = self.expr_type_tag(arg);
+            let tag_var = func.alloc_var();
+            func.push(IrInst::ConstInt(tag_var, tag));
+            let result = func.alloc_var();
+            func.push(IrInst::Call(
+                result,
+                "taida_typeof".to_string(),
+                vec![arg_var, tag_var],
+            ));
+            return Ok(Some(result));
+        }
+
+        if name == "nowMs" {
+            if !args.is_empty() {
+                return Err(LowerError {
+                    message: format!("nowMs requires 0 arguments, got {}", args.len()),
+                });
+            }
+            let result = func.alloc_var();
+            func.push(IrInst::Call(
+                result,
+                "taida_time_now_ms".to_string(),
+                vec![],
+            ));
+            return Ok(Some(result));
+        }
+
+        if name == "sleep" {
+            if args.len() != 1 {
+                return Err(LowerError {
+                    message: format!("sleep requires exactly 1 argument (ms), got {}", args.len()),
+                });
+            }
+            let ms = self.lower_expr(func, &args[0])?;
+            let result = func.alloc_var();
+            func.push(IrInst::Call(
+                result,
+                "taida_time_sleep".to_string(),
+                vec![ms],
+            ));
+            return Ok(Some(result));
+        }
+
+        if name == "range" {
+            if args.len() < 2 || args.len() > 3 {
+                return Err(LowerError {
+                    message: format!("range requires 2 or 3 arguments, got {}", args.len()),
+                });
+            }
+            let start = self.lower_expr(func, &args[0])?;
+            let end = self.lower_expr(func, &args[1])?;
+            let result = func.alloc_var();
+            func.push(IrInst::Call(
+                result,
+                "taida_range".to_string(),
+                vec![start, end],
+            ));
+            return Ok(Some(result));
+        }
+
+        if name == "allEnv" || name == "argv" {
+            if !args.is_empty() {
+                return Err(LowerError {
+                    message: format!("{} requires 0 arguments, got {}", name, args.len()),
+                });
+            }
+            let rt_name = if name == "allEnv" {
+                "taida_os_all_env"
+            } else {
+                "taida_os_argv"
+            };
+            let result = func.alloc_var();
+            func.push(IrInst::Call(result, rt_name.to_string(), vec![]));
+            return Ok(Some(result));
+        }
+
+        // stdlib ランタイム関数呼び出し（std/math, std/io etc.）
+        // Skip if the name is a net builtin that is shadowed by a parameter.
+        if let Some(rt_name) = self.stdlib_runtime_funcs.get(name).cloned()
+            && !self.is_net_builtin_shadowed(name)
+        {
+            // C12B-038: stdout/stderr `_with_tag` dispatch is
+            // now centralised in `lower_stdout_with_tag` (see
+            // `src/codegen/lower/tag_prop.rs`). The helper preserves
+            // the B11-2b/B11B-004/C12-1/C12-11/C12B-016 semantics:
+            // Str fast path + polymorphic dispatch + FieldAccess
+            // single-eval + param_tag_vars Ident propagation.
+            if (name == "stdout" || name == "stderr") && args.len() == 1 {
+                return self
+                    .lower_stdout_with_tag(func, name, &args[0], rt_name)
+                    .map(Some);
+            }
+            // `hashMap(entries)`: built from a list of `@(key, value)`
+            // packs or a pack's fields at run time.
+            if name == "hashMap" && args.len() == 1 {
+                return self.lower_hashmap_from(func, &args[0]).map(Some);
+            }
+            // stdin: optional prompt arg (pass empty string if none)
+            if name == "stdin" {
+                let prompt_var = if let Some(arg) = args.first() {
+                    let arg_var = self.lower_expr(func, arg)?;
+                    self.convert_to_string(func, arg, arg_var)?
+                } else {
+                    let empty = func.alloc_var();
+                    func.push(IrInst::ConstStr(empty, String::new()));
+                    empty
+                };
+                let result = func.alloc_var();
+                func.push(IrInst::Call(result, rt_name, vec![prompt_var]));
+                return Ok(Some(result));
+            }
+            // C20-2: stdinLine — mirrors `stdin` arity / prompt
+            // stringification but the runtime returns Async[Lax[Str]]
+            // rather than a bare Str. The prompt is optional and is
+            // display-stringified when present so non-Str prompts
+            // parity-match the interpreter / JS behaviour.
+            if name == "stdinLine" {
+                let prompt_var = if let Some(arg) = args.first() {
+                    let arg_var = self.lower_expr(func, arg)?;
+                    self.convert_to_string(func, arg, arg_var)?
+                } else {
+                    let empty = func.alloc_var();
+                    func.push(IrInst::ConstStr(empty, String::new()));
+                    empty
+                };
+                let result = func.alloc_var();
+                func.push(IrInst::Call(result, rt_name, vec![prompt_var]));
+                return Ok(Some(result));
+            }
+            // v5: wsClose(ws) or wsClose(ws, code) — always pass 2 args.
+            // When code is omitted, pass 0 (C runtime treats 0 as default 1000).
+            if name == "wsClose" {
+                let ws_var = if let Some(arg) = args.first() {
+                    self.lower_expr(func, arg)?
+                } else {
+                    return Err(LowerError {
+                        message: "wsClose requires at least 1 argument (ws)".to_string(),
+                    });
+                };
+                let code_var = if let Some(arg) = args.get(1) {
+                    self.lower_expr(func, arg)?
+                } else {
+                    let v = func.alloc_var();
+                    func.push(IrInst::ConstInt(v, 0)); // 0 = use default 1000
+                    v
+                };
+                let result = func.alloc_var();
+                func.push(IrInst::Call(result, rt_name, vec![ws_var, code_var]));
+                return Ok(Some(result));
+            }
+            // jsonEncode/jsonPretty: pass value directly (no auto-conversion)
+            // The C runtime handles polymorphic serialization
+            if name == "jsonEncode" || name == "jsonPretty" {
+                let val_var = if let Some(arg) = args.first() {
+                    self.reject_untyped_addon_value(func, arg)?;
+                    self.lower_expr(func, arg)?
+                } else {
+                    let zero = func.alloc_var();
+                    func.push(IrInst::ConstInt(zero, 0));
+                    zero
+                };
+                // The argument's static type decides how each part is
+                // written wherever the checker knows it.
+                if let Some(desc) = args
+                    .first()
+                    .and_then(|arg| self.json_encode_descriptor(arg))
+                {
+                    self.note_json_schema_field_names(&desc);
+                    let desc_var = func.alloc_var();
+                    func.push(IrInst::ConstStr(desc_var, desc));
+                    let typed_fn = if name == "jsonEncode" {
+                        "taida_json_encode_desc"
+                    } else {
+                        "taida_json_pretty_desc"
+                    };
+                    let result = func.alloc_var();
+                    func.push(IrInst::Call(
+                        result,
+                        typed_fn.to_string(),
+                        vec![val_var, desc_var],
+                    ));
+                    return Ok(Some(result));
+                }
+                let result = func.alloc_var();
+                func.push(IrInst::Call(result, rt_name, vec![val_var]));
+                return Ok(Some(result));
+            }
+            // C12-6a: Regex(pattern, flags?) — the C entry
+            // `taida_regex_new(pattern, flags)` takes 2 Str args;
+            // when `flags` is omitted we pass an empty string so
+            // the ABI signature stays fixed.
+            if name == "Regex" {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(LowerError {
+                        message: format!(
+                            "Regex requires 1 or 2 arguments (pattern, flags?), got {}",
+                            args.len()
+                        ),
+                    });
+                }
+                let pattern_var = self.lower_expr(func, &args[0])?;
+                let flags_var = if let Some(arg) = args.get(1) {
+                    self.lower_expr(func, arg)?
+                } else {
+                    let empty = func.alloc_var();
+                    func.push(IrInst::ConstStr(empty, String::new()));
+                    empty
+                };
+                let result = func.alloc_var();
+                func.push(IrInst::Call(result, rt_name, vec![pattern_var, flags_var]));
+                return Ok(Some(result));
+            }
+            let mut arg_vars = Vec::new();
+            for arg in args {
+                let var = self.lower_expr(func, arg)?;
+                arg_vars.push(var);
+            }
+            let result = func.alloc_var();
+            func.push(IrInst::Call(result, rt_name, arg_vars));
+            return Ok(Some(result));
+        }
+        Ok(None)
+    }
+
     pub(crate) fn lower_func_call(
         &mut self,
         func: &mut IrFunction,
@@ -383,720 +1430,68 @@ impl Lowering {
             return self.lower_partial_application(func, callee, args);
         }
 
-        if let Expr::Ident(name, _) = callee {
-            // OS network APIs with unified timeout argument (optional last arg).
-            // Native backend uses fixed runtime signatures, so we inject defaults here.
-            if matches!(
-                name.as_str(),
-                "dnsResolve"
-                    | "poolAcquire"
-                    | "tcpConnect"
-                    | "tcpListen"
-                    | "tcpAccept"
-                    | "socketSend"
-                    | "socketSendAll"
-                    | "socketRecv"
-                    | "socketSendBytes"
-                    | "socketRecvBytes"
-                    | "socketRecvExact"
-                    | "udpBind"
-                    | "udpSendTo"
-                    | "udpRecvFrom"
-            ) {
-                let timeout_var = |this: &mut Self, f: &mut IrFunction, idx: usize| {
-                    if let Some(arg) = args.get(idx) {
-                        this.lower_expr(f, arg)
-                    } else {
-                        let t = f.alloc_var();
-                        f.push(IrInst::ConstInt(t, OS_NET_DEFAULT_TIMEOUT_MS));
-                        Ok(t)
-                    }
-                };
-
-                match name.as_str() {
-                    "dnsResolve" => {
-                        if args.is_empty() || args.len() > 2 {
-                            return Err(LowerError {
-                                message:
-                                    "dnsResolve requires 1 or 2 arguments: dnsResolve(host[, timeoutMs])"
-                                        .to_string(),
-                            });
-                        }
-                        let host = self.lower_expr(func, &args[0])?;
-                        let timeout = timeout_var(self, func, 1)?;
-                        let result = func.alloc_var();
-                        func.push(IrInst::Call(
-                            result,
-                            "taida_os_dns_resolve".to_string(),
-                            vec![host, timeout],
-                        ));
-                        return Ok(result);
-                    }
-                    "poolAcquire" => {
-                        if args.is_empty() || args.len() > 2 {
-                            return Err(LowerError {
-                                message:
-                                    "poolAcquire requires 1 or 2 arguments: poolAcquire(pool[, timeoutMs])"
-                                        .to_string(),
-                            });
-                        }
-                        let pool = self.lower_expr(func, &args[0])?;
-                        // Unlike the socket APIs above, the pool carries its
-                        // own configured acquireTimeoutMs. Injecting
-                        // OS_NET_DEFAULT_TIMEOUT_MS here made the omitted-arg
-                        // call always pass an explicit 30s, silently dead-
-                        // lettering poolCreate's acquireTimeoutMs (interpreter
-                        // falls back to the pool config). i64::MIN is the
-                        // omitted-argument sentinel the runtime maps to the
-                        // pool's configured timeout.
-                        let timeout = if let Some(arg) = args.get(1) {
-                            self.lower_expr(func, arg)?
-                        } else {
-                            let t = func.alloc_var();
-                            func.push(IrInst::ConstInt(t, i64::MIN));
-                            t
-                        };
-                        let result = func.alloc_var();
-                        func.push(IrInst::Call(
-                            result,
-                            "taida_pool_acquire".to_string(),
-                            vec![pool, timeout],
-                        ));
-                        return Ok(result);
-                    }
-                    "tcpConnect" => {
-                        if args.len() < 2 || args.len() > 3 {
-                            return Err(LowerError {
-                                message:
-                                    "tcpConnect requires 2 or 3 arguments: tcpConnect(host, port[, timeoutMs])"
-                                        .to_string(),
-                            });
-                        }
-                        let host = self.lower_expr(func, &args[0])?;
-                        let port = self.lower_expr(func, &args[1])?;
-                        let timeout = timeout_var(self, func, 2)?;
-                        let result = func.alloc_var();
-                        func.push(IrInst::Call(
-                            result,
-                            "taida_os_tcp_connect".to_string(),
-                            vec![host, port, timeout],
-                        ));
-                        return Ok(result);
-                    }
-                    "tcpListen" => {
-                        if args.is_empty() || args.len() > 2 {
-                            return Err(LowerError {
-                                message:
-                                    "tcpListen requires 1 or 2 arguments: tcpListen(port[, timeoutMs])"
-                                        .to_string(),
-                            });
-                        }
-                        let port = self.lower_expr(func, &args[0])?;
-                        let timeout = timeout_var(self, func, 1)?;
-                        let result = func.alloc_var();
-                        func.push(IrInst::Call(
-                            result,
-                            "taida_os_tcp_listen".to_string(),
-                            vec![port, timeout],
-                        ));
-                        return Ok(result);
-                    }
-                    "tcpAccept" => {
-                        if args.is_empty() || args.len() > 2 {
-                            return Err(LowerError {
-                                message:
-                                    "tcpAccept requires 1 or 2 arguments: tcpAccept(listener[, timeoutMs])"
-                                        .to_string(),
-                            });
-                        }
-                        let listener = self.lower_expr(func, &args[0])?;
-                        let timeout = timeout_var(self, func, 1)?;
-                        let result = func.alloc_var();
-                        func.push(IrInst::Call(
-                            result,
-                            "taida_os_tcp_accept".to_string(),
-                            vec![listener, timeout],
-                        ));
-                        return Ok(result);
-                    }
-                    "socketSend" => {
-                        if args.len() < 2 || args.len() > 3 {
-                            return Err(LowerError {
-                                message:
-                                    "socketSend requires 2 or 3 arguments: socketSend(socket, data[, timeoutMs])"
-                                        .to_string(),
-                            });
-                        }
-                        let socket = self.lower_expr(func, &args[0])?;
-                        let data = self.lower_expr(func, &args[1])?;
-                        let timeout = timeout_var(self, func, 2)?;
-                        let result = func.alloc_var();
-                        func.push(IrInst::Call(
-                            result,
-                            "taida_os_socket_send".to_string(),
-                            vec![socket, data, timeout],
-                        ));
-                        return Ok(result);
-                    }
-                    "socketSendAll" => {
-                        if args.len() < 2 || args.len() > 3 {
-                            return Err(LowerError {
-                                message:
-                                    "socketSendAll requires 2 or 3 arguments: socketSendAll(socket, data[, timeoutMs])"
-                                        .to_string(),
-                            });
-                        }
-                        let socket = self.lower_expr(func, &args[0])?;
-                        let data = self.lower_expr(func, &args[1])?;
-                        let timeout = timeout_var(self, func, 2)?;
-                        let result = func.alloc_var();
-                        func.push(IrInst::Call(
-                            result,
-                            "taida_os_socket_send_all".to_string(),
-                            vec![socket, data, timeout],
-                        ));
-                        return Ok(result);
-                    }
-                    "socketRecv" => {
-                        if args.is_empty() || args.len() > 2 {
-                            return Err(LowerError {
-                                message:
-                                    "socketRecv requires 1 or 2 arguments: socketRecv(socket[, timeoutMs])"
-                                        .to_string(),
-                            });
-                        }
-                        let socket = self.lower_expr(func, &args[0])?;
-                        let timeout = timeout_var(self, func, 1)?;
-                        let result = func.alloc_var();
-                        func.push(IrInst::Call(
-                            result,
-                            "taida_os_socket_recv".to_string(),
-                            vec![socket, timeout],
-                        ));
-                        return Ok(result);
-                    }
-                    "socketRecvExact" => {
-                        if args.len() < 2 || args.len() > 3 {
-                            return Err(LowerError {
-                                message:
-                                    "socketRecvExact requires 2 or 3 arguments: socketRecvExact(socket, size[, timeoutMs])"
-                                        .to_string(),
-                            });
-                        }
-                        let socket = self.lower_expr(func, &args[0])?;
-                        let size = self.lower_expr(func, &args[1])?;
-                        let timeout = timeout_var(self, func, 2)?;
-                        let result = func.alloc_var();
-                        func.push(IrInst::Call(
-                            result,
-                            "taida_os_socket_recv_exact".to_string(),
-                            vec![socket, size, timeout],
-                        ));
-                        return Ok(result);
-                    }
-                    "socketSendBytes" => {
-                        if args.len() < 2 || args.len() > 3 {
-                            return Err(LowerError {
-                                message: "socketSendBytes requires 2 or 3 arguments: socketSendBytes(socket, data[, timeoutMs])".to_string(),
-                            });
-                        }
-                        let socket = self.lower_expr(func, &args[0])?;
-                        let data = self.lower_expr(func, &args[1])?;
-                        let timeout = timeout_var(self, func, 2)?;
-                        let result = func.alloc_var();
-                        func.push(IrInst::Call(
-                            result,
-                            "taida_os_socket_send_bytes".to_string(),
-                            vec![socket, data, timeout],
-                        ));
-                        return Ok(result);
-                    }
-                    "socketRecvBytes" => {
-                        if args.is_empty() || args.len() > 2 {
-                            return Err(LowerError {
-                                message: "socketRecvBytes requires 1 or 2 arguments: socketRecvBytes(socket[, timeoutMs])".to_string(),
-                            });
-                        }
-                        let socket = self.lower_expr(func, &args[0])?;
-                        let timeout = timeout_var(self, func, 1)?;
-                        let result = func.alloc_var();
-                        func.push(IrInst::Call(
-                            result,
-                            "taida_os_socket_recv_bytes".to_string(),
-                            vec![socket, timeout],
-                        ));
-                        return Ok(result);
-                    }
-                    "udpBind" => {
-                        if args.len() < 2 || args.len() > 3 {
-                            return Err(LowerError {
-                                message:
-                                    "udpBind requires 2 or 3 arguments: udpBind(host, port[, timeoutMs])"
-                                        .to_string(),
-                            });
-                        }
-                        let host = self.lower_expr(func, &args[0])?;
-                        let port = self.lower_expr(func, &args[1])?;
-                        let timeout = timeout_var(self, func, 2)?;
-                        let result = func.alloc_var();
-                        func.push(IrInst::Call(
-                            result,
-                            "taida_os_udp_bind".to_string(),
-                            vec![host, port, timeout],
-                        ));
-                        return Ok(result);
-                    }
-                    "udpSendTo" => {
-                        if args.len() < 4 || args.len() > 5 {
-                            return Err(LowerError {
-                                message:
-                                    "udpSendTo requires 4 or 5 arguments: udpSendTo(socket, host, port, data[, timeoutMs])"
-                                        .to_string(),
-                            });
-                        }
-                        let socket = self.lower_expr(func, &args[0])?;
-                        let host = self.lower_expr(func, &args[1])?;
-                        let port = self.lower_expr(func, &args[2])?;
-                        let data = self.lower_expr(func, &args[3])?;
-                        let timeout = timeout_var(self, func, 4)?;
-                        let result = func.alloc_var();
-                        func.push(IrInst::Call(
-                            result,
-                            "taida_os_udp_send_to".to_string(),
-                            vec![socket, host, port, data, timeout],
-                        ));
-                        return Ok(result);
-                    }
-                    "udpRecvFrom" => {
-                        if args.is_empty() || args.len() > 2 {
-                            return Err(LowerError {
-                                message:
-                                    "udpRecvFrom requires 1 or 2 arguments: udpRecvFrom(socket[, timeoutMs])"
-                                        .to_string(),
-                            });
-                        }
-                        let socket = self.lower_expr(func, &args[0])?;
-                        let timeout = timeout_var(self, func, 1)?;
-                        let result = func.alloc_var();
-                        func.push(IrInst::Call(
-                            result,
-                            "taida_os_udp_recv_from".to_string(),
-                            vec![socket, timeout],
-                        ));
-                        return Ok(result);
-                    }
-                    _ => {}
-                }
-            }
-
-            // httpServe(port, handler, maxRequests <= 0, timeoutMs <= 5000, maxConnections <= 128)
-            // handler is a function/closure, passed as a function pointer.
-            // maxRequests, timeoutMs, and maxConnections are optional with defaults.
-            // Skip if the name is shadowed by a parameter in the current function scope.
-            if name == "httpServe"
-                && !self.is_net_builtin_shadowed("httpServe")
-                && self
-                    .stdlib_runtime_funcs
-                    .get("httpServe")
-                    .is_some_and(|v| v == "taida_net_http_serve")
+        if let Expr::Ident(name, span) = callee {
+            // A name the program binds itself — a parameter, a local, a
+            // user function, a top-level variable — shadows the prelude /
+            // core-package builtin of the same name: the prelude behaves as
+            // the outermost scope, which is how the checker types the call.
+            let locally_bound = Self::is_local_binding(func, name);
+            // `Pilot()`: a declared type called with no fields is the instance
+            // of its defaults, as `Pilot(...)` with every field omitted is.
+            if args.is_empty()
+                && !locally_bound
+                && !self.user_funcs.contains(name)
+                && self.inner_func_symbol(name).is_none()
+                && !self.top_level_vars.contains(name)
+                && self.type_field_defs.contains_key(name)
             {
-                if args.is_empty() || args.len() > 6 {
-                    return Err(LowerError {
-                        message:
-                            "httpServe requires 2 to 6 arguments: httpServe(port, handler[, maxRequests, timeoutMs, maxConnections, tls])"
-                                .to_string(),
-                    });
+                let inst = Expr::TypeInst(
+                    name.clone(),
+                    Vec::new(),
+                    span.clone()
+                        .with_node_id(crate::parser::SYNTHETIC_NODE_ID_BASE),
+                );
+                return self.lower_expr(func, &inst);
+            }
+            // A local function compiled as a closure calling itself: re-enter
+            // its own symbol with the environment it was called with.
+            if !locally_bound
+                && let Some((self_name, symbol)) = self.closure_self.clone()
+                && self_name == *name
+            {
+                let env = func.alloc_var();
+                func.push(IrInst::UseVar(env, "__env".to_string()));
+                let mut arg_vars = vec![env];
+                for arg in args {
+                    arg_vars.push(self.lower_expr(func, arg)?);
                 }
-                let port = self.lower_expr(func, &args[0])?;
-                let handler = self.lower_expr(func, &args[1])?;
-                let max_requests = if let Some(arg) = args.get(2) {
-                    self.lower_expr(func, arg)?
-                } else {
-                    let v = func.alloc_var();
-                    func.push(IrInst::ConstInt(v, 0)); // default: 0 = unlimited
-                    v
-                };
-                let timeout_ms = if let Some(arg) = args.get(3) {
-                    self.lower_expr(func, arg)?
-                } else {
-                    let v = func.alloc_var();
-                    func.push(IrInst::ConstInt(v, 5000)); // default: 5000ms
-                    v
-                };
-                // NET2-5d: maxConnections (optional, default 128)
-                let max_connections = if let Some(arg) = args.get(4) {
-                    self.lower_expr(func, arg)?
-                } else {
-                    let v = func.alloc_var();
-                    func.push(IrInst::ConstInt(v, 128)); // default: 128
-                    v
-                };
-                // v5: tls parameter (optional, default 0 = plaintext)
-                // When omitted, pass 0 (tagged int 0 = plaintext).
-                // When provided, it's a BuchiPack expression (@() or @(cert, key)).
-                let tls_var = if let Some(arg) = args.get(5) {
-                    self.lower_expr(func, arg)?
-                } else {
-                    let v = func.alloc_var();
-                    func.push(IrInst::ConstInt(v, 0)); // default: 0 = plaintext
-                    v
-                };
-                // NB-31: Pass compile-time handler type tag so the C runtime
-                // can reject non-callable values (large ints, strings, packs)
-                // without relying on the heuristic _taida_is_callable_impl.
-                // Tag 6 = CLOSURE, 10 = named function ref, -1 = unknown.
-                let handler_tag = self.callable_type_tag(&args[1]);
-                let handler_tag_var = func.alloc_var();
-                func.push(IrInst::ConstInt(handler_tag_var, handler_tag));
-                // NET3-5a: Pass compile-time handler arity so the C runtime
-                // can distinguish 1-arg (one-shot) vs 2-arg (streaming) handlers.
-                // -1 = unknown (dynamic).
-                let handler_arity = self.handler_arity(&args[1]);
-                let handler_arity_var = func.alloc_var();
-                func.push(IrInst::ConstInt(handler_arity_var, handler_arity));
                 let result = func.alloc_var();
-                func.push(IrInst::Call(
-                    result,
-                    "taida_net_http_serve".to_string(),
-                    vec![
-                        port,
-                        handler,
-                        max_requests,
-                        timeout_ms,
-                        max_connections,
-                        tls_var,
-                        handler_tag_var,
-                        handler_arity_var,
-                    ],
-                ));
+                func.push(IrInst::CallUser(result, symbol, arg_vars));
+                return Ok(result);
+            }
+            let local_function = !locally_bound && self.inner_func_symbol(name).is_some();
+            if !locally_bound
+                && !local_function
+                && !self.user_funcs.contains(name)
+                && !self.top_level_vars.contains(name)
+                && let Some(result) = self.lower_builtin_func_call(func, name, args)?
+            {
                 return Ok(result);
             }
 
-            if name == "debug" {
-                return self.lower_debug_call(func, args);
-            }
-
-            // ── D28B-015: `strOf(span, raw)` lowercase function-form ──
-            // Lowers identically to the existing `StrOf[span, raw]()` mold
-            // (`lower/molds_inst.rs::StrOf` arm) — pure IR composition with no new
-            // C runtime symbol. Naming Lock D28B-001: function form is
-            // camelCase, mold form is PascalCase, both valid prelude entries
-            // with bit-identical 4-backend semantics.
-            //
-            // User-defined `strOf` shadows the prelude builtin: only intercept
-            // when the name is NOT a user FuncDef (matches the interpreter's
-            // try_builtin_func dispatch order: user functions resolve first).
-            if name == "strOf" && !self.user_funcs.contains(name) {
-                if args.len() != 2 {
-                    return Err(LowerError {
-                        message: format!(
-                            "strOf requires exactly 2 arguments: strOf(span, raw), got {}",
-                            args.len()
-                        ),
-                    });
-                }
-                let span = self.lower_expr(func, &args[0])?;
-                let raw_is_str = self.expr_is_string_full(&args[1]);
-                let raw = self.lower_expr(func, &args[1])?;
-
-                // start = taida_pack_get(span, hash("start"))
-                let start_hash_var = func.alloc_var();
-                let start_hash = crate::codegen::lower::simple_hash("start") as i64;
-                func.push(IrInst::ConstInt(start_hash_var, start_hash));
-                let start_val = func.alloc_var();
-                func.push(IrInst::Call(
-                    start_val,
-                    "taida_pack_get".to_string(),
-                    vec![span, start_hash_var],
-                ));
-
-                // len = taida_pack_get(span, hash("len"))
-                let len_hash_var = func.alloc_var();
-                let len_hash = crate::codegen::lower::simple_hash("len") as i64;
-                func.push(IrInst::ConstInt(len_hash_var, len_hash));
-                let len_val = func.alloc_var();
-                func.push(IrInst::Call(
-                    len_val,
-                    "taida_pack_get".to_string(),
-                    vec![span, len_hash_var],
-                ));
-
-                // end = taida_int_add(start, len)
-                let end_val = func.alloc_var();
-                func.push(IrInst::Call(
-                    end_val,
-                    "taida_int_add".to_string(),
-                    vec![start_val, len_val],
-                ));
-
-                // raw_bytes = (raw_is_str ? utf8_encode_mold(raw) lax-default to "" : raw)
-                let raw_bytes = if raw_is_str {
-                    let enc_lax = func.alloc_var();
-                    func.push(IrInst::Call(
-                        enc_lax,
-                        "taida_utf8_encode_mold".to_string(),
-                        vec![raw],
-                    ));
-                    let empty_bytes_default = func.alloc_var();
-                    func.push(IrInst::ConstStr(empty_bytes_default, String::new()));
-                    let bytes_from_str = func.alloc_var();
-                    func.push(IrInst::Call(
-                        bytes_from_str,
-                        "taida_lax_get_or_default".to_string(),
-                        vec![enc_lax, empty_bytes_default],
-                    ));
-                    bytes_from_str
-                } else {
-                    raw
-                };
-
-                // bytes = taida_slice_mold(raw_bytes, start, end)
-                let bytes_val = func.alloc_var();
-                func.push(IrInst::Call(
-                    bytes_val,
-                    "taida_slice_mold".to_string(),
-                    vec![raw_bytes, start_val, end_val],
-                ));
-
-                // lax = taida_utf8_decode_mold(bytes)
-                let lax_val = func.alloc_var();
-                func.push(IrInst::Call(
-                    lax_val,
-                    "taida_utf8_decode_mold".to_string(),
-                    vec![bytes_val],
-                ));
-
-                // str = taida_lax_get_or_default(lax, "")
-                let default_val = func.alloc_var();
-                func.push(IrInst::ConstStr(default_val, String::new()));
-                let result = func.alloc_var();
-                func.push(IrInst::Call(
-                    result,
-                    "taida_lax_get_or_default".to_string(),
-                    vec![lax_val, default_val],
-                ));
-                return Ok(result);
-            }
-
-            if name == "typeof" || name == "typeOf" {
-                if args.len() != 1 {
-                    return Err(LowerError {
-                        message: format!("typeof requires exactly 1 argument, got {}", args.len()),
-                    });
-                }
-                let arg = &args[0];
-                let arg_var = self.lower_expr(func, arg)?;
-                // Pass compile-time type tag as second argument to disambiguate
-                // Int/Float/Bool which are all i64 at runtime
-                let tag = self.expr_type_tag(arg);
-                let tag_var = func.alloc_var();
-                func.push(IrInst::ConstInt(tag_var, tag));
-                let result = func.alloc_var();
-                func.push(IrInst::Call(
-                    result,
-                    "taida_typeof".to_string(),
-                    vec![arg_var, tag_var],
-                ));
-                return Ok(result);
-            }
-
-            if name == "nowMs" {
-                if !args.is_empty() {
-                    return Err(LowerError {
-                        message: format!("nowMs requires 0 arguments, got {}", args.len()),
-                    });
-                }
-                let result = func.alloc_var();
-                func.push(IrInst::Call(
-                    result,
-                    "taida_time_now_ms".to_string(),
-                    vec![],
-                ));
-                return Ok(result);
-            }
-
-            if name == "sleep" {
-                if args.len() != 1 {
-                    return Err(LowerError {
-                        message: format!(
-                            "sleep requires exactly 1 argument (ms), got {}",
-                            args.len()
-                        ),
-                    });
-                }
-                let ms = self.lower_expr(func, &args[0])?;
-                let result = func.alloc_var();
-                func.push(IrInst::Call(
-                    result,
-                    "taida_time_sleep".to_string(),
-                    vec![ms],
-                ));
-                return Ok(result);
-            }
-
-            if name == "range" {
-                if args.len() < 2 || args.len() > 3 {
-                    return Err(LowerError {
-                        message: format!("range requires 2 or 3 arguments, got {}", args.len()),
-                    });
-                }
-                let start = self.lower_expr(func, &args[0])?;
-                let end = self.lower_expr(func, &args[1])?;
-                let result = func.alloc_var();
-                func.push(IrInst::Call(
-                    result,
-                    "taida_range".to_string(),
-                    vec![start, end],
-                ));
-                return Ok(result);
-            }
-
-            if name == "allEnv" || name == "argv" {
-                if !args.is_empty() {
-                    return Err(LowerError {
-                        message: format!("{} requires 0 arguments, got {}", name, args.len()),
-                    });
-                }
-                let rt_name = if name == "allEnv" {
-                    "taida_os_all_env"
-                } else {
-                    "taida_os_argv"
-                };
-                let result = func.alloc_var();
-                func.push(IrInst::Call(result, rt_name.to_string(), vec![]));
-                return Ok(result);
-            }
-
-            // RC2.5: addon dispatch takes precedence over stdlib lookup.
-            // The call is emitted as a single `taida_addon_call` runtime
-            // invocation; argv is packed into a tiny per-call Taida Pack
-            // so the C dispatcher can read positional arguments with tags.
-            //
-            // The same helper is reused by the `Expr::MoldInst` lowering
-            // path (Phase 2 / RC2.5-2a), so any user-side spelling of
-            // `foo()` or `Foo[]()` routes through identical IR.
-            if self.addon_func_refs.contains_key(name) {
+            // RC2.5: an addon import is emitted as a single
+            // `taida_addon_call` runtime invocation; argv is packed into a
+            // tiny per-call Taida Pack so the C dispatcher can read
+            // positional arguments with tags. The same helper is reused by
+            // the `Expr::MoldInst` lowering path (Phase 2 / RC2.5-2a), so
+            // any user-side spelling of `foo()` or `Foo[]()` routes through
+            // identical IR.
+            if !locally_bound && !local_function && self.addon_func_refs.contains_key(name) {
                 return self.emit_addon_call(func, name, args);
             }
 
-            // stdlib ランタイム関数呼び出し（std/math, std/io etc.）
-            // Skip if the name is a net builtin that is shadowed by a parameter.
-            if let Some(rt_name) = self.stdlib_runtime_funcs.get(name).cloned()
-                && !self.is_net_builtin_shadowed(name)
-            {
-                // C12B-038: stdout/stderr `_with_tag` dispatch is
-                // now centralised in `lower_stdout_with_tag` (see
-                // `src/codegen/lower/tag_prop.rs`). The helper preserves
-                // the B11-2b/B11B-004/C12-1/C12-11/C12B-016 semantics:
-                // Str fast path + polymorphic dispatch + FieldAccess
-                // single-eval + param_tag_vars Ident propagation.
-                if (name == "stdout" || name == "stderr") && args.len() == 1 {
-                    return self.lower_stdout_with_tag(func, name, &args[0], rt_name);
-                }
-                // stdin: optional prompt arg (pass empty string if none)
-                if name == "stdin" {
-                    let prompt_var = if let Some(arg) = args.first() {
-                        let arg_var = self.lower_expr(func, arg)?;
-                        self.convert_to_string(func, arg, arg_var)?
-                    } else {
-                        let empty = func.alloc_var();
-                        func.push(IrInst::ConstStr(empty, String::new()));
-                        empty
-                    };
-                    let result = func.alloc_var();
-                    func.push(IrInst::Call(result, rt_name, vec![prompt_var]));
-                    return Ok(result);
-                }
-                // C20-2: stdinLine — mirrors `stdin` arity / prompt
-                // stringification but the runtime returns Async[Lax[Str]]
-                // rather than a bare Str. The prompt is optional and is
-                // display-stringified when present so non-Str prompts
-                // parity-match the interpreter / JS behaviour.
-                if name == "stdinLine" {
-                    let prompt_var = if let Some(arg) = args.first() {
-                        let arg_var = self.lower_expr(func, arg)?;
-                        self.convert_to_string(func, arg, arg_var)?
-                    } else {
-                        let empty = func.alloc_var();
-                        func.push(IrInst::ConstStr(empty, String::new()));
-                        empty
-                    };
-                    let result = func.alloc_var();
-                    func.push(IrInst::Call(result, rt_name, vec![prompt_var]));
-                    return Ok(result);
-                }
-                // v5: wsClose(ws) or wsClose(ws, code) — always pass 2 args.
-                // When code is omitted, pass 0 (C runtime treats 0 as default 1000).
-                if name == "wsClose" {
-                    let ws_var = if let Some(arg) = args.first() {
-                        self.lower_expr(func, arg)?
-                    } else {
-                        return Err(LowerError {
-                            message: "wsClose requires at least 1 argument (ws)".to_string(),
-                        });
-                    };
-                    let code_var = if let Some(arg) = args.get(1) {
-                        self.lower_expr(func, arg)?
-                    } else {
-                        let v = func.alloc_var();
-                        func.push(IrInst::ConstInt(v, 0)); // 0 = use default 1000
-                        v
-                    };
-                    let result = func.alloc_var();
-                    func.push(IrInst::Call(result, rt_name, vec![ws_var, code_var]));
-                    return Ok(result);
-                }
-                // jsonEncode/jsonPretty: pass value directly (no auto-conversion)
-                // The C runtime handles polymorphic serialization
-                if name == "jsonEncode" || name == "jsonPretty" {
-                    let val_var = if let Some(arg) = args.first() {
-                        self.lower_expr(func, arg)?
-                    } else {
-                        let zero = func.alloc_var();
-                        func.push(IrInst::ConstInt(zero, 0));
-                        zero
-                    };
-                    let result = func.alloc_var();
-                    func.push(IrInst::Call(result, rt_name, vec![val_var]));
-                    return Ok(result);
-                }
-                // C12-6a: Regex(pattern, flags?) — the C entry
-                // `taida_regex_new(pattern, flags)` takes 2 Str args;
-                // when `flags` is omitted we pass an empty string so
-                // the ABI signature stays fixed.
-                if name == "Regex" {
-                    if args.is_empty() || args.len() > 2 {
-                        return Err(LowerError {
-                            message: format!(
-                                "Regex requires 1 or 2 arguments (pattern, flags?), got {}",
-                                args.len()
-                            ),
-                        });
-                    }
-                    let pattern_var = self.lower_expr(func, &args[0])?;
-                    let flags_var = if let Some(arg) = args.get(1) {
-                        self.lower_expr(func, arg)?
-                    } else {
-                        let empty = func.alloc_var();
-                        func.push(IrInst::ConstStr(empty, String::new()));
-                        empty
-                    };
-                    let result = func.alloc_var();
-                    func.push(IrInst::Call(result, rt_name, vec![pattern_var, flags_var]));
-                    return Ok(result);
-                }
-                let mut arg_vars = Vec::new();
-                for arg in args {
-                    let var = self.lower_expr(func, arg)?;
-                    arg_vars.push(var);
-                }
-                let result = func.alloc_var();
-                func.push(IrInst::Call(result, rt_name, arg_vars));
-                return Ok(result);
-            }
-
-            // ユーザー定義関数呼び出し
-            if self.user_funcs.contains(name) {
+            // ユーザー定義関数呼び出し（引数・局所変数が同名なら、そちらを呼ぶ）
+            if local_function || (!locally_bound && self.user_funcs.contains(name)) {
                 // NB-14: Stack-based arg tag propagation. Only push/pop when at least
                 // one argument needs tag propagation (avoids overhead for simple calls
                 // like mutual recursion where all args are Int).
@@ -1120,19 +1515,40 @@ impl Lowering {
                 // Clear tail flag during arg lowering so nested CallUser emit get_return_tag.
                 let saved_tail = self.in_tail_call_return;
                 self.in_tail_call_return = false;
+                let param_annotations: Vec<Option<TypeExpr>> = self
+                    .func_param_defs
+                    .get(name)
+                    .map(|params| params.iter().map(|p| p.type_annotation.clone()).collect())
+                    .unwrap_or_default();
                 let mut explicit_arg_vars = Vec::with_capacity(args.len());
-                for arg in args {
-                    explicit_arg_vars.push(self.lower_expr(func, arg)?);
+                for (i, arg) in args.iter().enumerate() {
+                    let var = self.lower_expr(func, arg)?;
+                    let declared = param_annotations.get(i).cloned().flatten();
+                    explicit_arg_vars.push(self.coerce_to_declared(
+                        func,
+                        declared.as_ref(),
+                        arg,
+                        var,
+                    ));
                 }
                 self.in_tail_call_return = saved_tail;
                 if needs_tags {
                     // Post-lower tags: set tags for args whose type came from a call's return tag
                     self.emit_post_lower_arg_tags(func, args, &explicit_arg_vars);
                 }
-                let arg_vars =
-                    self.lower_user_call_effective_args_from_vars(func, name, explicit_arg_vars)?;
+                let (mangled, arg_vars) =
+                    match self.default_arity_entry_for(name, explicit_arg_vars.len()) {
+                        Some(entry) => (entry, explicit_arg_vars),
+                        None => (
+                            self.resolve_user_func_symbol(name),
+                            self.lower_user_call_effective_args_from_vars(
+                                func,
+                                name,
+                                explicit_arg_vars,
+                            )?,
+                        ),
+                    };
                 let result = func.alloc_var();
-                let mangled = self.resolve_user_func_symbol(name);
                 func.push(IrInst::CallUser(result, mangled, arg_vars));
                 // NB-14: Capture return type tag from callee (skip in tail position for TCO)
                 if !self.in_tail_call_return {
@@ -1165,6 +1581,35 @@ impl Lowering {
                 for arg in args {
                     let var = self.lower_expr(func, arg)?;
                     arg_vars.push(var);
+                }
+                // A local function compiled as a closure, called with
+                // trailing arguments omitted from the body that defines it.
+                if let Some(symbol) = self.local_closure_symbol(name)
+                    && let Some(params) = self.func_param_defs.get(&symbol).cloned()
+                    && arg_vars.len() < params.len()
+                {
+                    arg_vars =
+                        self.complete_args_with_param_defaults(func, name, &params, arg_vars)?;
+                }
+                // A name bound to a user function (`f <= add3`), called with
+                // trailing arguments omitted: that function's default entry
+                // completes the call.
+                if let Some(target) = self.alias_target_function(name) {
+                    if let Some(symbol) = self.local_closure_symbol(&target) {
+                        if let Some(params) = self.func_param_defs.get(&symbol).cloned()
+                            && arg_vars.len() < params.len()
+                        {
+                            arg_vars = self.complete_args_with_param_defaults(
+                                func, &target, &params, arg_vars,
+                            )?;
+                        }
+                    } else if let Some(entry) =
+                        self.default_arity_entry_for(&target, arg_vars.len())
+                    {
+                        let result = func.alloc_var();
+                        func.push(IrInst::CallUser(result, entry, arg_vars));
+                        return Ok(result);
+                    }
                 }
                 let closure_var = func.alloc_var();
                 func.push(IrInst::UseVar(closure_var, name.clone()));
@@ -1316,18 +1761,46 @@ impl Lowering {
             });
         }
 
-        let mut last_result = None;
+        // `debug(x)` prints `x` and yields `x` itself.
+        let mut last_value = None;
         for arg in args {
             let arg_var = self.lower_expr(func, arg)?;
-            let runtime_fn = self.debug_fn_for_expr(arg);
-            let result = func.alloc_var();
-            func.push(IrInst::Call(result, runtime_fn, vec![arg_var]));
-            last_result = Some(result);
+            let printed = func.alloc_var();
+            if self.expr_type_tag(arg) == crate::codegen::tag_prop::TAG_CLOSURE {
+                // `<function name>`: only the static type tells a named
+                // function's WASM table index apart from an Int.
+                let shown = func.alloc_var();
+                func.push(IrInst::Call(
+                    shown,
+                    "taida_function_to_string".to_string(),
+                    vec![arg_var],
+                ));
+                func.push(IrInst::Call(
+                    printed,
+                    "taida_debug_str".to_string(),
+                    vec![shown],
+                ));
+            } else {
+                let runtime_fn = self.debug_fn_for_expr(arg);
+                func.push(IrInst::Call(printed, runtime_fn, vec![arg_var]));
+            }
+            last_value = Some(arg_var);
         }
-        Ok(last_result.unwrap())
+        Ok(last_value.unwrap())
     }
 
     pub(super) fn debug_fn_for_expr(&self, expr: &Expr) -> String {
+        if let Some(tag) = self.checked_tag(expr) {
+            use crate::codegen::tag_prop::*;
+            return match tag {
+                TAG_INT => "taida_debug_int",
+                TAG_FLOAT => "taida_debug_float",
+                TAG_BOOL => "taida_debug_bool",
+                TAG_STR => "taida_debug_str",
+                _ => "taida_debug_polymorphic",
+            }
+            .to_string();
+        }
         match expr {
             Expr::IntLit(..) => "taida_debug_int".to_string(),
             Expr::FloatLit(..) => "taida_debug_float".to_string(),
@@ -1420,6 +1893,87 @@ impl Lowering {
         }
     }
 
+    /// Whether evaluating `expr` has no effect beyond producing its value
+    /// (no call, nothing printed or thrown), so evaluating it early, or
+    /// not at all, cannot be observed.
+    pub(super) fn expr_is_effect_free(expr: &Expr) -> bool {
+        match expr {
+            Expr::IntLit(..)
+            | Expr::FloatLit(..)
+            | Expr::StringLit(..)
+            | Expr::BoolLit(..)
+            | Expr::Ident(..) => true,
+            Expr::BinaryOp(lhs, _, rhs, _) => {
+                Self::expr_is_effect_free(lhs) && Self::expr_is_effect_free(rhs)
+            }
+            Expr::UnaryOp(_, inner, _) | Expr::FieldAccess(inner, _, _) => {
+                Self::expr_is_effect_free(inner)
+            }
+            _ => false,
+        }
+    }
+
+    /// `a && b` / `a || b` whose right operand could have an effect: the
+    /// right operand runs only when the left one does not decide the result.
+    fn lower_short_circuit(
+        &mut self,
+        func: &mut IrFunction,
+        lhs: &Expr,
+        op: &BinOp,
+        rhs: &Expr,
+    ) -> Result<IrVar, LowerError> {
+        use crate::codegen::ir::CondArm as IrCondArm;
+
+        let is_and = matches!(op, BinOp::And);
+        let runtime_fn = if is_and {
+            "taida_bool_and"
+        } else {
+            "taida_bool_or"
+        };
+        let lhs_var = self.lower_expr(func, lhs)?;
+
+        // The arm that evaluates the right operand combines it with the
+        // left one through the usual runtime helper, so the result is the
+        // same Bool the eager form gives.
+        let saved = std::mem::take(&mut func.body);
+        let rhs_var = self.lower_expr(func, rhs)?;
+        let combined = func.alloc_var();
+        func.push(IrInst::Call(
+            combined,
+            runtime_fn.to_string(),
+            vec![lhs_var, rhs_var],
+        ));
+        let rhs_insts = std::mem::replace(&mut func.body, saved);
+
+        let saved = std::mem::take(&mut func.body);
+        let decided = func.alloc_var();
+        func.push(IrInst::ConstBool(decided, !is_and));
+        let decided_insts = std::mem::replace(&mut func.body, saved);
+
+        let (taken, taken_var, other, other_var) = if is_and {
+            (rhs_insts, combined, decided_insts, decided)
+        } else {
+            (decided_insts, decided, rhs_insts, combined)
+        };
+        let result = func.alloc_var();
+        func.push(IrInst::CondBranch(
+            result,
+            vec![
+                IrCondArm {
+                    condition: Some(lhs_var),
+                    body: taken,
+                    result: taken_var,
+                },
+                IrCondArm {
+                    condition: None,
+                    body: other,
+                    result: other_var,
+                },
+            ],
+        ));
+        Ok(result)
+    }
+
     pub(super) fn lower_binary_op(
         &mut self,
         func: &mut IrFunction,
@@ -1427,6 +1981,13 @@ impl Lowering {
         op: &BinOp,
         rhs: &Expr,
     ) -> Result<IrVar, LowerError> {
+        if matches!(op, BinOp::And | BinOp::Or) && !Self::expr_is_effect_free(rhs) {
+            return self.lower_short_circuit(func, lhs, op, rhs);
+        }
+        if !matches!(op, BinOp::And | BinOp::Or) {
+            self.reject_untyped_addon_value(func, lhs)?;
+            self.reject_untyped_addon_value(func, rhs)?;
+        }
         let lhs_var = self.lower_expr(func, lhs)?;
         let rhs_var = self.lower_expr(func, rhs)?;
 
@@ -1514,8 +2075,12 @@ impl Lowering {
                     // Value::eq. The untyped poly fallback below keeps the
                     // historical raw comparison for dynamic operands.
                     || (self.expr_is_list(lhs) && self.expr_is_list(rhs))
+                    || self.eq_needs_kind_aware_compare(lhs, rhs)
+                    || (self.collection_kind(lhs).is_some() && self.collection_kind(rhs).is_some())
                 {
                     "taida_poly_eq_tagged"
+                } else if self.eq_operands_are_ints(lhs, rhs) {
+                    "taida_int_eq"
                 } else if lhs_is_str || rhs_is_str {
                     "taida_str_eq"
                 } else if self.expr_returns_float(lhs) || self.expr_returns_float(rhs) {
@@ -1534,8 +2099,12 @@ impl Lowering {
                 if self.operand_shadow_kind(lhs).is_some()
                     || self.operand_shadow_kind(rhs).is_some()
                     || (self.expr_is_list(lhs) && self.expr_is_list(rhs))
+                    || self.eq_needs_kind_aware_compare(lhs, rhs)
+                    || (self.collection_kind(lhs).is_some() && self.collection_kind(rhs).is_some())
                 {
                     "taida_poly_neq_tagged"
+                } else if self.eq_operands_are_ints(lhs, rhs) {
+                    "taida_int_neq"
                 } else if lhs_is_str || rhs_is_str {
                     "taida_str_neq"
                 } else if self.expr_returns_float(lhs) || self.expr_returns_float(rhs) {
@@ -1589,8 +2158,8 @@ impl Lowering {
         // the operand is an unmolded Lax payload, a compile-time EKIND
         // constant otherwise).
         if runtime_fn == "taida_poly_eq_tagged" || runtime_fn == "taida_poly_neq_tagged" {
-            let lhs_kind = self.emit_operand_ekind(func, lhs);
-            let rhs_kind = self.emit_operand_ekind(func, rhs);
+            let lhs_kind = self.emit_eq_operand_ekind(func, lhs);
+            let rhs_kind = self.emit_eq_operand_ekind(func, rhs);
             let result = func.alloc_var();
             func.push(IrInst::Call(
                 result,
@@ -1627,13 +2196,63 @@ impl Lowering {
         Ok(result)
     }
 
+    /// `==` / `!=` whose operands the checker typed as heap values (packs,
+    /// lists, maps, sets, bytes, functions) or as different kinds: the
+    /// interpreter compares them by value, kind first, so they go through
+    /// the kind-aware structural comparison rather than a raw word compare.
+    fn eq_needs_kind_aware_compare(&self, lhs: &Expr, rhs: &Expr) -> bool {
+        use crate::codegen::tag_prop::*;
+        let (Some(l), Some(r)) = (self.checked_tag(lhs), self.checked_tag(rhs)) else {
+            return false;
+        };
+        let numeric = |t: i64| t == TAG_INT || t == TAG_FLOAT;
+        let heap = |t: i64| matches!(t, TAG_PACK | TAG_LIST | TAG_CLOSURE);
+        heap(l) || heap(r) || (l != r && !(numeric(l) && numeric(r)))
+    }
+
+    /// The runtime kind of a HashMap (7) or Set (8) operand, from the
+    /// checker's type. Such values carry no static tag of their own (the
+    /// shared pack tag would send their method calls down the pack path),
+    /// so `==` names their kind for the runtime to compare them entry by
+    /// entry.
+    fn collection_kind(&self, expr: &Expr) -> Option<i64> {
+        use crate::types::Type;
+        match self.typed_expr_table.lookup(expr)? {
+            Type::Named(name) | Type::Generic(name, _) if name == "HashMap" => Some(7),
+            Type::Named(name) | Type::Generic(name, _) if name == "Set" => Some(8),
+            _ => None,
+        }
+    }
+
+    /// The kind entry an `==` / `!=` operand rides with.
+    fn emit_eq_operand_ekind(&mut self, func: &mut IrFunction, expr: &Expr) -> IrVar {
+        match self.collection_kind(expr) {
+            Some(kind) => {
+                let v = func.alloc_var();
+                func.push(IrInst::ConstInt(v, kind));
+                v
+            }
+            None => self.emit_operand_ekind(func, expr),
+        }
+    }
+
+    /// `==` / `!=` between two values the checker typed as Int (or both as
+    /// Bool): a plain word comparison.
+    fn eq_operands_are_ints(&self, lhs: &Expr, rhs: &Expr) -> bool {
+        use crate::codegen::tag_prop::*;
+        matches!(
+            (self.checked_tag(lhs), self.checked_tag(rhs)),
+            (Some(TAG_INT), Some(TAG_INT)) | (Some(TAG_BOOL), Some(TAG_BOOL))
+        )
+    }
+
     /// Value-tag track: the shadow-kind variable name for an operand, when
     /// the operand is an identifier bound by a runtime-kind unmold.
     pub(crate) fn operand_shadow_kind(&self, expr: &Expr) -> Option<String> {
         if let Expr::Ident(name, _) = expr
             && self.shadow_kind_vars.contains(name)
         {
-            return Some(format!("__ekind__{}", name));
+            return Some(format!("{HIDDEN}ekind_{name}"));
         }
         None
     }
@@ -1659,12 +2278,36 @@ impl Lowering {
     /// operands already carry f64 bits, dynamically-typed operands keep the
     /// runtime-side dispatch, and Bool/Str can only reach a float helper
     /// through paths the checker rejects, so they are left untouched.
+    /// Convert `var` (the value of `expr`) to the representation a slot
+    /// declared as `declared` expects. The checker accepts an Int where a
+    /// Float is declared; the value is converted at the boundary so that
+    /// the arithmetic, comparisons and formatting inside see a Float.
+    pub(super) fn coerce_to_declared(
+        &mut self,
+        func: &mut IrFunction,
+        declared: Option<&TypeExpr>,
+        expr: &Expr,
+        var: IrVar,
+    ) -> IrVar {
+        let declared_float = matches!(declared, Some(TypeExpr::Named(n)) if n == "Float");
+        if !declared_float || self.checked_tag(expr) != Some(crate::codegen::tag_prop::TAG_INT) {
+            return var;
+        }
+        let lifted = func.alloc_var();
+        func.push(IrInst::Call(
+            lifted,
+            "taida_int_to_float".to_string(),
+            vec![var],
+        ));
+        lifted
+    }
+
     fn lift_static_int_to_f64(&mut self, func: &mut IrFunction, expr: &Expr, var: IrVar) -> IrVar {
-        if self.expr_returns_float(expr)
-            || self.expr_type_is_unknown(expr)
-            || self.expr_is_bool(expr)
-            || self.expr_is_string_full(expr)
-        {
+        // Only an operand known to be an Int is lifted. "Not known to be
+        // anything else" is no evidence: a value taken out of an untyped
+        // HashMap may be a Float, and lifting its bit pattern as an Int
+        // would read it as a huge number.
+        if self.expr_returns_float(expr) || !self.expr_is_int(expr) {
             return var;
         }
         let lifted = func.alloc_var();
@@ -1682,6 +2325,9 @@ impl Lowering {
         op: &UnaryOp,
         operand: &Expr,
     ) -> Result<IrVar, LowerError> {
+        if matches!(op, UnaryOp::Neg) {
+            self.reject_untyped_addon_value(func, operand)?;
+        }
         let operand_var = self.lower_expr(func, operand)?;
         let runtime_fn = match op {
             UnaryOp::Neg => {
@@ -1717,6 +2363,19 @@ impl Lowering {
         func: &mut IrFunction,
         exprs: &[Expr],
     ) -> Result<IrVar, LowerError> {
+        self.lower_pipeline_in(func, exprs, false)
+    }
+
+    /// `tail`: the pipeline is in tail position, so a last stage that calls a
+    /// function with the piped value (`x => f(a, _)`) is lowered as that call
+    /// in tail position (a self call becomes a `TailCall`), as the interpreter
+    /// evaluates it.
+    fn lower_pipeline_in(
+        &mut self,
+        func: &mut IrFunction,
+        exprs: &[Expr],
+        tail: bool,
+    ) -> Result<IrVar, LowerError> {
         if exprs.is_empty() {
             return Err(LowerError {
                 message: "empty pipeline".to_string(),
@@ -1739,13 +2398,15 @@ impl Lowering {
 
         for (step_idx, expr) in exprs[1..].iter().enumerate() {
             let i = step_idx + 1;
-            // Intermediate `=> name` bind-and-forward
+            // Intermediate `=> name` bind-and-forward (a name holding a
+            // function value is applied instead, as the interpreter does)
             if i < last_idx
                 && let Expr::Ident(name, _) = expr
                 && !self.is_native_pipeline_callable_ident(name)
+                && self.checked_tag(expr) != Some(crate::codegen::tag_prop::TAG_CLOSURE)
             {
                 // Bind to a fresh synthetic so the outer `name` is untouched.
-                let synthetic = format!("__pipe_bind_{}_{}", self.lambda_counter, name);
+                let synthetic = format!("{HIDDEN}pipe_bind_{}_{}", self.lambda_counter, name);
                 self.lambda_counter += 1;
                 func.push(IrInst::DefVar(synthetic.clone(), current));
                 // Carry the forwarded value's static kind onto the synthetic so
@@ -1777,6 +2438,17 @@ impl Lowering {
                 current = self.lower_expr(func, &rewritten)?;
                 continue;
             }
+            // The last stage of a pipeline in tail position, calling a
+            // function with the piped value: Rule 1 of `lower_pipeline_step`,
+            // lowered in tail position.
+            if tail && i == last_idx && is_piped_call(expr) {
+                let prev = rewrite_idents(&exprs[i - 1], &bind_renames);
+                self.track_pipe_prev_type(&prev);
+                func.push(IrInst::DefVar(PIPE_PREV.to_string(), current));
+                let span = expr.span().clone();
+                let rewritten = self.rewrite_placeholder(expr, PIPE_PREV, &span);
+                return self.lower_expr_tail(func, &rewritten);
+            }
             // Placeholder/transforming step: the incoming value's kind comes
             // from the previous stage's expr, renamed through active binds so a
             // bound name resolves to its synthetic's recorded kind.
@@ -1795,7 +2467,7 @@ impl Lowering {
     /// lowerer (user function, prelude builtin with a pipeline form,
     /// etc.), rather than a bind-and-forward target.
     fn is_native_pipeline_callable_ident(&self, name: &str) -> bool {
-        if self.user_funcs.contains(name) {
+        if self.user_funcs.contains(name) || self.inner_func_symbol(name).is_some() {
             return true;
         }
         // `lower_pipeline_step` currently only special-cases "debug" for
@@ -1806,20 +2478,20 @@ impl Lowering {
     }
 
     /// Record the previous pipeline stage's static type on the synthetic
-    /// `__pipe_prev` binding so a placeholder consumer (`_.toString()`,
+    /// `#pipe_prev` binding so a placeholder consumer (`_.toString()`,
     /// comparisons, ...) dispatches on the right kind. The native lowering
     /// reads `bool_vars` / `float_vars` / `string_vars` for kind dispatch;
-    /// `__pipe_prev` is otherwise a kind-less `DefVar` that collapses
+    /// `#pipe_prev` is otherwise a kind-less `DefVar` that collapses
     /// Bool/Float to the Int-display polymorphic path — e.g.
     /// `flag => stdout(_.toString())` would print `1` instead of `true` on
     /// native without this.
     fn track_pipe_prev_type(&mut self, prev_expr: &Expr) {
-        self.track_forwarded_pipe_type("__pipe_prev", prev_expr);
+        self.track_forwarded_pipe_type(PIPE_PREV, prev_expr);
     }
 
     /// Record `prev_expr`'s static type on `target` so a later placeholder /
     /// bound consumer dispatches on the right kind. `target` is either the
-    /// synthetic `__pipe_prev` placeholder binding (`flag => stdout(_.toString())`)
+    /// synthetic `#pipe_prev` placeholder binding (`flag => stdout(_.toString())`)
     /// or a `=> name` bind-and-forward synthetic (`true => x => stdout(_.toString())`,
     /// where the kind must survive the intermediate binding). All six kind sets
     /// are cleared first so a stage that forwards a different kind (or a kind
@@ -1833,6 +2505,26 @@ impl Lowering {
         self.pack_vars.remove(target);
         self.list_vars.remove(target);
         self.int_vars.remove(target);
+        // The checker's type of the value the stage passes on decides.
+        if let Some(ty) = self.typed_expr_table.stage_result(prev_expr).cloned() {
+            use crate::types::Type;
+            match &ty {
+                Type::Bool => self.bool_vars.insert(target.to_string()),
+                Type::Float => self.float_vars.insert(target.to_string()),
+                Type::Str => self.string_vars.insert(target.to_string()),
+                Type::Int => self.int_vars.insert(target.to_string()),
+                Type::List(_) => self.list_vars.insert(target.to_string()),
+                Type::BuchiPack(_) | Type::Error(_) | Type::Named(_)
+                    if self.type_runtime_tag(&ty) == Some(crate::codegen::tag_prop::TAG_PACK) =>
+                {
+                    self.pack_vars.insert(target.to_string())
+                }
+                _ => false,
+            };
+            if self.type_runtime_tag(&ty).is_some() {
+                return;
+            }
+        }
         if self.expr_is_likely_bool(prev_expr) {
             self.bool_vars.insert(target.to_string());
         } else if self.expr_returns_float(prev_expr) {
@@ -1856,14 +2548,14 @@ impl Lowering {
         prev_expr: &Expr,
     ) -> Result<IrVar, LowerError> {
         // POST-STABLE-007: track the previous stage's static type on
-        // `__pipe_prev` before lowering this step (see `track_pipe_prev_type`).
+        // `#pipe_prev` before lowering this step (see `track_pipe_prev_type`).
         self.track_pipe_prev_type(prev_expr);
 
         // F62B-025: pipeline application closes over exactly two rules
         // (mirror of the interpreter's `eval_pipeline_step`).
         //
         // Rule 1 — the stage contains `_` (one at most, E1543): bind the
-        // piped value to `__pipe_prev`, rewrite the placeholder, and lower
+        // piped value to `#pipe_prev`, rewrite the placeholder, and lower
         // the stage as written.
         //
         // Rule 2 — no `_`: lower the stage as written and call the result
@@ -1885,12 +2577,12 @@ impl Lowering {
 
         if placeholder_count == 1 {
             // Rule 1: syntactic injection at the placeholder.
-            // C12B-020: a lone `expr => _` rewrites to `__pipe_prev` and
+            // C12B-020: a lone `expr => _` rewrites to `#pipe_prev` and
             // lowers to a plain variable read — the previous accumulator
             // passes through unchanged.
-            func.push(IrInst::DefVar("__pipe_prev".to_string(), prev_result));
+            func.push(IrInst::DefVar(PIPE_PREV.to_string(), prev_result));
             let span = expr.span().clone();
-            let rewritten = self.rewrite_placeholder(expr, "__pipe_prev", &span);
+            let rewritten = self.rewrite_placeholder(expr, PIPE_PREV, &span);
             return self.lower_expr(func, &rewritten);
         }
 
@@ -1902,31 +2594,35 @@ impl Lowering {
             // closure-typed variables and lambdas take `CallIndirect`,
             // builtins take their dedicated runtime calls.
             Expr::Ident(name, span) => {
-                if name == "debug" {
-                    // debug は特殊: debug(prev)
+                let locally_bound = Self::is_local_binding(func, name);
+                if !locally_bound
+                    && (self.inner_func_symbol(name).is_some() || self.user_funcs.contains(name))
+                {
+                    let (mangled, arg_vars) = match self.default_arity_entry_for(name, 1) {
+                        Some(entry) => (entry, vec![prev_result]),
+                        None => (
+                            self.resolve_user_func_symbol(name),
+                            self.lower_user_call_effective_args_from_vars(
+                                func,
+                                name,
+                                vec![prev_result],
+                            )?,
+                        ),
+                    };
                     let result = func.alloc_var();
-                    func.push(IrInst::Call(
-                        result,
-                        "taida_debug_int".to_string(),
-                        vec![prev_result],
-                    ));
-                    return Ok(result);
-                }
-                if self.user_funcs.contains(name) {
-                    let arg_vars = self.lower_user_call_effective_args_from_vars(
-                        func,
-                        name,
-                        vec![prev_result],
-                    )?;
-                    let result = func.alloc_var();
-                    let mangled = self.resolve_user_func_symbol(name);
                     func.push(IrInst::CallUser(result, mangled, arg_vars));
                     return Ok(result);
                 }
                 // Closure-typed variable (`f <= add(, 3)` then `5 => f`) or
-                // builtin name: lower as `name(__pipe_prev)`.
-                func.push(IrInst::DefVar("__pipe_prev".to_string(), prev_result));
-                let arg = Expr::Ident("__pipe_prev".to_string(), span.clone());
+                // builtin name: lower as `name(#pipe_prev)`.
+                func.push(IrInst::DefVar(PIPE_PREV.to_string(), prev_result));
+                // A synthesised node: it must not alias the stage's own id
+                // in the checker's type table.
+                let arg = Expr::Ident(
+                    PIPE_PREV.to_string(),
+                    span.clone()
+                        .with_node_id(crate::parser::SYNTHETIC_NODE_ID_BASE),
+                );
                 self.lower_func_call(func, expr, &[arg])
             }
             _ => {
@@ -1950,7 +2646,11 @@ impl Lowering {
         span: &crate::lexer::Span,
     ) -> Expr {
         match expr {
-            Expr::Placeholder(_) => Expr::Ident(replacement.to_string(), span.clone()),
+            // The placeholder's own node id carries the piped value's
+            // checker type; the other rewritten nodes keep theirs too.
+            Expr::Placeholder(placeholder_span) => {
+                Expr::Ident(replacement.to_string(), placeholder_span.clone())
+            }
             Expr::BinaryOp(lhs, op, rhs, s) => Expr::BinaryOp(
                 Box::new(self.rewrite_placeholder(lhs, replacement, span)),
                 op.clone(),
@@ -2087,6 +2787,7 @@ impl Lowering {
                 value: self.rewrite_placeholder(&assign.value, replacement, span),
                 doc_comments: assign.doc_comments.clone(),
                 span: assign.span.clone(),
+                forward: assign.forward,
             }),
             // Review C-8: unmold bindings rewrite their source like the
             // interpreter's statement rewriter — the shared placeholder
@@ -2117,6 +2818,9 @@ impl Lowering {
         func: &mut IrFunction,
         fields: &[BuchiField],
     ) -> Result<IrVar, LowerError> {
+        for field in fields {
+            self.reject_untyped_addon_value(func, &field.value)?;
+        }
         // QF-16: Placeholder 値のフィールドをスキップ（=> :Type が Placeholder として
         // パースされるため、BuchiPack 内ラムダの戻り値型注釈が不正なフィールドになる）
         let real_fields: Vec<_> = fields
@@ -2246,6 +2950,36 @@ impl Lowering {
 
         let obj_var = self.lower_expr(func, obj)?;
 
+        // `type` / `message` of an Error value may be omitted from the value
+        // itself; they read as the type's name and "".
+        if matches!(field, "type" | "message") && self.expr_is_error_value(obj) {
+            let which = func.alloc_var();
+            func.push(IrInst::ConstInt(which, i64::from(field == "message")));
+            let result = func.alloc_var();
+            func.push(IrInst::Call(
+                result,
+                "taida_error_field".to_string(),
+                vec![obj_var, which],
+            ));
+            return Ok(result);
+        }
+
+        // A Result given no error reads its `throw` as the empty Error.
+        if field == "throw"
+            && matches!(
+                self.typed_expr_table.lookup(obj),
+                Some(crate::types::Type::Generic(name, _)) if name == "Result"
+            )
+        {
+            let result = func.alloc_var();
+            func.push(IrInst::Call(
+                result,
+                "taida_result_throw_field".to_string(),
+                vec![obj_var],
+            ));
+            return Ok(result);
+        }
+
         // フィールドのインデックスをランタイムで解決
         // ランタイム関数 taida_pack_get_by_name(pack, field_name_hash) を使う
         let field_hash = simple_hash(field);
@@ -2297,7 +3031,7 @@ impl Lowering {
         for (pack_idx, (arg_idx, _)) in captured_vars.iter().enumerate() {
             let dst = lambda_fn.alloc_var();
             lambda_fn.push(IrInst::PackGet(dst, 0u32, pack_idx));
-            lambda_fn.push(IrInst::DefVar(format!("__pa_cap_{}", arg_idx), dst));
+            lambda_fn.push(IrInst::DefVar(format!("{HIDDEN}pa_cap_{arg_idx}"), dst));
         }
 
         // Build the actual call arguments in order
@@ -2311,30 +3045,37 @@ impl Lowering {
                 hole_idx += 1;
             } else {
                 let v = lambda_fn.alloc_var();
-                lambda_fn.push(IrInst::UseVar(v, format!("__pa_cap_{}", i)));
+                lambda_fn.push(IrInst::UseVar(v, format!("{HIDDEN}pa_cap_{i}")));
                 call_args.push(v);
             }
         }
 
-        // Generate the call inside the lambda
+        // Generate the call inside the lambda: a named function is called
+        // directly; any other callee (a function value held by a parameter,
+        // a local or a top-level variable, or a computed callee) is
+        // evaluated here, captured, and called indirectly.
         let result = lambda_fn.alloc_var();
-        if let Expr::Ident(name, _) = callee {
-            if self.user_funcs.contains(name) {
-                let mangled = self.resolve_user_func_symbol(name);
-                lambda_fn.push(IrInst::CallUser(result, mangled, call_args));
-            } else if let Some(rt_name) = self.stdlib_runtime_funcs.get(name).cloned() {
-                lambda_fn.push(IrInst::Call(result, rt_name, call_args));
-            } else {
-                // Lambda/closure variable call
-                let closure_var = lambda_fn.alloc_var();
-                // Need to restore callee from globals or environment
-                self.globals_referenced.insert(name.clone());
-                let hash = self.global_var_hash(name);
-                lambda_fn.push(IrInst::GlobalGet(closure_var, hash));
-                lambda_fn.push(IrInst::CallIndirect(result, closure_var, call_args));
+        let direct = match callee {
+            Expr::Ident(name, _) if !Self::is_local_binding(func, name) => {
+                if self.inner_func_symbol(name).is_some() || self.user_funcs.contains(name) {
+                    Some(IrInst::CallUser(
+                        result,
+                        self.resolve_user_func_symbol(name),
+                        call_args.clone(),
+                    ))
+                } else if !self.top_level_vars.contains(name)
+                    && let Some(rt_name) = self.stdlib_runtime_funcs.get(name).cloned()
+                {
+                    Some(IrInst::Call(result, rt_name, call_args.clone()))
+                } else {
+                    None
+                }
             }
+            _ => None,
+        };
+        if let Some(call) = direct {
+            lambda_fn.push(call);
         } else {
-            // Non-ident callee: evaluate in parent, capture, and call indirectly
             let callee_var = self.lower_expr(func, callee)?;
             captured_vars.push((usize::MAX, callee_var)); // special capture for callee
             let callee_restore = lambda_fn.alloc_var();
@@ -2356,9 +3097,9 @@ impl Lowering {
             .iter()
             .map(|(idx, _)| {
                 if *idx == usize::MAX {
-                    "__pa_callee".to_string()
+                    format!("{HIDDEN}pa_callee")
                 } else {
-                    format!("__pa_cap_{}", idx)
+                    format!("{HIDDEN}pa_cap_{idx}")
                 }
             })
             .collect();
@@ -2383,12 +3124,28 @@ impl Lowering {
         body: &Expr,
     ) -> Result<IrVar, LowerError> {
         let lambda_name = self.next_lambda_symbol("lambda");
+        // `name <= _ x = ... name(...) ...`: the lambda's reference to its
+        // own binding is a call back into itself, not a captured value (the
+        // binding does not exist yet when the closure is created).
+        let self_binding = self
+            .lambda_binding_name
+            .take()
+            .filter(|name| !params.iter().any(|p| p.name == *name));
 
         // キャプチャ変数の検出: ラムダ本体で使われる変数のうち、
         // パラメータでもなく、ユーザー定義関数でもないもの
         let param_names: std::collections::HashSet<&str> =
             params.iter().map(|p| p.name.as_str()).collect();
-        let free_vars = self.collect_free_vars(body, &param_names);
+        let mut free_vars = self.collect_free_vars(body, &param_names);
+        if let Some(name) = &self_binding {
+            free_vars.retain(|v| v != name);
+        }
+        // Only this lambda's own name re-enters it; a lambda nested in a
+        // local closure does not inherit the outer self-reference.
+        let prev_closure_self = std::mem::replace(
+            &mut self.closure_self,
+            self_binding.map(|name| (name, lambda_name.clone())),
+        );
 
         // Scope-aware net builtin shadowing: snapshot/restore for lambda scope
         let prev_shadowed_net = self.shadowed_net_builtins.clone();
@@ -2398,6 +3155,7 @@ impl Lowering {
         let prev_lambda_param_counts = self.lambda_param_counts.clone();
         let prev_lambda_vars = self.lambda_vars.clone();
         let prev_closure_vars = self.closure_vars.clone();
+        let prev_function_ref_vars = self.function_ref_vars.clone();
         let prev_heap_vars = std::mem::take(&mut self.current_heap_vars);
         let prev_int_vars = self.int_vars.clone();
         // Value-tag track: shadow kinds are IR variables of the ENCLOSING
@@ -2420,6 +3178,7 @@ impl Lowering {
             self.lambda_param_counts.remove(&p.name);
             self.lambda_vars.remove(&p.name);
             self.closure_vars.remove(&p.name);
+            self.function_ref_vars.remove(&p.name);
             if let Some(type_ann) = &p.type_annotation {
                 match type_ann {
                     crate::parser::TypeExpr::Named(name) if name == "Int" || name == "Num" => {
@@ -2499,6 +3258,7 @@ impl Lowering {
             // value, whose type differs from the source (`Lax[n]() >=> x`
             // yields the Int) — their return tag must not be derived from
             // the source expression, so they carry no tag expression.
+            self.local_body_depth += 1;
             let (body_var, body_value_expr): (IrVar, Option<&Expr>) = match body {
                 Expr::Block(stmts, _) => {
                     let Some((last, init)) = stmts.split_last() else {
@@ -2540,6 +3300,7 @@ impl Lowering {
                 }
                 other => (self.lower_expr(&mut lambda_fn, other)?, Some(other)),
             };
+            self.local_body_depth -= 1;
 
             // NB-14: Set return type tag before Return (symmetric with lower_func_def)
             if let Some(&rtv) = self.return_tag_vars.get(&body_var) {
@@ -2595,6 +3356,7 @@ impl Lowering {
             self.lambda_param_counts = prev_lambda_param_counts;
             self.lambda_vars = prev_lambda_vars;
             self.closure_vars = prev_closure_vars;
+            self.function_ref_vars = prev_function_ref_vars;
             self.int_vars = prev_int_vars;
             self.shadow_kind_vars = prev_shadow_kinds;
             self.float_vars = prev_float_vars;
@@ -2603,6 +3365,7 @@ impl Lowering {
             self.pack_vars = prev_pack_vars;
             self.list_vars = prev_list_vars;
             self.current_heap_vars = prev_heap_vars;
+            self.closure_self = prev_closure_self;
 
             Ok(dst)
         }
@@ -2614,6 +3377,9 @@ impl Lowering {
         func: &mut IrFunction,
         items: &[Expr],
     ) -> Result<IrVar, LowerError> {
+        for item in items {
+            self.reject_untyped_addon_value(func, item)?;
+        }
         let list_var = func.alloc_var();
         func.push(IrInst::Call(list_var, "taida_list_new".to_string(), vec![]));
 
@@ -2644,6 +3410,27 @@ impl Lowering {
             // variants keep their type id for container equality.
             let tag = self.expr_type_tag(item);
             let ekind = self.expr_ekind(item);
+            // A value of a type parameter (`wrap[T] x: T = @[x, x]`): its
+            // kind is the one its caller tagged it with, known at run time.
+            if ekind == 0xFF
+                && let Some(param_tag) = self.get_param_tag_var(item)
+            {
+                let item_var = self.lower_expr(func, item)?;
+                let note_dummy = func.alloc_var();
+                func.push(IrInst::Call(
+                    note_dummy,
+                    "taida_list_note_push_dyn".to_string(),
+                    vec![current_list, item_var, param_tag],
+                ));
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_list_push".to_string(),
+                    vec![current_list, item_var],
+                ));
+                current_list = result;
+                continue;
+            }
             let tag_var = func.alloc_var();
             func.push(IrInst::ConstInt(tag_var, ekind));
             let tag_dummy = func.alloc_var();
@@ -2674,7 +3461,10 @@ impl Lowering {
         &mut self,
         func: &mut IrFunction,
         template: &str,
+        template_span: &crate::lexer::Span,
     ) -> Result<IrVar, LowerError> {
+        let template_node_id = template_span.node_id;
+        let mut interpolation_index = 0;
         // Parse template: split on ${ and } to get literal parts and expression parts.
         // Interpolation expressions are parsed using the full Taida parser and lowered
         // as real AST expressions, so field access, function calls, method calls etc.
@@ -2708,8 +3498,15 @@ impl Lowering {
                 let expr_str: String = chars[start..i].iter().collect();
                 let expr_str_trimmed = expr_str.trim();
 
-                // Parse the interpolation expression using the full Taida parser.
-                let (program, errors) = crate::parser::parse(expr_str_trimmed);
+                // Parse the interpolation expression using the full Taida
+                // parser, numbered as the checker numbered it so its
+                // recorded types apply.
+                let (program, errors) = crate::parser::parse_template_interpolation(
+                    expr_str_trimmed,
+                    template_node_id,
+                    interpolation_index,
+                );
+                interpolation_index += 1;
                 // Mirror the interpreter (`eval_template_string`) exactly, which
                 // has three cases (F56-FB-006):
                 //   1. parsed as an expression  → lower + stringify
@@ -2728,6 +3525,7 @@ impl Lowering {
                 let str_var = if errors.is_empty() && !program.statements.is_empty() {
                     if let crate::parser::Statement::Expr(ref parsed_expr) = program.statements[0] {
                         // Case 1: lower the parsed expression and convert to string.
+                        self.reject_untyped_addon_value_at(func, parsed_expr, template_span)?;
                         let expr_var = self.lower_expr(func, parsed_expr)?;
                         self.convert_to_string(func, parsed_expr, expr_var)?
                     } else {
@@ -2921,4 +3719,17 @@ pub(crate) fn rewrite_idents(
 /// `crate::parser::ast` (review C-6/C-9).
 fn native_expr_references_any_name(expr: &Expr, bound_names: &[String]) -> bool {
     crate::parser::expr_references_any_name(expr, bound_names)
+}
+
+/// A pipeline stage that calls a named function with the piped value at its
+/// one `_` (`x => f(a, _)`), as the interpreter recognises it.
+fn is_piped_call(expr: &Expr) -> bool {
+    match expr {
+        Expr::FuncCall(callee, args, _) => {
+            matches!(callee.as_ref(), Expr::Ident(..))
+                && !args.iter().any(|arg| matches!(arg, Expr::Hole(_)))
+                && expr_count_placeholders(expr) == 1
+        }
+        _ => false,
+    }
 }

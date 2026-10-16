@@ -273,7 +273,8 @@ fn f64b_026_pad_counts_characters_parity() {
 }
 
 // ── ①: socket ports outside 0..=65535 are rejected instead of
-// silently truncating to another port. ──
+// silently truncating to another port. The rejection is the function's
+// failed `Result` (as on Native), not an uncatchable runtime error. ──
 #[test]
 fn f64b_027_out_of_range_port_rejected() {
     for port in ["-1", "65536"] {
@@ -281,13 +282,16 @@ fn f64b_027_out_of_range_port_rejected() {
         let td = dir.join("main.td");
         std::fs::write(
             &td,
-            format!(">>> taida-lang/os => @(udpBind)\nr <= udpBind(\"127.0.0.1\", {port})\n"),
+            format!(
+                ">>> taida-lang/os => @(udpBind)\nr <= udpBind(\"127.0.0.1\", {port})\nr >=> res\nstdout(res.toString())\n"
+            ),
         )
         .expect("write fixture");
-        let (_out, err, _code) = run_interp_with(&td, &[]);
+        let (out, err, code) = run_interp_with(&td, &[]);
+        assert_eq!(code, Some(0), "port {port}: {err}");
         assert!(
-            err.contains("port must be within 0..=65535"),
-            "port {port} not rejected: {err}"
+            out.contains("Result(throw <= udpBind: port must be within 0..=65535)"),
+            "port {port} not rejected: {out}{err}"
         );
     }
 }
@@ -399,8 +403,10 @@ stdout(f(-1))
         started.elapsed() < std::time::Duration::from_secs(30),
         "shadowed self-call looped instead of terminating"
     );
+    // The local `f <= 3` hides the function, so `f(x)` calls an Int: the
+    // checker rejects the call before the program runs.
     assert!(
-        err.contains("Cannot call non-function value"),
+        err.contains("[E1510]"),
         "expected shadowing semantics error, got: {err}"
     );
 }

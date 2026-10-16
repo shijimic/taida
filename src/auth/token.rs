@@ -53,10 +53,27 @@ pub fn auth_json_path() -> Result<PathBuf, String> {
 }
 
 /// 保存された認証トークンを読み込む。存在しなければ None を返す。
+/// ファイルが読めない・壊れている場合も None になる。区別が必要な場合は
+/// [`load_token_checked`] を使う。
 pub fn load_token() -> Option<AuthToken> {
-    let path = auth_json_path().ok()?;
-    let data = fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&data).ok()
+    load_token_checked().ok().flatten()
+}
+
+/// [`load_token`] と同じだが、ファイルが存在しない場合(`Ok(None)`)と、
+/// 存在するのに読めない・解釈できない場合(`Err`)を区別する。
+pub fn load_token_checked() -> Result<Option<AuthToken>, String> {
+    // Without a home directory there is no credentials file to read.
+    let Ok(path) = auth_json_path() else {
+        return Ok(None);
+    };
+    let data = match fs::read_to_string(&path) {
+        Ok(data) => data,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("Cannot read {}: {}", path.display(), e)),
+    };
+    serde_json::from_str(&data)
+        .map(Some)
+        .map_err(|e| format!("{} is not valid credentials data: {}", path.display(), e))
 }
 
 /// 認証トークンを ~/.taida/auth.json に保存する。

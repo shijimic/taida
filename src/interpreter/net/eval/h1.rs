@@ -78,6 +78,18 @@ fn span_len(v: &Value) -> usize {
     span_start_len(v).1
 }
 
+/// True when the method of a parsed request head is `HEAD` (method names are
+/// case-sensitive, RFC 9110 §9.1).
+fn is_head_method(parsed_fields: &[(String, Value)], raw: &[u8]) -> bool {
+    parsed_fields
+        .iter()
+        .find(|(k, _)| k == "method")
+        .is_some_and(|(_, v)| {
+            let (start, len) = span_start_len(v);
+            len == 4 && raw.get(start..start + 4) == Some(b"HEAD".as_slice())
+        })
+}
+
 /// Compare a header name span against an ASCII-lowercase reference name
 /// (case-insensitive). Returns true on match; returns false on any bound
 /// violation so over-limit / malformed spans never claim to be "Host".
@@ -927,6 +939,8 @@ impl Interpreter {
     ) -> ConnAction {
         const MAX_REQUEST_BUF: usize = 1_048_576; // 1 MiB
 
+        let head_request = is_head_method(&parsed_fields, &conn.buf[..head_consumed]);
+
         // ── NET3-1a / NET4-1a: Detect handler arity before body reading ──
         // 1-arg handler = v2 one-shot response path (eager body read)
         // 2-arg handler = v3/v4 streaming path (body read deferred for v4)
@@ -1121,7 +1135,9 @@ impl Interpreter {
                 };
 
                 // NB6-1: Scatter-gather send — head and body as separate buffers.
-                if send_response_scatter(&mut conn.stream, &effective_response).is_err() {
+                if send_response_scatter(&mut conn.stream, &effective_response, head_request)
+                    .is_err()
+                {
                     let fallback = b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                     let _ = std::io::Write::write_all(&mut conn.stream, fallback);
                     *request_count += 1;
@@ -1379,7 +1395,7 @@ impl Interpreter {
             };
 
             // NB6-1: Scatter-gather send — head and body as separate buffers.
-            if send_response_scatter(&mut conn.stream, &response_value).is_err() {
+            if send_response_scatter(&mut conn.stream, &response_value, head_request).is_err() {
                 let fallback = b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                 let _ = std::io::Write::write_all(&mut conn.stream, fallback);
                 *request_count += 1;

@@ -24,6 +24,16 @@ use super::format::{
 
 /// Generate completion items based on context.
 pub fn get_completions(params: &CompletionParams, source: Option<&str>) -> Vec<CompletionItem> {
+    get_completions_for_file(params, source, None)
+}
+
+/// [`get_completions`] for a document stored at `path`, so the names it
+/// imports from other modules are typed as `taida way check` types them.
+pub fn get_completions_for_file(
+    params: &CompletionParams,
+    source: Option<&str>,
+    path: Option<&std::path::Path>,
+) -> Vec<CompletionItem> {
     let mut items = Vec::new();
 
     // Check if we are completing after a dot (field/method access)
@@ -31,17 +41,24 @@ pub fn get_completions(params: &CompletionParams, source: Option<&str>) -> Vec<C
 
     if is_dot_completion {
         // After a dot, provide field/method completions
-        if let Some(src) = source {
-            items.extend(dot_completions(src, params));
+        let mut receiver_known = false;
+        if let Some(src) = source
+            && let Some(found) = dot_completions(src, params, path)
+        {
+            items.extend(found);
+            receiver_known = true;
         }
-        // Also provide common state-check methods available on most types
-        items.extend(common_method_completions());
+        // `toString` is available on every value, so it is offered when the
+        // receiver's type could not be worked out.
+        if !receiver_known {
+            items.extend(common_method_completions());
+        }
         return items;
     }
 
     // Source-aware completions: variables, functions, types from the document
     if let Some(src) = source {
-        items.extend(source_completions(src));
+        items.extend(source_completions_for_file(src, path));
     }
 
     // Prelude functions (always available)
@@ -120,7 +137,8 @@ fn is_dot_trigger(params: &CompletionParams, source: Option<&str>) -> bool {
     {
         return true;
     }
-    // Also check if the character before cursor is a dot
+    // Also check if the character before the cursor (or before the member
+    // name typed so far) is a dot
     if let Some(src) = source {
         let line = params.text_document_position.position.line as usize;
         let utf16_col = params.text_document_position.position.character as usize;
@@ -128,29 +146,64 @@ fn is_dot_trigger(params: &CompletionParams, source: Option<&str>) -> bool {
             && let Some(line_text) = src.lines().nth(line)
         {
             let char_col = super::utf16::utf16_offset_to_char_index(line_text, utf16_col);
-            if char_col > 0
-                && let Some(ch) = line_text.chars().nth(char_col - 1)
-            {
-                return ch == '.';
-            }
+            return dot_before_member(line_text, char_col).is_some();
         }
     }
     false
 }
 
-/// Get completions from source analysis (variables, functions, types).
-fn source_completions(source: &str) -> Vec<CompletionItem> {
-    let mut items = Vec::new();
+fn is_member_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
 
-    let (program, parse_errors) = parse(source);
-    if !parse_errors.is_empty() {
-        // Even with parse errors, try to extract what we can from partial AST
-        return partial_source_completions(&program.statements);
+/// The char index of the `.` that member name being typed at `char_col`
+/// follows, if the text before the cursor is `.` plus a (possibly empty)
+/// member name.
+fn dot_before_member(line_text: &str, char_col: usize) -> Option<usize> {
+    let chars: Vec<char> = line_text.chars().collect();
+    let mut start = char_col.min(chars.len());
+    while start > 0 && is_member_char(chars[start - 1]) {
+        start -= 1;
     }
+    (start > 0 && chars[start - 1] == '.').then(|| start - 1)
+}
+
+/// Get completions from source analysis (variables, functions, types).
+#[cfg(test)]
+fn source_completions(source: &str) -> Vec<CompletionItem> {
+    source_completions_for_file(source, None)
+}
+
+fn source_completions_for_file(
+    source: &str,
+    path: Option<&std::path::Path>,
+) -> Vec<CompletionItem> {
+    let (program, parse_errors) = parse(source);
+    // The server answers on its main thread, whose stack is the process
+    // default, so a deeply nested program is checked, and dropped, on a stack
+    // sized for it.
+    crate::graph::walk::with_stack_for_owned(program, |program| {
+        if !parse_errors.is_empty() {
+            // Even with parse errors, try to extract what we can from partial AST
+            return partial_source_completions(&program.statements);
+        }
+        checked_source_completions(program, path)
+    })
+}
+
+fn checked_source_completions(
+    program: &crate::parser::Program,
+    path: Option<&std::path::Path>,
+) -> Vec<CompletionItem> {
+    let mut items = Vec::new();
 
     // Run type checker to populate scope info
     let mut checker = TypeChecker::new();
-    checker.check_program(&program);
+    checker.set_compile_target(crate::types::CompileTarget::Interpreter);
+    if let Some(path) = path {
+        checker.set_source_file(path);
+    }
+    checker.check_program(program);
 
     // Variables from scope
     for (name, ty) in checker.all_visible_vars() {
@@ -328,48 +381,186 @@ fn partial_source_completions(statements: &[Statement]) -> Vec<CompletionItem> {
 }
 
 /// Get completions for fields/methods after a dot.
-fn dot_completions(source: &str, params: &CompletionParams) -> Vec<CompletionItem> {
-    let mut items = Vec::new();
-
-    let (program, parse_errors) = parse(source);
-    if !parse_errors.is_empty() {
-        return items;
-    }
-
-    let mut checker = TypeChecker::new();
-    checker.check_program(&program);
-
-    // Try to find the expression before the dot and infer its type
+///
+/// Returns `None` when the type of the value before the dot cannot be worked
+/// out. Typing `s.` leaves the document unparseable, so the completion is
+/// worked out on a copy without the dot (and the member name typed so far),
+/// closed up if the line is left with an open bracket.
+fn dot_completions(
+    source: &str,
+    params: &CompletionParams,
+    path: Option<&std::path::Path>,
+) -> Option<Vec<CompletionItem>> {
     let line = params.text_document_position.position.line as usize;
     let utf16_col = params.text_document_position.position.character as usize;
+    let line_text = source.lines().nth(line)?;
+    // Guard on the converted char index, not the raw UTF-16 offset.
+    let col = super::utf16::utf16_offset_to_char_index(line_text, utf16_col);
+    let dot = dot_before_member(line_text, col)?;
 
-    // Simple approach: find the identifier before the dot on the current line
-    if let Some(line_text) = source.lines().nth(line) {
-        // S-2: Guard on converted char index, not raw UTF-16 offset.
-        let col = super::utf16::utf16_offset_to_char_index(line_text, utf16_col);
-        if col <= 1 {
-            return items;
-        }
-        let before_dot: String = line_text.chars().take(col.saturating_sub(1)).collect();
-        // Get the last identifier before the dot
-        let ident = before_dot
-            .chars()
-            .rev()
-            .take_while(|c| c.is_alphanumeric() || *c == '_')
-            .collect::<String>()
-            .chars()
-            .rev()
-            .collect::<String>();
-
-        if !ident.is_empty() {
-            // Look up the type of this identifier
-            if let Some(ty) = checker.lookup_var(&ident) {
-                items.extend(fields_for_type(&ty, &checker));
-            }
-        }
+    // The name written before the dot.
+    let chars: Vec<char> = line_text.chars().collect();
+    let mut name_start = dot;
+    while name_start > 0 && is_member_char(chars[name_start - 1]) {
+        name_start -= 1;
+    }
+    let ident: String = chars[name_start..dot].iter().collect();
+    if ident.is_empty() {
+        return None;
     }
 
-    items
+    // The line without the dot and the member name typed after it.
+    let mut repaired_line: String = chars[..dot].iter().collect();
+    repaired_line.extend(chars[col.min(chars.len())..].iter());
+    let repaired_line = close_open_brackets(&repaired_line);
+    let repaired: String = source
+        .split_inclusive('\n')
+        .enumerate()
+        .map(|(i, l)| {
+            if i == line {
+                let newline = if l.ends_with('\n') { "\n" } else { "" };
+                format!("{}{}", repaired_line, newline)
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
+
+    // Other unfinished lines of the document may still fail to parse. The
+    // statements read before the failure are enough to type the names defined
+    // above them, so the partial program is used as it is.
+    let (program, _parse_errors) = parse(&repaired);
+    // The server answers on its main thread, whose stack is the process
+    // default, so a deeply nested program is checked, walked and dropped on a
+    // stack sized for it.
+    crate::graph::walk::with_stack_for_owned(program, |program| {
+        let mut checker = TypeChecker::new();
+        checker.set_compile_target(crate::types::CompileTarget::Interpreter);
+        if let Some(path) = path {
+            checker.set_source_file(path);
+        }
+        checker.check_program(program);
+
+        // The lexer numbers columns after a leading byte order mark.
+        let bom = usize::from(line == 0 && source.starts_with('\u{feff}'));
+        let target = (line + 1, name_start + 1 - bom.min(name_start));
+        let mut receiver_type = None;
+        for stmt in &program.statements {
+            crate::graph::walk::for_each_nested_stmt(stmt, &mut |nested| {
+                if receiver_type.is_some() {
+                    return;
+                }
+                let mut visit = |expr: &crate::parser::Expr| {
+                    find_ident_type(expr, &ident, target, &checker, &mut receiver_type);
+                };
+                match nested {
+                    Statement::Expr(e) => visit(e),
+                    Statement::Assignment(a) => visit(&a.value),
+                    Statement::UnmoldForward(u) => visit(&u.source),
+                    Statement::UnmoldBackward(u) => visit(&u.source),
+                    _ => {}
+                }
+            });
+        }
+        // A word after another dot names a field, not a variable. A word
+        // found in the code is what it is there (a local can share its name
+        // with a top-level variable); only a word that was not found is
+        // looked up among the variables.
+        let is_field = name_start > 0 && chars[name_start - 1] == '.';
+        let ty = match receiver_type {
+            Some(found) => found?,
+            None if is_field => return None,
+            None => checker
+                .lookup_var(&ident)
+                .filter(|ty| !matches!(ty, Type::Unknown))?,
+        };
+        Some(fields_for_type(&ty, &checker))
+    })
+}
+
+/// `line` with brackets it leaves open closed again, so that a statement
+/// cut short by removing `.member` still parses.
+fn close_open_brackets(line: &str) -> String {
+    let mut open: Vec<char> = Vec::new();
+    let mut in_string: Option<char> = None;
+    for c in line.chars() {
+        match in_string {
+            Some(quote) => {
+                if c == quote {
+                    in_string = None;
+                }
+            }
+            None => match c {
+                '"' | '\'' | '`' => in_string = Some(c),
+                '(' => open.push(')'),
+                '[' => open.push(']'),
+                '{' => open.push('}'),
+                ')' | ']' | '}' => {
+                    if open.last() == Some(&c) {
+                        open.pop();
+                    }
+                }
+                _ => {}
+            },
+        }
+    }
+    let mut closed = line.to_string();
+    while let Some(closer) = open.pop() {
+        closed.push(closer);
+    }
+    closed
+}
+
+/// Find the identifier `name` written at `target` (line, column) inside
+/// `expr` and store the type recorded for it: `Some(None)` when it was found
+/// but the checker could not type it.
+fn find_ident_type(
+    expr: &crate::parser::Expr,
+    name: &str,
+    target: (usize, usize),
+    checker: &TypeChecker,
+    found: &mut Option<Option<Type>>,
+) {
+    if found.is_some() {
+        return;
+    }
+    if let crate::parser::Expr::Ident(ident, span) = expr
+        && ident == name
+        && (span.line, span.column) == target
+    {
+        *found = Some(
+            checker
+                .typed_expr_table
+                .lookup(expr)
+                .filter(|ty| !matches!(ty, Type::Unknown))
+                .cloned(),
+        );
+        return;
+    }
+    // A field named at the target: the checker recorded its type on the
+    // access, which starts at the dot before the name.
+    if let crate::parser::Expr::FieldAccess(_, field, span) = expr
+        && field == name
+        && span.line == target.0
+        && span.column + 1 == target.1
+    {
+        *found = Some(
+            checker
+                .typed_expr_table
+                .lookup(expr)
+                .filter(|ty| !matches!(ty, Type::Unknown))
+                .cloned(),
+        );
+        return;
+    }
+    if matches!(expr, crate::parser::Expr::TemplateLit(..)) {
+        return;
+    }
+    crate::graph::walk::for_each_child_of_expr(expr, &mut |child| {
+        if let crate::graph::walk::Node::Expr(inner) = child {
+            find_ident_type(inner, name, target, checker, found);
+        }
+    });
 }
 
 /// Get field/method completion items for a given type.
@@ -387,7 +578,7 @@ fn fields_for_type(ty: &crate::types::Type, checker: &TypeChecker) -> Vec<Comple
                 });
             }
         }
-        crate::types::Type::Named(name) => {
+        crate::types::Type::Named(name) if checker.registry.get_type_fields(name).is_some() => {
             if let Some(fields) = checker.registry.get_type_fields(name) {
                 for (fname, fty) in &fields {
                     items.push(CompletionItem {
@@ -399,162 +590,32 @@ fn fields_for_type(ty: &crate::types::Type, checker: &TypeChecker) -> Vec<Comple
                 }
             }
         }
-        crate::types::Type::Int | crate::types::Type::Float | crate::types::Type::Bool => {
-            items.push(CompletionItem {
-                label: "toString".to_string(),
-                kind: Some(CompletionItemKind::METHOD),
-                detail: Some("() => :Str -- string representation".to_string()),
-                ..Default::default()
-            });
-        }
-        crate::types::Type::Str => {
-            // String state-check methods
-            for (method, detail) in &[
-                ("length", "Int -- string length"),
-                ("isEmpty", "Bool -- true if empty"),
-                ("contains", "(sub: Str) => :Bool -- substring check"),
-                ("startsWith", "(prefix: Str) => :Bool"),
-                ("endsWith", "(suffix: Str) => :Bool"),
-                ("indexOf", "(sub: Str) => :Int"),
-                ("get", "(index: Int) => :Lax[Str] -- safe character access"),
-                ("toString", "() => :Str"),
-            ] {
-                items.push(CompletionItem {
-                    label: method.to_string(),
-                    kind: Some(CompletionItemKind::METHOD),
-                    detail: Some(detail.to_string()),
-                    ..Default::default()
-                });
-            }
-        }
-        crate::types::Type::List(_) => {
-            // List state-check methods
-            for (method, detail) in &[
-                ("length", "Int -- list length"),
-                ("isEmpty", "Bool -- true if empty"),
-                ("contains", "(item) => :Bool -- element check"),
-                ("get", "(index: Int) => :Lax[T] -- safe element access"),
-                ("first", "() => :Lax[T] -- first element"),
-                ("last", "() => :Lax[T] -- last element"),
-                ("max", "() => :Lax[T] -- maximum element"),
-                ("min", "() => :Lax[T] -- minimum element"),
-                ("any", "(predicate) => :Bool"),
-                ("all", "(predicate) => :Bool"),
-                ("none", "(predicate) => :Bool"),
-                ("indexOf", "(item) => :Int -- index of first match"),
-                ("toString", "() => :Str"),
-            ] {
-                items.push(CompletionItem {
-                    label: method.to_string(),
-                    kind: Some(CompletionItemKind::METHOD),
-                    detail: Some(detail.to_string()),
-                    ..Default::default()
-                });
-            }
-        }
-        crate::types::Type::Generic(name, _) => match name.as_str() {
-            "Lax" => {
-                for (method, detail) in &[
-                    ("hasValue", "Bool -- true if has non-default value"),
-                    ("isEmpty", "Bool -- true if no value"),
-                    ("map", "(fn) => :Lax[U] -- transform inner value"),
-                    ("flatMap", "(fn) => :Lax[U] -- monadic bind"),
-                    ("toString", "() => :Str"),
-                ] {
-                    items.push(CompletionItem {
-                        label: method.to_string(),
-                        kind: Some(CompletionItemKind::METHOD),
-                        detail: Some(detail.to_string()),
-                        ..Default::default()
-                    });
-                }
-            }
-            "Result" => {
-                for (method, detail) in &[
-                    ("hasValue", "Bool -- true if success"),
-                    ("isEmpty", "Bool -- true if failure"),
-                    ("map", "(fn) => :Result[U, P] -- transform inner value"),
-                    ("flatMap", "(fn) => :Result[U, P] -- monadic bind"),
-                    ("toString", "() => :Str"),
-                ] {
-                    items.push(CompletionItem {
-                        label: method.to_string(),
-                        kind: Some(CompletionItemKind::METHOD),
-                        detail: Some(detail.to_string()),
-                        ..Default::default()
-                    });
-                }
-            }
-            "Async" => {
-                for (method, detail) in &[
-                    ("map", "(fn) => :Async[U] -- transform async value"),
-                    ("flatMap", "(fn) => :Async[U] -- monadic bind"),
-                    ("toString", "() => :Str"),
-                ] {
-                    items.push(CompletionItem {
-                        label: method.to_string(),
-                        kind: Some(CompletionItemKind::METHOD),
-                        detail: Some(detail.to_string()),
-                        ..Default::default()
-                    });
-                }
-            }
-            "HashMap" => {
-                for (method, detail) in &[
-                    ("get", "(key) => :Lax[V] -- safe value lookup"),
-                    ("has", "(key) => :Bool -- check if key exists"),
-                    ("keys", "() => :@[K] -- all keys"),
-                    ("values", "() => :@[V] -- all values"),
-                    ("entries", "() => :@[@(key, value)] -- all entries"),
-                    ("size", "Int -- number of entries"),
-                    ("isEmpty", "Bool -- true if no entries"),
-                    ("remove", "(key) => :HashMap -- remove entry by key"),
-                    ("toString", "() => :Str"),
-                ] {
-                    items.push(CompletionItem {
-                        label: method.to_string(),
-                        kind: Some(CompletionItemKind::METHOD),
-                        detail: Some(detail.to_string()),
-                        ..Default::default()
-                    });
-                }
-            }
-            "Set" => {
-                for (method, detail) in &[
-                    ("has", "(item) => :Bool -- check membership"),
-                    ("add", "(item) => :Set -- add item"),
-                    ("remove", "(item) => :Set -- remove item"),
-                    ("union", "(other: Set) => :Set -- set union"),
-                    ("intersect", "(other: Set) => :Set -- set intersection"),
-                    ("size", "Int -- number of items"),
-                    ("isEmpty", "Bool -- true if empty"),
-                    ("toString", "() => :Str"),
-                ] {
-                    items.push(CompletionItem {
-                        label: method.to_string(),
-                        kind: Some(CompletionItemKind::METHOD),
-                        detail: Some(detail.to_string()),
-                        ..Default::default()
-                    });
-                }
-            }
-            _ => {}
-        },
         _ => {}
+    }
+
+    // The builtin methods come from the table the checker itself reads, so
+    // only methods it accepts are offered.
+    for method in crate::types::builtin_methods_of(ty) {
+        let params = vec!["_"; method.max_args].join(", ");
+        let returns = if matches!(method.returns, Type::Unknown) {
+            String::new()
+        } else {
+            format!(" => :{}", method.returns)
+        };
+        items.push(CompletionItem {
+            label: method.name.to_string(),
+            kind: Some(CompletionItemKind::METHOD),
+            detail: Some(format!("{}({}){}", method.name, params, returns)),
+            ..Default::default()
+        });
     }
 
     items
 }
 
-/// Common state-check methods available on most types.
+/// The method every value has: `toString`.
 fn common_method_completions() -> Vec<CompletionItem> {
-    let methods = [
-        ("toString", "() => :Str -- convert to string representation"),
-        (
-            "hasValue",
-            "Bool -- true if has non-default value (Lax/Result)",
-        ),
-    ];
+    let methods = [("toString", "() => :Str -- convert to string representation")];
 
     methods
         .iter()
@@ -1262,7 +1323,9 @@ Base[:Int] => Child[:Int, U] = @(
         let items = common_method_completions();
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"toString"), "Should include toString");
-        assert!(labels.contains(&"hasValue"), "Should include hasValue");
+        // `hasValue` exists on Lax and Gorillax only; the checker rejects it
+        // on other values, so it is not offered for a value of unknown type.
+        assert!(!labels.contains(&"hasValue"), "hasValue is not universal");
     }
 
     #[test]
@@ -1477,12 +1540,13 @@ Base[:Int] => Child[:Int, U] = @(
         let items = fields_for_type(&crate::types::Type::Str, &TypeChecker::new());
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"length"), "Str should have length");
-        assert!(labels.contains(&"isEmpty"), "Str should have isEmpty");
         assert!(labels.contains(&"contains"), "Str should have contains");
         assert!(labels.contains(&"startsWith"), "Str should have startsWith");
         assert!(labels.contains(&"endsWith"), "Str should have endsWith");
-        assert!(labels.contains(&"indexOf"), "Str should have indexOf");
+        assert!(labels.contains(&"indexOfLax"), "Str should have indexOfLax");
         assert!(labels.contains(&"toString"), "Str should have toString");
+        // The checker rejects `isEmpty` on a Str ([E1509]), so it is not offered.
+        assert!(!labels.contains(&"isEmpty"), "Str has no isEmpty");
     }
 
     #[test]
@@ -1521,10 +1585,15 @@ Base[:Int] => Child[:Int, U] = @(
             crate::types::Type::Generic("Result".to_string(), vec![crate::types::Type::Int]);
         let items = fields_for_type(&result_ty, &TypeChecker::new());
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
-        assert!(labels.contains(&"hasValue"), "Result should have hasValue");
+        assert!(
+            labels.contains(&"isSuccess"),
+            "Result should have isSuccess"
+        );
+        assert!(labels.contains(&"isError"), "Result should have isError");
         assert!(labels.contains(&"map"), "Result should have map");
         assert!(labels.contains(&"flatMap"), "Result should have flatMap");
         assert!(labels.contains(&"toString"), "Result should have toString");
+        assert!(!labels.contains(&"hasValue"), "Result has no hasValue");
     }
 
     #[test]
@@ -1534,7 +1603,7 @@ Base[:Int] => Child[:Int, U] = @(
         let items = fields_for_type(&async_ty, &TypeChecker::new());
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"map"), "Async should have map");
-        assert!(labels.contains(&"flatMap"), "Async should have flatMap");
+        assert!(labels.contains(&"isPending"), "Async should have isPending");
         assert!(labels.contains(&"toString"), "Async should have toString");
     }
 

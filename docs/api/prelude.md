@@ -307,6 +307,8 @@ range start: Int  end: Int => :@[Int]
 
 **Returns**: `:@[Int]` — `start <= i < end` を満たす整数のリスト。
 `start >= end` の場合は空リスト `@[]`。
+要素は 1,000,000 個までです。それを超える範囲を指定すると `RangeError` が
+投げられ、`|==` で捕捉できます。
 
 **Example**:
 
@@ -391,9 +393,9 @@ exit code: Int => :Int
 | `UInt8[x]()` | `Lax[Int]` | `0..255` 制約付き変換。 |
 | `Bytes[x](fill <= n)` | `Lax[Bytes]` | `Int` / `Str` / `@[Int]` / `Bytes` から Bytes へ変換。 |
 | `ByteLength[x]()` | `Int` | UTF-8 byte 長または Bytes 長。 |
-| `ByteAt[x, idx]()` | `Lax[Int]` | byte 位置の値を取得。 |
+| `ByteAt[x, idx]()` | `Lax[Int]` | Str の UTF-8 のバイト列、または Bytes の、`idx` 番目のバイトを取得 (範囲外で failure)。 |
 | `ByteSet[bytes, idx, value]()` | `Lax[Bytes]` | 指定位置更新 (不変)。 |
-| `ByteSlice[x, start, end]()` | `Str` | UTF-8 byte 範囲を `Str` として取り出す。 |
+| `ByteSlice[x, start, end]()` | `Str` | Str または Bytes の byte 範囲を `Str` として取り出す。UTF-8 として正しくない部分 (文字の途中で切った端など) は U+FFFD になる。 |
 | `BytesToList[bytes]()` | `@[Int]` | Bytes を整数リストへ変換。 |
 | `BytesCursor[bytes](offset <= n)` | `@(bytes: Bytes, offset: Int, length: Int)` | Bytes の順次読み取りカーソルを生成。 |
 | `BytesCursorRemaining[cursor]()` | `Int` | 残り読み取り可能バイト数。 |
@@ -523,8 +525,8 @@ JS バックエンドでのみ利用でき、native / WASM では capability err
 
 | モールド | `[]` 必須 | `()` オプション | 戻り値 | 説明 |
 |---------|----------|----------------|--------|------|
-| `Upper[str]()` | str | — | `Str` | 大文字変換 |
-| `Lower[str]()` | str | — | `Str` | 小文字変換 |
+| `Upper[str]()` | str | — | `Str` | Unicode の大文字変換 (`"straße"` は `"STRASSE"` のように、1 文字が複数文字になることがある) |
+| `Lower[str]()` | str | — | `Str` | Unicode の小文字変換 (語末の `Σ` は `ς` になる) |
 | `Trim[str]()` | str | `start`, `end` | `Str` | 空白除去 (`start` / `end` でデフォルト `true` を `false` に) |
 | `Split[str, delim]()` | str, delim | — | `@[Str]` | 区切り文字で分割 |
 | `Replace[str, old, new]()` | str, old, new | `all` | `Str` | 置換 (`all <= true` で全置換) |
@@ -583,6 +585,11 @@ Pad["42", 5](side <= "start", char <= "0")    // "00042"
 | `Round[num]()` | num | — | `Int` | 四捨五入 |
 | `Truncate[num]()` | num | — | `Int` | 0 方向切り捨て |
 | `Clamp[num, min, max]()` | num, min, max | — | `Num` | 範囲制限 |
+
+`Pow`・`Exp`・`Ln`・`Log2`・`Log10`、三角関数・逆三角関数・双曲線関数は、真の値に最も近い Float
+(正しく丸めた値。ちょうど中間のときは仮数が偶数の側) を返します。インタプリタ・ネイティブ・WASM のどれでも、
+どの CPU でも同じ値になります。`Log[x, base]` は `Ln[x] / Ln[base]` です。NaN・無限大・±0 の扱いは
+C99 の附属書 F (`pow`・`atan2` などの特殊な値の規則) に従います。`Sqrt` は IEEE 754 の正確な平方根です。
 
 ```taida fragment
 ToFixed[3.14159, 2]()    // "3.14"
@@ -1038,6 +1045,17 @@ ErrorInfo = @(
 pilots <= hashMap().set("Misato", @(age <= 29, role <= "Operations Director")).set("Ritsuko", @(age <= 30, role <= "Chief Scientist"))
 ```
 
+`hashMap(entries)` は、`@(key, value)` のぶちパックのリスト（`.entries()` が返す形）から HashMap を作ります。
+リストの順に `.set(key, value)` を呼んだのと同じ結果になり、同じキーが 2 回現れたときは後の値で置き換わります
+（位置は最初に現れた位置のままです）。ぶちパックを 1 つ渡すと、各フィールドが「フィールド名（Str）→ 値」の項目になります。
+引数がリストでもぶちパックでもないときは `[E1506]` です。
+
+```taida
+scores <= hashMap(@[@(key <= "Asuka", value <= 98), @(key <= "Rei", value <= 95)])
+copied <= hashMap(scores.entries())
+limits <= hashMap(@(cpu <= 2, memory <= 512))
+```
+
 | メソッド | 戻り値 | 説明 |
 |---------|--------|------|
 | `.get(key)` | `Lax[V]` | キーに対応する値 |
@@ -1108,8 +1126,11 @@ str_b <= StrOf[req.path, req.bytes]()          // モールド形式
 
 | 関数 / メソッド | 例外バックエンド | 補足 |
 |----------------|------------------|------|
-| `stdinLine` | `wasm-min` / `wasm-edge` で利用不可 | WASI 入力の TTY 抽象が必要。 |
+| `stdin` / `stdinLine` | WASM 全プロファイルで利用不可 | 標準入力の読み取りは OS に依存するため、WASM ではコンパイル時に決定的な診断で拒否される。 |
+| `sleep` | WASM 全プロファイルで利用不可 | 実時間の待機は OS に依存するため、WASM ではコンパイル時に決定的な診断で拒否される。 |
+| `exit` | WASM 全プロファイルで終了コードは 0〜125 | 終了コードを受け取るのは WASI のホストで、多くのホストは 126 以上を受け付けない (wasmtime はエラーとして終了コード 1 で止める)。インタプリタとネイティブは OS が受け付ける範囲をそのまま渡す。 |
 | `nowMs` | `wasm-min` で利用不可 | WASI `clock_time_get` インポートが必要。`wasm-wasi` / `wasm-full` は WASI ホストの実時計、`wasm-edge` は生成 glue が `Date.now()` で提供する。 |
+| `Regex` と Regex を受け取るメソッド | WASM 全プロファイルで利用不可 | `[E1617]` でコンパイル時に拒否される。固定文字列を受け取る `split` / `replace` / `replaceAll` は利用できる。 |
 | Regex `\b` / `\B` | Native POSIX ERE で非対応 | 単語境界が必要なら Interpreter に限定、または `(^|[^A-Za-z0-9_])` で代替。 |
 | Regex `s` フラグ (dotall) | Native POSIX ERE で非対応 | Interpreter のみ。 |
 

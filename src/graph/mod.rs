@@ -12,6 +12,7 @@ pub(crate) mod model;
 pub mod mutual_tco;
 pub(crate) mod query;
 pub(crate) mod tail_pos;
+pub mod walk;
 
 /// Escape special characters for JSON strings (RFC 8259 compliant).
 ///

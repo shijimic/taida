@@ -9,8 +9,10 @@ impl TypeChecker {
     pub(super) fn core_builtin_arity(name: &str) -> Option<(usize, usize)> {
         match name {
             "debug" => Some((1, 2)),
-            "toString" | "toStr" => Some((1, 1)),
-            "typeOf" | "typeof" => Some((1, 1)),
+            // The function forms `toString(x)` / `toStr(x)` / `typeOf(x)`
+            // exist nowhere at run time (`.toString()` is a method), so they
+            // are undefined names like any other.
+            "typeof" => Some((1, 1)),
             "jsonEncode" | "jsonPretty" => Some((1, 1)),
             "nowMs" => Some((0, 0)),
             "assert" => Some((1, 2)),

@@ -18,6 +18,7 @@
 //! | E1807 | 型変数が単一大文字でない (T1/T2 series 例外) |
 //! | E1808 | ぶちパックフィールドの値型と命名規則が不整合 |
 //! | E1809 | 戻り値型注釈の `:` マーカー欠落 |
+//! | E1810 | `@Since` の値が Taida のバージョン表記でない |
 //!
 //! ## Severity / out-of-scope (per Acceptance)
 //!
@@ -251,6 +252,13 @@ fn classify_field_type(ty: &TypeExpr) -> Option<bool> {
 
 fn lint_statement(stmt: &Statement, diags: &mut Vec<LintDiagnostic>) {
     match stmt {
+        Statement::EnumDef(e) => check_since_tag(&e.doc_comments, &e.span, diags),
+        Statement::ClassLikeDef(cl) => check_since_tag(&cl.doc_comments, &cl.span, diags),
+        Statement::FuncDef(f) => check_since_tag(&f.doc_comments, &f.span, diags),
+        Statement::Assignment(a) => check_since_tag(&a.doc_comments, &a.span, diags),
+        _ => {}
+    }
+    match stmt {
         Statement::EnumDef(e) => {
             // E1801: Enum type name must be PascalCase
             if !is_pascal_case(&e.name) {
@@ -456,6 +464,72 @@ fn lint_class_like_def(cl: &ClassLikeDef, diags: &mut Vec<LintDiagnostic>) {
     }
 }
 
+/// `@Since` takes a Taida version (`<generation>.<number>[.<label>]`, as in
+/// `e.32` or `e.32.alpha`), not a semantic version: the value must match
+/// `[a-z]\.\d+(\.[a-z0-9]+)?` in full. Only a line that writes the tag as
+/// `Since:` is read, so a prose line that begins with the word is left alone.
+/// A value wrapped onto the lines after it is read whole, the way
+/// `taida doc generate` reads it.
+fn check_since_tag(doc_comments: &[String], anchor: &Span, diags: &mut Vec<LintDiagnostic>) {
+    for (i, line) in doc_comments.iter().enumerate() {
+        let text = line.trim();
+        let text = text.strip_prefix('@').unwrap_or(text);
+        let Some(rest) = text.strip_prefix("Since") else {
+            continue;
+        };
+        let Some(first) = rest.trim_start().strip_prefix(':') else {
+            continue;
+        };
+        let mut value = first.trim().to_string();
+        for next in &doc_comments[i + 1..] {
+            let next = next.trim();
+            if crate::doc::try_match_tag(next).is_some() {
+                break;
+            }
+            if !next.is_empty() {
+                if !value.is_empty() {
+                    value.push(' ');
+                }
+                value.push_str(next);
+            }
+        }
+        if !is_taida_version(&value) {
+            diags.push(LintDiagnostic {
+                code: "[E1810]",
+                message: format!(
+                    "@Since の値は Taida のバージョン表記 (例: `e.32`、`e.32.alpha`) で書いてください: '{}'",
+                    value
+                ),
+                span: anchor.clone(),
+            });
+        }
+    }
+}
+
+/// `[a-z]\.\d+(\.[a-z0-9]+)?`, matched against the whole string.
+fn is_taida_version(value: &str) -> bool {
+    let mut parts = value.split('.');
+    let generation = parts.next().unwrap_or("");
+    let number = parts.next().unwrap_or("");
+    let label = parts.next();
+    if parts.next().is_some() {
+        return false;
+    }
+    let mut generation_chars = generation.chars();
+    let generation_ok = matches!(
+        (generation_chars.next(), generation_chars.next()),
+        (Some(c), None) if c.is_ascii_lowercase()
+    );
+    generation_ok
+        && !number.is_empty()
+        && number.chars().all(|c| c.is_ascii_digit())
+        && label.is_none_or(|l| {
+            !l.is_empty()
+                && l.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        })
+}
+
 fn check_type_param(tp: &TypeParam, anchor: &Span, diags: &mut Vec<LintDiagnostic>) {
     if !is_valid_type_var_name(&tp.name) {
         diags.push(LintDiagnostic {
@@ -516,6 +590,7 @@ fn lint_param(p: &Param, diags: &mut Vec<LintDiagnostic>) {
 // ─────────────────────────────────────────────────────────────────────
 
 fn lint_field_def(field: &FieldDef, diags: &mut Vec<LintDiagnostic>) {
+    check_since_tag(&field.doc_comments, &field.span, diags);
     // Method fields delegate to FuncDef rules.
     if field.is_method {
         if let Some(md) = &field.method_def {

@@ -188,6 +188,11 @@ pub(crate) fn run_install(args: &[String]) {
         }
     };
 
+    if let Err(e) = pkg::resolver::check_project_state_dirs(&project_dir) {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    }
+
     if manifest.deps.is_empty() {
         println!("No dependencies defined in packages.tdm");
         let lock_path = project_dir.join(".taida").join("taida.lock");
@@ -1009,7 +1014,9 @@ pub(crate) fn find_packages_tdm_from(start: &Path) -> Option<PathBuf> {
         start.parent()?.to_path_buf()
     };
     loop {
-        if dir.join("packages.tdm").exists() {
+        // A manifest planted in a shared temp dir (`/tmp`) belongs to
+        // nobody in particular; it is skipped like in project-root search.
+        if dir.join("packages.tdm").exists() && !taida::project_root::is_shared_temp_dir(&dir) {
             return Some(dir);
         }
         if !dir.pop() {

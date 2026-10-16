@@ -196,6 +196,7 @@ impl TypeChecker {
             }
         }
 
+        self.check_generic_fixed_return(fd, &bindings, span);
         let ret_pattern = fd
             .return_type
             .as_ref()
@@ -653,7 +654,7 @@ impl TypeChecker {
         let Ok(source) = std::fs::read_to_string(td_path) else {
             return Default::default();
         };
-        let (program, _) = crate::parser::parse(&source);
+        let (program, _) = crate::parser::parse_detached(&source);
         // Seed: the module's own imports, keyed by the local alias its
         // bodies use.
         let mut seed: std::collections::HashMap<String, (Vec<String>, Vec<String>)> =
@@ -701,8 +702,6 @@ impl TypeChecker {
     }
 
     pub(super) fn register_imported_types(&mut self, imp: &crate::parser::ImportStmt) {
-        use crate::parser::Statement as S;
-
         if imp.path == "taida-lang/abi" {
             self.register_abi_imports(&imp.symbols);
             return;
@@ -712,8 +711,25 @@ impl TypeChecker {
             Some(f) => f.clone(),
             None => return,
         };
+        self.register_imported_types_from(&source_file, imp, 0);
+    }
 
-        let td_path = match Self::resolve_import_td_path(&source_file, imp) {
+    /// [`Self::register_imported_types`] for an import written in
+    /// `source_file`. A requested name the target module does not define
+    /// but imports from another module (a re-export) is registered from
+    /// that module, under the name this import gives it.
+    fn register_imported_types_from(
+        &mut self,
+        source_file: &std::path::Path,
+        imp: &crate::parser::ImportStmt,
+        depth: usize,
+    ) {
+        use crate::parser::Statement as S;
+
+        if depth > 16 {
+            return;
+        }
+        let td_path = match Self::resolve_import_td_path(source_file, imp) {
             Some(p) => p,
             None => return,
         };
@@ -722,7 +738,7 @@ impl TypeChecker {
             Ok(s) => s,
             Err(_) => return,
         };
-        let (program, _) = crate::parser::parse(&source);
+        let (program, _) = crate::parser::parse_detached(&source);
         // F62B-040: imported schema-passing generics (direct or forwarding)
         // keep their call-form enforcement across the module boundary —
         // without this an inference-form call to an imported generic whose
@@ -896,6 +912,93 @@ impl TypeChecker {
                         .insert(local_name.to_string(), schema.clone());
                 }
             }
+        }
+
+        self.register_imported_value_types(&program, &td_path, &requested);
+
+        // Re-exports: requested names the module imports rather than defines.
+        let defined: std::collections::HashSet<&str> = program
+            .statements
+            .iter()
+            .filter_map(|stmt| match stmt {
+                S::EnumDef(ed) => Some(ed.name.as_str()),
+                S::ClassLikeDef(cl) => Some(cl.name.as_str()),
+                S::FuncDef(fd) => Some(fd.name.as_str()),
+                S::Assignment(a) => Some(a.target.as_str()),
+                _ => None,
+            })
+            .collect();
+        for stmt in &program.statements {
+            let S::Import(upstream) = stmt else {
+                continue;
+            };
+            let symbols: Vec<crate::parser::ImportSymbol> = upstream
+                .symbols
+                .iter()
+                .filter_map(|sym| {
+                    let local = sym.alias.as_deref().unwrap_or(sym.name.as_str());
+                    let importer_name = requested.get(local)?;
+                    (!defined.contains(local)).then(|| crate::parser::ImportSymbol {
+                        name: sym.name.clone(),
+                        alias: Some(importer_name.to_string()),
+                    })
+                })
+                .collect();
+            if symbols.is_empty() {
+                continue;
+            }
+            let forwarded = crate::parser::ImportStmt {
+                path: upstream.path.clone(),
+                version: upstream.version.clone(),
+                symbols,
+                span: imp.span.clone(),
+            };
+            self.register_imported_types_from(&td_path, &forwarded, depth + 1);
+        }
+    }
+
+    /// Type the values (non-function exports) an import requests by checking
+    /// the exporting module on its own. A value keeps the type only when the
+    /// module's checking resolves it fully; otherwise it stays unknown as
+    /// before.
+    fn register_imported_value_types(
+        &mut self,
+        program: &crate::parser::Program,
+        td_path: &std::path::Path,
+        requested: &std::collections::HashMap<&str, &str>,
+    ) {
+        use crate::parser::Statement as S;
+        let values: Vec<(&str, &str)> = program
+            .statements
+            .iter()
+            .filter_map(|stmt| match stmt {
+                S::Assignment(a) => requested
+                    .get(a.target.as_str())
+                    .map(|&local| (a.target.as_str(), local)),
+                _ => None,
+            })
+            .collect();
+        if values.is_empty() || self.import_chain.iter().any(|p| p == td_path) {
+            return;
+        }
+        let mut module_checker = TypeChecker::new();
+        module_checker.import_chain = self.import_chain.clone();
+        module_checker.import_chain.push(td_path.to_path_buf());
+        module_checker.set_source_file(td_path);
+        module_checker.check_program(program);
+        for (name, local) in values {
+            let Some(ty) = module_checker.lookup_var(name) else {
+                continue;
+            };
+            let named =
+                crate::parser::Expr::Ident(name.to_string(), crate::lexer::Span::new(0, 0, 0, 0));
+            if matches!(ty, Type::Unknown | Type::Any)
+                || ty.contains_concrete_unknown()
+                || module_checker.is_dynamic_value(&named)
+            {
+                continue;
+            }
+            self.imported_value_types.insert(local.to_string(), ty);
         }
     }
 

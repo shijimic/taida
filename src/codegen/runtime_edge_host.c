@@ -170,40 +170,19 @@ int64_t taida_time_now_ms(void) {
 }
 
 /* ── crypto: randomBytes (wasm-edge) ─────────────────────────────────────
- * Bytes construction uses the shared [TAIDBYT, len, byte...] layout (one
- * int64_t per byte) that the core runtime understands everywhere since the
- * F62B-012 unification. The constructors below mirror runtime_wasi_io.c
- * (rt_wasi is not linked on wasm-edge, so the symbols do not collide); the
- * layout contract is pinned by 02_containers.inc.c `_looks_like_bytes`.
+ * The Bytes value is built by the core runtime's constructor (the shared
+ * [TAIDBYT, len, byte...] layout).
  *
  * Entropy comes from the WASI random_get import. The generated Workers
  * glue implements it with crypto.getRandomValues (a CSPRNG); a host that
  * cannot provide cryptographically strong entropy must reject the import
  * rather than substitute a weak source. */
 
-#define EDGE_BYTES_MAGIC 0x5441494442595400LL /* "TAIDBYT\0" */
-
 extern int64_t taida_make_error(int64_t type_ptr, int64_t msg_ptr);
 extern int64_t taida_throw(int64_t error_val);
 
-int64_t taida_bytes_default_value(void) {
-    int64_t *bytes = (int64_t *)wasm_alloc(2 * 8);
-    if (!bytes) return 0;
-    bytes[0] = EDGE_BYTES_MAGIC;
-    bytes[1] = 0;
-    return (int64_t)(intptr_t)bytes;
-}
-
-int64_t taida_bytes_from_raw(int64_t ptr, int64_t len) {
-    if (len < 0) len = 0;
-    const unsigned char *data = (const unsigned char *)(intptr_t)ptr;
-    int64_t *bytes = (int64_t *)wasm_alloc((unsigned int)((2 + len) * 8));
-    if (!bytes) return taida_bytes_default_value();
-    bytes[0] = EDGE_BYTES_MAGIC;
-    bytes[1] = len;
-    for (int64_t i = 0; i < len; i++) bytes[2 + i] = data ? (int64_t)data[i] : 0;
-    return (int64_t)(intptr_t)bytes;
-}
+/* The Bytes constructors live in the core runtime. */
+extern int64_t taida_bytes_from_raw(int64_t ptr, int64_t len);
 
 /* random_get: (buf, buf_len) -> errno (0 == success) */
 __attribute__((import_module("wasi_snapshot_preview1"), import_name("random_get")))

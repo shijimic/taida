@@ -1,13 +1,13 @@
 // POST-STABLE-007 (F57 T2): pipeline placeholder の動的 kind 運搬 parity。
 //
 // `flag => stdout(_.toString())` の placeholder `_` が運ぶ値の静的 kind が、
-// native/WASM lowering の `__pipe_prev` 合成束縛（kind を持たない `DefVar`）
+// native/WASM lowering の `#pipe_prev` 合成束縛（kind を持たない `DefVar`）
 // を経由して UNKNOWN に落ち、Bool/Float が Int 表示の polymorphic 経路に
 // 縮退していた（native=`1` / wasm=`1`、`x <= 3.0 => ...` は f64 bit-pattern）。
-// `lower_pipeline_step` が前段の静的型を `__pipe_prev` に追跡することで解消。
+// `lower_pipeline_step` が前段の静的型を `#pipe_prev` に追跡することで解消。
 //
 // F57B-007 で `=> name` bind-and-forward は実名ではなく合成名
-// (`__pipe_bind_<id>_<name>`) に束縛されるようになった。前段の式は active な
+// (`#pipe_bind_<id>_<name>`) に束縛されるようになった。前段の式は active な
 // bind を通して rename されてから kind 追跡されるので、bind-forward 経由でも、
 // 連鎖 forward (`true => a => b => ...`) でも kind が正しく伝播する。kind 集合は
 // 6 種すべて（Bool/Float/String/Pack/List/Int）を追跡する。

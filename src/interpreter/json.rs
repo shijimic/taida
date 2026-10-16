@@ -147,9 +147,21 @@ pub fn taida_value_to_json(val: &Value) -> serde_json::Value {
             let is_lax = fields.iter().any(|(name, value)| {
                 name == "__type" && matches!(value, Value::Str(s) if s.as_string() == "Lax")
             });
+            let is_result = fields.iter().any(|(name, value)| {
+                name == "__type" && matches!(value, Value::Str(s) if s.as_string() == "Result")
+            });
             for (field_name, field_val) in fields.iter() {
                 // Skip __type field — it's internal metadata, not user data
                 if field_name == "__type" || (is_lax && field_name == "__error") {
+                    continue;
+                }
+                // A Result given no error writes the empty Error its
+                // `throw` reads as.
+                if is_result && field_name == "throw" && matches!(field_val, Value::Unit) {
+                    entries.push((
+                        field_name.clone(),
+                        taida_value_to_json(&Value::empty_error()),
+                    ));
                     continue;
                 }
                 entries.push((field_name.clone(), taida_value_to_json(field_val)));
@@ -237,10 +249,21 @@ pub fn taida_value_to_json_with_enum_defs(
             let is_lax = fields.iter().any(|(name, value)| {
                 name == "__type" && matches!(value, Value::Str(s) if s.as_string() == "Lax")
             });
+            let is_result = fields.iter().any(|(name, value)| {
+                name == "__type" && matches!(value, Value::Str(s) if s.as_string() == "Result")
+            });
             for (field_name, field_val) in fields.iter() {
                 if field_name == "__type" || (is_lax && field_name == "__error") {
                     continue;
                 }
+                let empty_error;
+                let field_val =
+                    if is_result && field_name == "throw" && matches!(field_val, Value::Unit) {
+                        empty_error = Value::empty_error();
+                        &empty_error
+                    } else {
+                        field_val
+                    };
                 entries.push((
                     field_name.clone(),
                     taida_value_to_json_with_enum_defs(field_val, enum_defs),
@@ -288,6 +311,11 @@ pub enum JsonSchema {
     /// On match the variant's ordinal is returned as `Value::Int(ordinal)`.
     /// On mismatch/missing the caller is responsible for wrapping in `Lax[Enum]`.
     Enum(String, Vec<String>),
+    /// A reference back to the enclosing TypeDef of this name. A
+    /// self-referential type (`Tree = @(value: Int, children: @[Tree])`)
+    /// cannot be expanded in full, so its inner occurrences point back to
+    /// the TypeDef being expanded.
+    Ref(String),
 }
 
 /// Primitive type for JSON schema matching.
@@ -315,12 +343,36 @@ pub fn build_schema_from_typedef(
     type_defs: &std::collections::HashMap<String, Vec<FieldDef>>,
     enum_defs: &std::collections::HashMap<String, Vec<String>>,
 ) -> JsonSchema {
-    let schema_fields: Vec<SchemaField> = fields
+    build_typedef_schema(type_name, fields, type_defs, enum_defs, &mut Vec::new())
+}
+
+/// `expanding` holds the TypeDefs being expanded around this one; a field
+/// that names one of them becomes a `JsonSchema::Ref`.
+fn build_typedef_schema(
+    type_name: &str,
+    fields: &[FieldDef],
+    type_defs: &std::collections::HashMap<String, Vec<FieldDef>>,
+    enum_defs: &std::collections::HashMap<String, Vec<String>>,
+    expanding: &mut Vec<String>,
+) -> JsonSchema {
+    expanding.push(type_name.to_string());
+    let schema_fields = schema_fields_of(fields, type_defs, enum_defs, expanding);
+    expanding.pop();
+    JsonSchema::TypeDef(type_name.to_string(), schema_fields)
+}
+
+fn schema_fields_of(
+    fields: &[FieldDef],
+    type_defs: &std::collections::HashMap<String, Vec<FieldDef>>,
+    enum_defs: &std::collections::HashMap<String, Vec<String>>,
+    expanding: &mut Vec<String>,
+) -> Vec<SchemaField> {
+    fields
         .iter()
         .filter(|f| !f.is_method)
         .map(|f| {
             let schema = match &f.type_annotation {
-                Some(type_expr) => type_expr_to_schema(type_expr, type_defs, enum_defs),
+                Some(type_expr) => type_expr_to_schema(type_expr, type_defs, enum_defs, expanding),
                 None => JsonSchema::Primitive(PrimitiveType::Str), // default to Str
             };
             SchemaField {
@@ -328,21 +380,22 @@ pub fn build_schema_from_typedef(
                 schema,
             }
         })
-        .collect();
-    JsonSchema::TypeDef(type_name.to_string(), schema_fields)
+        .collect()
 }
 
 /// Convert a TypeExpr to a JsonSchema.
 ///
 /// Resolution order for `TypeExpr::Named`:
 /// 1. Primitives (`Int`/`Str`/`Float`/`Bool`)
-/// 2. `type_defs` (TypeDef — record-like schema)
+/// 2. `type_defs` (TypeDef — record-like schema; a type that is already
+///    being expanded becomes a `Ref` to it)
 /// 3. `enum_defs` — Enum variant set
 /// 4. Fallback to `Primitive(Str)` for unknown names
 fn type_expr_to_schema(
     type_expr: &crate::parser::TypeExpr,
     type_defs: &std::collections::HashMap<String, Vec<FieldDef>>,
     enum_defs: &std::collections::HashMap<String, Vec<String>>,
+    expanding: &mut Vec<String>,
 ) -> JsonSchema {
     match type_expr {
         crate::parser::TypeExpr::Named(name) => match name.as_str() {
@@ -354,7 +407,11 @@ fn type_expr_to_schema(
                 // C16: TypeDef wins over Enum when both exist (Taida disallows
                 // collision today; kept explicit for future safety).
                 if let Some(fields) = type_defs.get(other) {
-                    build_schema_from_typedef(other, fields, type_defs, enum_defs)
+                    if expanding.iter().any(|n| n == other) {
+                        JsonSchema::Ref(other.to_string())
+                    } else {
+                        build_typedef_schema(other, fields, type_defs, enum_defs, expanding)
+                    }
                 } else if let Some(variants) = enum_defs.get(other) {
                     JsonSchema::Enum(other.to_string(), variants.clone())
                 } else {
@@ -363,29 +420,71 @@ fn type_expr_to_schema(
                 }
             }
         },
-        crate::parser::TypeExpr::List(inner) => {
-            JsonSchema::List(Box::new(type_expr_to_schema(inner, type_defs, enum_defs)))
-        }
+        crate::parser::TypeExpr::List(inner) => JsonSchema::List(Box::new(type_expr_to_schema(
+            inner, type_defs, enum_defs, expanding,
+        ))),
         crate::parser::TypeExpr::BuchiPack(fields) => {
             // Inline buchi pack type: @(field: Type, ...)
-            let schema_fields: Vec<SchemaField> = fields
-                .iter()
-                .filter(|f| !f.is_method)
-                .map(|f| {
-                    let schema = match &f.type_annotation {
-                        Some(te) => type_expr_to_schema(te, type_defs, enum_defs),
-                        None => JsonSchema::Primitive(PrimitiveType::Str),
-                    };
-                    SchemaField {
-                        name: f.name.clone(),
-                        schema,
-                    }
-                })
-                .collect();
-            JsonSchema::TypeDef("BuchiPack".to_string(), schema_fields)
+            JsonSchema::TypeDef(
+                "BuchiPack".to_string(),
+                schema_fields_of(fields, type_defs, enum_defs, expanding),
+            )
         }
         _ => JsonSchema::Primitive(PrimitiveType::Str),
     }
+}
+
+/// The TypeDefs a schema walker is inside, innermost first.
+/// `JsonSchema::Ref(name)` resolves to the nearest one with that name.
+/// `defaulting` marks a TypeDef that is being built from its defaults (the
+/// value is missing, null or not an object): a reference back to it from
+/// inside becomes `@(__type <= name)`, like the default of a
+/// self-referential type built anywhere else, so defaults stay finite.
+#[derive(Clone, Copy)]
+struct SchemaScope<'a> {
+    frame: Option<(&'a str, &'a [SchemaField], bool)>,
+    parent: Option<&'a SchemaScope<'a>>,
+}
+
+impl<'a> SchemaScope<'a> {
+    const ROOT: SchemaScope<'static> = SchemaScope {
+        frame: None,
+        parent: None,
+    };
+
+    fn enter(
+        &'a self,
+        name: &'a str,
+        fields: &'a [SchemaField],
+        defaulting: bool,
+    ) -> SchemaScope<'a> {
+        SchemaScope {
+            frame: Some((name, fields, defaulting)),
+            parent: Some(self),
+        }
+    }
+
+    fn resolve(&self, name: &str) -> Option<(&'a str, &'a [SchemaField], bool)> {
+        let mut scope = Some(self);
+        while let Some(s) = scope {
+            if let Some(frame) = s.frame
+                && frame.0 == name
+            {
+                return Some(frame);
+            }
+            scope = s.parent;
+        }
+        None
+    }
+}
+
+/// `@(__type <= name)`: the default of a self-referential type at the
+/// point where it refers back to itself.
+fn self_ref_stub(type_name: &str) -> Value {
+    Value::pack(vec![(
+        "__type".to_string(),
+        Value::str(type_name.to_string()),
+    )])
 }
 
 /// Cast a JSON value into a Taida value according to a schema.
@@ -410,61 +509,33 @@ pub fn json_to_typed_value(json: &serde_json::Value, schema: &JsonSchema) -> Val
 /// enum schema are a failed cast and must surface as `Lax.has_value=false` at
 /// The JSON mold boundary.
 pub fn json_to_typed_value_checked(json: &serde_json::Value, schema: &JsonSchema) -> (Value, bool) {
+    typed_value_checked(json, schema, &SchemaScope::ROOT)
+}
+
+fn typed_value_checked(
+    json: &serde_json::Value,
+    schema: &JsonSchema,
+    scope: &SchemaScope<'_>,
+) -> (Value, bool) {
     match schema {
         JsonSchema::Primitive(prim) => (
             json_to_primitive(json, prim),
             primitive_json_matches(json, prim),
         ),
         JsonSchema::TypeDef(type_name, schema_fields) => {
-            match json {
-                serde_json::Value::Object(obj) => {
-                    let mut fields: Vec<(String, Value)> = Vec::new();
-                    let mut matches_schema = true;
-                    for sf in schema_fields {
-                        let value = if let Some(json_val) = obj.get(&sf.name) {
-                            if json_val.is_null() {
-                                field_missing_default(&sf.schema)
-                            } else {
-                                let (value, field_matches) =
-                                    json_to_typed_value_checked(json_val, &sf.schema);
-                                matches_schema &= field_matches;
-                                value
-                            }
-                        } else {
-                            field_missing_default(&sf.schema)
-                        };
-                        fields.push((sf.name.clone(), value));
-                    }
-                    fields.push(("__type".to_string(), Value::str(type_name.clone())));
-                    (Value::pack(fields), matches_schema)
-                }
-                serde_json::Value::Null => {
-                    // null -> all defaults
-                    let mut fields: Vec<(String, Value)> = Vec::new();
-                    for sf in schema_fields {
-                        fields.push((sf.name.clone(), field_missing_default(&sf.schema)));
-                    }
-                    fields.push(("__type".to_string(), Value::str(type_name.clone())));
-                    (Value::pack(fields), false)
-                }
-                _ => {
-                    // Non-object -> all defaults
-                    let mut fields: Vec<(String, Value)> = Vec::new();
-                    for sf in schema_fields {
-                        fields.push((sf.name.clone(), field_missing_default(&sf.schema)));
-                    }
-                    fields.push(("__type".to_string(), Value::str(type_name.clone())));
-                    (Value::pack(fields), false)
-                }
-            }
+            typedef_value_checked(json, type_name, schema_fields, scope)
         }
+        JsonSchema::Ref(type_name) => match scope.resolve(type_name) {
+            Some((name, fields, _)) => typedef_value_checked(json, name, fields, scope),
+            None => (Value::pack(Vec::new()), false),
+        },
         JsonSchema::List(elem_schema) => match json {
             serde_json::Value::Array(arr) => {
                 let mut matches_schema = true;
                 let items: Vec<Value> = arr
                     .iter()
                     .map(|elem| {
-                        let (value, elem_matches) = json_to_typed_value_checked(elem, elem_schema);
+                        let (value, elem_matches) = typed_value_checked(elem, elem_schema, scope);
                         matches_schema &= elem_matches;
                         value
                     })
@@ -495,26 +566,82 @@ pub fn json_to_typed_value_checked(json: &serde_json::Value, schema: &JsonSchema
     }
 }
 
+fn typedef_value_checked(
+    json: &serde_json::Value,
+    type_name: &str,
+    schema_fields: &[SchemaField],
+    scope: &SchemaScope<'_>,
+) -> (Value, bool) {
+    match json {
+        serde_json::Value::Object(obj) => {
+            let inner = scope.enter(type_name, schema_fields, false);
+            let mut fields: Vec<(String, Value)> = Vec::new();
+            let mut matches_schema = true;
+            for sf in schema_fields {
+                let value = if let Some(json_val) = obj.get(&sf.name) {
+                    if json_val.is_null() {
+                        field_missing_default(&sf.schema, &inner)
+                    } else {
+                        let (value, field_matches) =
+                            typed_value_checked(json_val, &sf.schema, &inner);
+                        matches_schema &= field_matches;
+                        value
+                    }
+                } else {
+                    field_missing_default(&sf.schema, &inner)
+                };
+                fields.push((sf.name.clone(), value));
+            }
+            fields.push(("__type".to_string(), Value::str(type_name.to_string())));
+            (Value::pack(fields), matches_schema)
+        }
+        _ => {
+            // null or a non-object -> all defaults
+            let inner = scope.enter(type_name, schema_fields, true);
+            let mut fields: Vec<(String, Value)> = Vec::new();
+            for sf in schema_fields {
+                fields.push((sf.name.clone(), field_missing_default(&sf.schema, &inner)));
+            }
+            fields.push(("__type".to_string(), Value::str(type_name.to_string())));
+            (Value::pack(fields), false)
+        }
+    }
+}
+
 /// Default value for a JSON schema field whose key is missing / null.
 ///
 /// For most schemas this is identical to `default_for_schema` (Int(0), Str(""),
 /// nested defaults, etc.). For `JsonSchema::Enum` we diverge: a missing Enum
 /// field returns `Lax[Enum]` (silent coercion禁止) so the caller is forced to
 /// acknowledge the boundary via `|==` / `getOrDefault`.
-fn field_missing_default(schema: &JsonSchema) -> Value {
+fn field_missing_default(schema: &JsonSchema, scope: &SchemaScope<'_>) -> Value {
     match schema {
         JsonSchema::Enum(_, _) => make_lax_enum_inline(),
         // Nested TypeDef: recurse so inner Enum fields get Lax, not Int(0).
         JsonSchema::TypeDef(type_name, schema_fields) => {
-            let mut result_fields: Vec<(String, Value)> = schema_fields
-                .iter()
-                .map(|f| (f.name.clone(), field_missing_default(&f.schema)))
-                .collect();
-            result_fields.push(("__type".to_string(), Value::str(type_name.clone())));
-            Value::pack(result_fields)
+            typedef_missing_default(type_name, schema_fields, scope)
         }
-        _ => default_for_schema(schema),
+        JsonSchema::Ref(type_name) => match scope.resolve(type_name) {
+            Some((name, _, true)) => self_ref_stub(name),
+            Some((name, fields, false)) => typedef_missing_default(name, fields, scope),
+            None => Value::pack(Vec::new()),
+        },
+        _ => default_value(schema, scope),
     }
+}
+
+fn typedef_missing_default(
+    type_name: &str,
+    schema_fields: &[SchemaField],
+    scope: &SchemaScope<'_>,
+) -> Value {
+    let inner = scope.enter(type_name, schema_fields, true);
+    let mut result_fields: Vec<(String, Value)> = schema_fields
+        .iter()
+        .map(|f| (f.name.clone(), field_missing_default(&f.schema, &inner)))
+        .collect();
+    result_fields.push(("__type".to_string(), Value::str(type_name.to_string())));
+    Value::pack(result_fields)
 }
 
 /// Lax[Enum] shape for JSON mold Enum validation failure.
@@ -578,24 +705,36 @@ fn primitive_json_matches(json: &serde_json::Value, prim: &PrimitiveType) -> boo
 
 /// Get the default value for a schema type.
 pub fn default_for_schema(schema: &JsonSchema) -> Value {
+    default_value(schema, &SchemaScope::ROOT)
+}
+
+fn default_value(schema: &JsonSchema, scope: &SchemaScope<'_>) -> Value {
     match schema {
         JsonSchema::Primitive(PrimitiveType::Int) => Value::Int(0),
         JsonSchema::Primitive(PrimitiveType::Float) => Value::Float(0.0),
         JsonSchema::Primitive(PrimitiveType::Str) => Value::str(String::new()),
         JsonSchema::Primitive(PrimitiveType::Bool) => Value::Bool(false),
-        JsonSchema::TypeDef(type_name, fields) => {
-            let mut result_fields: Vec<(String, Value)> = fields
-                .iter()
-                .map(|f| (f.name.clone(), default_for_schema(&f.schema)))
-                .collect();
-            result_fields.push(("__type".to_string(), Value::str(type_name.clone())));
-            Value::pack(result_fields)
-        }
+        JsonSchema::TypeDef(type_name, fields) => typedef_default(type_name, fields, scope),
+        JsonSchema::Ref(type_name) => match scope.resolve(type_name) {
+            Some((name, _, true)) => self_ref_stub(name),
+            Some((name, fields, false)) => typedef_default(name, fields, scope),
+            None => Value::pack(Vec::new()),
+        },
         JsonSchema::List(_) => Value::list(Vec::new()),
         // C16: Enum default is the first variant's ordinal (= Int(0)).
         // This matches Taida's "最初のバリアントがデフォルト" rule.
         JsonSchema::Enum(_, _) => Value::Int(0),
     }
+}
+
+fn typedef_default(type_name: &str, fields: &[SchemaField], scope: &SchemaScope<'_>) -> Value {
+    let inner = scope.enter(type_name, fields, true);
+    let mut result_fields: Vec<(String, Value)> = fields
+        .iter()
+        .map(|f| (f.name.clone(), default_value(&f.schema, &inner)))
+        .collect();
+    result_fields.push(("__type".to_string(), Value::str(type_name.to_string())));
+    Value::pack(result_fields)
 }
 
 /// jsonEncode(value) -> Str

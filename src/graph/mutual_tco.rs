@@ -470,6 +470,7 @@ fn merge_one_cycle(statements: &mut Vec<Statement>, member_names: &[String]) {
                 value: Expr::Ident(layout.slot_names[i][k].clone(), dummy.clone()),
                 doc_comments: Vec::new(),
                 span: dummy.clone(),
+                forward: false,
             }));
         }
         arm_body.extend(rewrite_body(&fd.body, &layout, &dummy));

@@ -2,9 +2,10 @@
 //!
 //! This module walks the AST of a single [`FuncDef`] and emits a [`CallSite`]
 //! entry for every direct function call (`Expr::FuncCall` where the callee is
-//! a plain [`Expr::Ident`]). Each entry carries an [`is_tail`] flag
-//! indicating whether the call is in the tail position of the enclosing
-//! function's body.
+//! a plain [`Expr::Ident`]) and for every name read as a value (a function
+//! passed as an argument or used as a pipeline stage may be called while the
+//! function runs). Each entry carries an [`is_tail`] flag indicating whether
+//! the call is in the tail position of the enclosing function's body.
 //!
 //! Conservative rules (intentionally narrower than the runtime TCO so that
 //! the compile-time reject does not over-reject programs that happen
@@ -16,8 +17,10 @@
 //! inherits the enclosing tail flag.
 //! - Inside an [`Expr::Pipeline`], **only** the last stage inherits tail,
 //! and even then only if the last stage is itself a direct `FuncCall`
-//! (e.g., `x => foo(_)`). A bare `Ident` pipeline stage is conservatively
-//! treated as non-tail (it is morally a reference, not a tail call site).
+//! (e.g., `x => foo(_)`). A bare `Ident` pipeline stage is a call that is
+//! never in tail position.
+//! - A name read as a value is a call outside the tail position, like the
+//! calls in the body of a lambda handed to a mold.
 //! - Function arguments, `MoldInst` header / body args, `BuchiPack` field
 //! values, list elements, binary-op operands, lambda bodies, and
 //! `ErrorCeiling` handler bodies are all **non-tail** — they feed a
@@ -32,6 +35,7 @@
 //! body is treated as non-tail w.r.t. the outer function (the handler
 //! itself is a separate trampoline scope).
 
+use super::walk::Bindings;
 use crate::lexer::Span;
 use crate::parser::*;
 
@@ -39,8 +43,9 @@ use crate::parser::*;
 /// information relative to the enclosing function.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CallSite {
-    /// Name of the callee (only direct `FuncCall` with `Ident` callees are
-    /// tracked; method calls and lambda calls are never recorded).
+    /// Name of the callee: the `Ident` callee of a direct `FuncCall`, or a
+    /// name read as a value. Method calls and lambda calls are never
+    /// recorded.
     pub callee: String,
     /// Whether this call is in the tail position of the enclosing function.
     pub is_tail: bool,
@@ -51,22 +56,44 @@ pub struct CallSite {
 /// Collect every direct function call inside `fd` along with its tail flag.
 ///
 /// The returned vector is in source order.
+///
+/// A call spelled with a name that is bound at that point (a parameter, an
+/// earlier binding, a lambda parameter) calls that value, not a function of
+/// the same name defined elsewhere, and is left out.
 pub fn collect_call_sites(fd: &FuncDef) -> Vec<CallSite> {
-    let mut out = Vec::new();
+    let mut out = Sites::default();
+    out.bindings.bind_params(&fd.params);
     let body_len = fd.body.len();
     for (i, stmt) in fd.body.iter().enumerate() {
         let is_tail = i == body_len - 1;
         visit_stmt(stmt, is_tail, &mut out);
     }
-    out
+    out.calls
 }
 
-fn visit_stmt(stmt: &Statement, is_tail: bool, out: &mut Vec<CallSite>) {
+/// The calls found so far and the names bound at the point being visited.
+#[derive(Default)]
+struct Sites {
+    calls: Vec<CallSite>,
+    bindings: Bindings,
+}
+
+fn visit_stmt(stmt: &Statement, is_tail: bool, out: &mut Sites) {
     match stmt {
         Statement::Expr(expr) => visit_expr(expr, is_tail, out),
-        Statement::Assignment(a) => visit_expr(&a.value, false, out),
-        Statement::UnmoldForward(uf) => visit_expr(&uf.source, false, out),
-        Statement::UnmoldBackward(ub) => visit_expr(&ub.source, false, out),
+        // The value is read before the name is bound.
+        Statement::Assignment(a) => {
+            visit_expr(&a.value, false, out);
+            out.bindings.bind(&a.target);
+        }
+        Statement::UnmoldForward(uf) => {
+            visit_expr(&uf.source, false, out);
+            out.bindings.bind(&uf.target);
+        }
+        Statement::UnmoldBackward(ub) => {
+            visit_expr(&ub.source, false, out);
+            out.bindings.bind(&ub.target);
+        }
         Statement::ErrorCeiling(ec) => {
             // F42 sweep follow-up: ErrorCeiling handler bodies are
             // executed in a trampoline scope by the interpreter / JS
@@ -82,25 +109,37 @@ fn visit_stmt(stmt: &Statement, is_tail: bool, out: &mut Vec<CallSite>) {
             // (`| _ |> retryLoop(...)` at the end of the handler) clean
             // while still surfacing `E0701` for self-recursion in
             // non-tail positions inside the handler.
+            let mark = out.bindings.mark();
+            out.bindings.bind(&ec.error_param);
             let h_len = ec.handler_body.len();
             for (i, hstmt) in ec.handler_body.iter().enumerate() {
                 let last = i + 1 == h_len;
                 visit_stmt(hstmt, last, out);
             }
+            out.bindings.release(mark);
         }
-        _ => {}
+        // A nested function is entered only when it is called, and a method
+        // body belongs to its type: neither is part of this function's own
+        // tail-position analysis. Its name is bound from here on.
+        Statement::FuncDef(fd) => out.bindings.bind(&fd.name),
+        Statement::EnumDef(_)
+        | Statement::ClassLikeDef(_)
+        | Statement::Import(_)
+        | Statement::Export(_) => {}
     }
 }
 
-fn visit_expr(expr: &Expr, is_tail: bool, out: &mut Vec<CallSite>) {
+fn visit_expr(expr: &Expr, is_tail: bool, out: &mut Sites) {
     match expr {
         Expr::FuncCall(callee, args, span) => {
             if let Expr::Ident(name, _) = callee.as_ref() {
-                out.push(CallSite {
-                    callee: name.clone(),
-                    is_tail,
-                    span: span.clone(),
-                });
+                if !out.bindings.is_bound(name) {
+                    out.calls.push(CallSite {
+                        callee: name.clone(),
+                        is_tail,
+                        span: span.clone(),
+                    });
+                }
             } else {
                 // Indirect callees (e.g., dynamic dispatch) are not tracked;
                 // still recurse into the callee sub-expression for any
@@ -130,11 +169,14 @@ fn visit_expr(expr: &Expr, is_tail: bool, out: &mut Vec<CallSite>) {
                 if let Some(cond) = &arm.condition {
                     visit_expr(cond, false, out);
                 }
+                // What an arm binds is not visible after it.
+                let mark = out.bindings.mark();
                 let a_len = arm.body.len();
                 for (i, s) in arm.body.iter().enumerate() {
                     let t = is_tail && i == a_len - 1;
                     visit_stmt(s, t, out);
                 }
+                out.bindings.release(mark);
             }
         }
         Expr::Pipeline(stages, _) => {
@@ -184,28 +226,53 @@ fn visit_expr(expr: &Expr, is_tail: bool, out: &mut Vec<CallSite>) {
         }
         Expr::Unmold(e, _) => visit_expr(e, false, out),
         Expr::Throw(e, _) => visit_expr(e, false, out),
-        Expr::Lambda(_, body, _) => {
+        Expr::Lambda(params, body, _) => {
             // Lambda body is its own tail frame — calls inside are not
             // tail-of-outer. Just recurse to pick up direct calls for
-            // cycle enumeration (still marked non-tail of outer).
+            // cycle enumeration (still marked non-tail of outer). Its
+            // parameters are bound in its body only.
+            let mark = out.bindings.mark();
+            out.bindings.bind_params(params);
             visit_expr(body, false, out);
+            out.bindings.release(mark);
         }
         Expr::Block(stmts, _) => {
             // A block only appears as a lambda body; like the lambda body
             // expression itself, its statements are non-tail of the outer
             // function but still enumerated for cycle detection.
+            let mark = out.bindings.mark();
             for stmt in stmts {
                 visit_stmt(stmt, false, out);
+            }
+            out.bindings.release(mark);
+        }
+        // A `${...}` body is an expression evaluated in place: its calls are
+        // operands of the string being built, never tail calls.
+        Expr::TemplateLit(template, span) => {
+            for inner in super::walk::template_interpolations(template, span) {
+                visit_expr(&inner, false, out);
+            }
+        }
+        // A name read as a value (a function passed as an argument, a
+        // pipeline stage, a function stored in a binding) may be called
+        // while the function runs, as a lambda calling it would be: it is
+        // recorded as a call outside the tail position. Names that are not
+        // functions are ignored by the checks that read the call sites.
+        Expr::Ident(name, span) => {
+            if !out.bindings.is_bound(name) {
+                out.calls.push(CallSite {
+                    callee: name.clone(),
+                    is_tail: false,
+                    span: span.clone(),
+                });
             }
         }
         // Leaves — no sub-expressions.
         Expr::IntLit(..)
         | Expr::FloatLit(..)
         | Expr::StringLit(..)
-        | Expr::TemplateLit(..)
         | Expr::BoolLit(..)
         | Expr::Gorilla(..)
-        | Expr::Ident(..)
         | Expr::Placeholder(..)
         | Expr::Hole(..)
         | Expr::EnumVariant(..)
@@ -288,6 +355,19 @@ mod tests {
         for s in &sites {
             assert!(!s.is_tail, "list element {} should not be tail", s.callee);
         }
+    }
+
+    #[test]
+    fn test_unary_and_field_and_template_positions_are_not_tail() {
+        let src =
+            "foo n =\n  a <= !g(n)\n  b <= @(v <= h(n))\n  c <= `t=${k(n)}`\n  m(n)\n=> :Int\n";
+        let fd = parse_one_func(src);
+        let sites = collect_call_sites(&fd);
+        for callee in ["g", "h", "k"] {
+            let site = sites.iter().find(|s| s.callee == callee).unwrap();
+            assert!(!site.is_tail, "{callee} must be non-tail");
+        }
+        assert!(sites.iter().find(|s| s.callee == "m").unwrap().is_tail);
     }
 
     #[test]

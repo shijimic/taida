@@ -245,6 +245,10 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr, Val],
             returns: &[Val],
         },
+        "taida_pack_has_hash" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Val],
+        },
         "taida_pack_get_idx" => RuntimeAbi {
             params: &[Ptr, Val],
             returns: &[Val],
@@ -347,6 +351,11 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
         // insertion entry points that carry the probe argument's kind.
         "taida_list_note_push_ekind" => RuntimeAbi {
             params: &[Ptr, Val],
+            returns: &[],
+        },
+        // A list-literal element whose kind comes from a runtime tag.
+        "taida_list_note_push_dyn" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
             returns: &[],
         },
         "taida_set_has_tagged" => RuntimeAbi {
@@ -788,6 +797,30 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr, FnPtr],
             returns: &[Ptr],
         },
+        "taida_list_sort_kind" => RuntimeAbi {
+            params: &[Ptr, FnPtr, Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_error_field" => RuntimeAbi {
+            params: &[Ptr, Val],
+            returns: &[Val],
+        },
+        "taida_json_encode_desc" | "taida_json_pretty_desc" => RuntimeAbi {
+            params: &[Val, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_register_fn_name" => RuntimeAbi {
+            params: &[Val, Ptr],
+            returns: &[Val],
+        },
+        "taida_function_to_string" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_register_type_methods" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Val],
+        },
         "taida_list_find" => RuntimeAbi {
             params: &[Ptr, FnPtr],
             returns: &[Ptr],
@@ -851,12 +884,28 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr, Val],
             returns: &[],
         },
+        "taida_lax_fill_default" => RuntimeAbi {
+            params: &[Ptr, Val, Val],
+            returns: &[Ptr],
+        },
+        "taida_hashmap_note_kinds" => RuntimeAbi {
+            params: &[Ptr, Val, Val, Val, Val],
+            returns: &[],
+        },
+        "taida_register_enum_variants" => RuntimeAbi {
+            params: &[Val, Ptr],
+            returns: &[],
+        },
         "taida_hashmap_set" => RuntimeAbi {
             params: &[Ptr, Val, Ptr, Val],
             returns: &[Ptr],
         },
         "taida_hashmap_set_immut" => RuntimeAbi {
             params: &[Ptr, Val, Ptr, Val],
+            returns: &[Ptr],
+        },
+        "taida_hashmap_set_consume" => RuntimeAbi {
+            params: &[Ptr, Val, Ptr, Val, Val],
             returns: &[Ptr],
         },
         "taida_hashmap_get" => RuntimeAbi {
@@ -927,6 +976,10 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
         },
         "taida_set_from_list" => RuntimeAbi {
             params: &[Ptr],
+            returns: &[Ptr],
+        },
+        "taida_hashmap_from" => RuntimeAbi {
+            params: &[Val, Val, Val],
             returns: &[Ptr],
         },
         "taida_set_add" => RuntimeAbi {
@@ -1023,6 +1076,10 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             returns: &[Ptr],
         },
         // RCB-101: Error type filtering for |==
+        "taida_type_tag" => RuntimeAbi {
+            params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
         "taida_register_type_parent" => RuntimeAbi {
             params: &[Ptr, Ptr],
             returns: &[],
@@ -1044,6 +1101,10 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
         // ── Result[T, P] ──
         "taida_result_create" => RuntimeAbi {
             params: &[Val, Ptr, FnPtr],
+            returns: &[Ptr],
+        },
+        "taida_result_throw_field" => RuntimeAbi {
+            params: &[Ptr],
             returns: &[Ptr],
         },
         "taida_result_is_ok" => RuntimeAbi {
@@ -1184,6 +1245,10 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Ptr],
             returns: &[Ptr],
         },
+        "taida_async_err_kinded" => RuntimeAbi {
+            params: &[Val, Val],
+            returns: &[Ptr],
+        },
         "taida_async_set_value_tag" => RuntimeAbi {
             params: &[Ptr, Val],
             returns: &[],
@@ -1292,6 +1357,10 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
         // ── Gorillax / RelaxedGorillax ──
         "taida_gorillax_new" => RuntimeAbi {
             params: &[Val],
+            returns: &[Ptr],
+        },
+        "taida_gorillax_err" => RuntimeAbi {
+            params: &[Ptr],
             returns: &[Ptr],
         },
         "taida_molten_new" => RuntimeAbi {
@@ -1528,6 +1597,10 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
         // ── JSON — Molten Iron ──
         "taida_json_schema_cast" => RuntimeAbi {
             params: &[Ptr, Ptr],
+            returns: &[Ptr],
+        },
+        "taida_json_schema_cast_hooked" => RuntimeAbi {
+            params: &[Ptr, Ptr, Ptr],
             returns: &[Ptr],
         },
         "taida_json_parse" => RuntimeAbi {
@@ -1928,6 +2001,10 @@ fn runtime_abi(name: &str) -> Result<RuntimeAbi, String> {
             params: &[Val],
             returns: &[Ptr],
         },
+        "taida_os_udp_close" => RuntimeAbi {
+            params: &[Val],
+            returns: &[Ptr],
+        },
         "taida_os_listener_close" => RuntimeAbi {
             params: &[Val],
             returns: &[Ptr],
@@ -2170,6 +2247,11 @@ struct EmitCtx {
     tco_owned_var: Option<cranelift_frontend::Variable>,
     /// TCO: パラメータ Variable のリスト（引数の再代入用）
     tco_param_vars: Vec<cranelift_frontend::Variable>,
+    /// Per-parameter ownership bits of a self tail-recursive loop (see
+    /// `IrInst::SetParamOwned`), keyed by parameter index. Variables for
+    /// the same reason as `tco_owned_var`: they change across the
+    /// back-edge.
+    tco_param_owned: HashMap<usize, cranelift_frontend::Variable>,
     /// ターゲットの呼出規約（CallIndirect 等で使用）
     call_conv: CallConv,
     /// Taida の内部 boxed value 型（AbiHelper::value_ty() のキャッシュ）。
@@ -2414,7 +2496,7 @@ impl Emitter {
                 IrInst::Release(_) => {
                     self.ensure_runtime_func("taida_release")?;
                 }
-                IrInst::ReleaseAuto(_) => {
+                IrInst::ReleaseAuto(_) | IrInst::ReleaseParamIfOwned(_) => {
                     self.ensure_runtime_func("taida_release_any")?;
                 }
                 IrInst::GlobalSet(_, _) => {
@@ -2655,6 +2737,25 @@ impl Emitter {
         Ok(())
     }
 
+    /// Parameter indices whose loop ownership bit the body reads or writes.
+    fn collect_owned_params(insts: &[IrInst], out: &mut std::collections::BTreeSet<usize>) {
+        for inst in insts {
+            match inst {
+                IrInst::ReleaseParamIfOwned(index)
+                | IrInst::SetParamOwned(index, _)
+                | IrInst::ParamOwned(_, index) => {
+                    out.insert(*index);
+                }
+                IrInst::CondBranch(_, arms) => {
+                    for arm in arms {
+                        Self::collect_owned_params(&arm.body, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// IR 命令列に TailCall が含まれるかチェック（再帰的）
     fn contains_tail_call(insts: &[IrInst]) -> bool {
         for inst in insts {
@@ -2713,6 +2814,7 @@ impl Emitter {
                 tco_loop_block: None,
                 tco_owned_var: None,
                 tco_param_vars: Vec::new(),
+                tco_param_owned: HashMap::new(),
                 call_conv: self.abi.call_conv(),
                 value_ty: self.abi.value_ty(),
                 abi: self.abi,
@@ -2744,6 +2846,18 @@ impl Emitter {
                     let zero = builder.ins().iconst(types::I64, 0);
                     builder.def_var(owned, zero);
                     ectx.tco_owned_var = Some(owned);
+                }
+
+                // Ownership bits of the tracked parameters: 0 on entry (the
+                // caller's values are borrowed). Defined here, outside the
+                // loop, so they carry across iterations.
+                let mut owned_params = std::collections::BTreeSet::new();
+                Self::collect_owned_params(&ir_func.body, &mut owned_params);
+                for index in owned_params {
+                    let owned = builder.declare_var(types::I64);
+                    let zero = builder.ins().iconst(types::I64, 0);
+                    builder.def_var(owned, zero);
+                    ectx.tco_param_owned.insert(index, owned);
                 }
 
                 // ループブロック（エントリから無条件ジャンプ）
@@ -3154,6 +3268,41 @@ impl Emitter {
                 if let Some(&func_ref) = ectx.func_refs.get("taida_release_any") {
                     builder.ins().call(func_ref, &[val]);
                 }
+            }
+            IrInst::ReleaseParamIfOwned(index) => {
+                // if owned { taida_release_any(current parameter value) }
+                if let (Some(&owned), Some(&param), Some(&func_ref)) = (
+                    ectx.tco_param_owned.get(index),
+                    ectx.tco_param_vars.get(*index),
+                    ectx.func_refs.get("taida_release_any"),
+                ) {
+                    let flag = builder.use_var(owned);
+                    let val = builder.use_var(param);
+                    let release_block = builder.create_block();
+                    let cont_block = builder.create_block();
+                    builder
+                        .ins()
+                        .brif(flag, release_block, &[], cont_block, &[]);
+                    builder.switch_to_block(release_block);
+                    builder.seal_block(release_block);
+                    builder.ins().call(func_ref, &[val]);
+                    builder.ins().jump(cont_block, &[]);
+                    builder.switch_to_block(cont_block);
+                    builder.seal_block(cont_block);
+                }
+            }
+            IrInst::SetParamOwned(index, owned_now) => {
+                if let Some(&owned) = ectx.tco_param_owned.get(index) {
+                    let bit = builder.ins().iconst(types::I64, i64::from(*owned_now));
+                    builder.def_var(owned, bit);
+                }
+            }
+            IrInst::ParamOwned(dst, index) => {
+                let bit = match ectx.tco_param_owned.get(index) {
+                    Some(&owned) => builder.use_var(owned),
+                    None => builder.ins().iconst(types::I64, 0),
+                };
+                ectx.val_map.insert(*dst, bit);
             }
             IrInst::TailCall(args) => {
                 // 末尾再帰: 引数を Variable に再代入してループブロックにジャンプ

@@ -61,6 +61,12 @@ pub const NET_H1_H2_SECTION: &str = include_str!("net_h1_h2.c");
 /// main() (4,458 lines).
 pub const NET_H3_QUIC_SECTION: &str = include_str!("net_h3_quic.c");
 
+/// Shared with the WASM runtime: the tables and the correctly rounded math
+/// kernel behind the transcendental molds, assembled right after `core.c`
+/// (which declares the entry points ahead of use).
+pub const CRMATH_TABLES_SECTION: &str = include_str!("../runtime_crmath_tables.inc.c");
+pub const CRMATH_SECTION: &str = include_str!("../runtime_crmath.inc.c");
+
 /// Full native runtime C source, assembled from the five responsibility
 /// fragments on first access and cached for the process lifetime.
 ///
@@ -83,9 +89,13 @@ pub static NATIVE_RUNTIME_C: LazyLock<&'static str> = LazyLock::new(|| {
         + OS_SECTION.len()
         + TLS_SECTION.len()
         + NET_H1_H2_SECTION.len()
-        + NET_H3_QUIC_SECTION.len();
+        + NET_H3_QUIC_SECTION.len()
+        + CRMATH_TABLES_SECTION.len()
+        + CRMATH_SECTION.len();
     let mut s = String::with_capacity(total);
     s.push_str(CORE_SECTION);
+    s.push_str(CRMATH_TABLES_SECTION);
+    s.push_str(CRMATH_SECTION);
     s.push_str(OS_SECTION);
     s.push_str(TLS_SECTION);
     s.push_str(NET_H1_H2_SECTION);
@@ -956,7 +966,94 @@ mod tests {
         //   in tls.c tcp_listen / udp_bind and aligns socketRecvExact's cap
         //   to 64MB (tls.c).
         //   1,349,193 -> 1,350,482.
-        const EXPECTED_TOTAL_LEN: usize = 1_354_264;
+        // HTTP / socket parity work: the httparse-equivalent HTTP/1.1 head
+        //   parser, response framing by body length, the growable worker
+        //   pool (net_h1_h2.c / net_h3_quic.c), the socket handle table and
+        //   the HTTP client's chunked decoding (tls.c), udpClose's own entry
+        //   point (core.c): 1,354,264 -> 1,369,818.
+        // The strict JSON reader (grammar, `\uXXXX`, exact numbers,
+        //   self-referential schemas, kind tags, rebuild hooks for TypeDefs
+        //   with methods), HashMap order-index compaction, the small-block-only
+        //   heap range, the Div/Mod, float-to-Int, ToFixed, Trim, Sort,
+        //   byte-mold and BytesCursorTake fixes, jsonEncode's Float form, and
+        //   Read that reads to the end and checks UTF-8 (core.c, os.c):
+        //   1,369,818 -> 1,393,434.
+        // Ownership-aware releases (the in-place HashMap `.set` for a sole
+        //   owner, user `toString` results retained, the pack freelist for
+        //   1-8 fields) and jsonEncode's `\b` / `\f` short escapes (core.c),
+        //   and the addon argument / result conversion by kind with the
+        //   descriptor checks (net_h3_quic.c): 1,393,434 -> 1,403,594.
+        // Clamp with reversed bounds, Sort in the reference's order (NaN keys
+        //   last, `by` keys compared by their kind, a descending sort reversing
+        //   the ascending one), the uncaught-error message rule, and the
+        //   omitted Error `type` / `message` reader (core.c):
+        //   1,403,594 -> 1,405,481.
+        // jsonEncode / jsonPretty written by the argument's static type
+        //   (a schema descriptor from the lowering): 1,405,481 -> 1,411,383.
+        // Join renders an element by its recorded kind before looking at
+        //   it as a possible string: 1,411,383 -> 1,411,709.
+        // List accessors default by the first element's kind, RelaxedGorillax
+        //   keeps the source's field kinds, and jsonEncode writes Bytes as null
+        //   and checks a Str part is a string: 1,411,709 -> 1,413,612.
+        // Function values show as `<function NAME>` and methods are left out
+        //   of displays and jsonEncode; Lax over Bytes, the pool field name,
+        //   stdinLine's prompt, and custom molds found by their fields:
+        //   1,413,612 -> 1,420,041.
+        // Runtime-raised errors are built in the caught form (type,
+        //   message, kind, code, __type) with the predicate message naming
+        //   the value, and Error values show as packs: 1,420,041 ->
+        //   1,420,345.
+        // Rejected Async values show a runtime-raised error as Error(type:
+        //   message): 1,420,345 -> 1,422,187.
+        // list literal elements of a type parameter take their kind from
+        //   the caller's tag (taida_list_note_push_dyn): 1,422,187 ->
+        //   1,422,755.
+        // pack display takes Bool from the field's own tag, not the
+        //   name-keyed registry: 1,422,755 -> 1,422,397.
+        // taida_retain_and_tag_field tags a Str literal (static header) as
+        //   Str: 1,422,397 -> 1,422,593.
+        // Gorillax.toString() shows the value by its slot's kind: 1,422,593
+        //   -> 1,423,333.
+        // Abs uses fabs so Abs[-0.0]() is 0.0: 1,423,333 -> 1,423,400.
+        // taida_function_to_string shows a function value in a template
+        //   part or Str[...](): 1,423,400 -> 1,423,722.
+        // range saturates the item count in its message, createDir fails on
+        //   an existing file and run reports an exec failure as an IoError:
+        //   1,423,722 -> 1,426,109.
+        // HashMap entries keep their key and value kinds (kind slots,
+        //   note_kinds), list / pack keys hash and compare by content, and
+        //   Sets and HashMaps compare structurally: 1,426,109 -> 1,436,708.
+        // taida_lax_fill_default gives a failed lookup the default of the
+        //   element's static type: 1,436,708 -> 1,437,603.
+        // AsyncReject keeps its payload's kind, and a payload that is not
+        //   an error is thrown as an AsyncError carrying its text: 1,437,603
+        //   -> 1,439,872.
+        // run / execShell failures give ProcessError the exit code (128 +
+        //   signal for a signal): 1,439,872 -> 1,440,020.
+        // Upper / Lower use the whole Unicode case mapping, with the tables
+        //   the interpreter's Rust standard library has: 1,440,020 ->
+        //   1,475,399.
+        // ByteLength / ByteAt / ByteSlice read Bytes values too, and
+        //   ByteSlice reads a cut UTF-8 sequence as U+FFFD: 1,475,399 ->
+        //   1,477,934.
+        // A Result given no error reads and shows its throw as the empty
+        //   Error: 1,477,934 -> 1,479,576.
+        // A Result given no error reads and shows its throw as the empty
+        //   Error: 1,479,576 -> 1,479,942.
+        // Functions are named Function by typeof: 1,479,942 -> 1,479,945.
+        // hashMap(entries) builds a HashMap on the compiled backends:
+        //   1,479,945 -> 1,484,359.
+        // Error types are told apart by their declaration: 1,484,359 ->
+        //   1,488,485.
+        // Transcendental molds use the shared correctly rounded kernel:
+        //   1,488,485 -> 1,569,053.
+        // Int / Bool sets compare by value, and code addresses are not
+        //   objects: 1,569,053 -> 1,572,818.
+        // Field names have no fixed limit; toString shows TODO, Stream and
+        //   Molten as the reference does: 1,572,818 -> 1,574,290.
+        // The top-level value table grows as needed: 1,574,290 ->
+        //   1,576,186.
+        const EXPECTED_TOTAL_LEN: usize = 1_576_186;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),
@@ -1733,7 +1830,52 @@ mod tests {
         //  : taida_str_pad counts characters via
         //   taida_utf8_count and repeats the whole pad string with memcpy,
         //   with an overflow guard (before the marker): 435,203 -> 435,809.
-        const F1_LEN: usize = 434_580;
+        // udpClose's forward declaration (before the marker): 434,580 -> 434,631.
+        // The fixes listed at EXPECTED_TOTAL_LEN (JSON reader, HashMap,
+        //   heap range, numeric molds, ...): 434,631 -> 437,879.
+        // The ownership-aware releases (in-place HashMap `.set`, the pack
+        //   freelist for 1-8 fields; before the marker): 437,879 -> 439,440.
+        // Clamp, Sort, the uncaught-error message rule and the omitted Error
+        //   field reader (before the marker): 439,440 -> 441,294.
+        // Join by the element's recorded kind (before the marker):
+        //   441,294 -> 441,620.
+        // List accessor defaults and the RelaxedGorillax kinds (before the
+        //   marker): 441,620 -> 443,023.
+        // Function / method display registries and the Bytes Lax kinds
+        //   (before the marker): 443,023 -> 448,306.
+        // Runtime-raised errors in the caught form and the Result predicate
+        //   message (before the marker): 448,306 -> 449,090.
+        // taida_list_note_push_dyn sits before the error ceiling marker:
+        //   449,090 -> 449,658.
+        // taida_retain_and_tag_field tags a Str literal as Str: 449,658 ->
+        //   449,854.
+        // Gorillax.toString() shows the value by its slot's kind: 449,854
+        //   -> 450,594.
+        // Abs uses fabs so Abs[-0.0]() is 0.0: 450,594 -> 450,661.
+        // taida_function_to_string shows a function value in a template
+        //   part or Str[...](): 450,661 -> 450,983.
+        // HashMap entries keep their key and value kinds, list / pack keys
+        //   hash and compare by content, and Sets and HashMaps compare
+        //   structurally: 450,983 -> 459,153.
+        // taida_lax_fill_default gives a failed lookup the default of the
+        //   element's static type: 459,153 -> 460,048.
+        // AsyncReject keeps its payload's kind, and a payload that is not
+        //   an error is thrown as an AsyncError carrying its text: 460,048 ->
+        //   460,195.
+        // Upper / Lower use the whole Unicode case mapping, with the tables
+        //   the interpreter's Rust standard library has: 460,195 -> 495,574.
+        // ByteLength / ByteAt / ByteSlice read Bytes values too, and
+        //   ByteSlice reads a cut UTF-8 sequence as U+FFFD: 495,574 ->
+        //   498,109.
+        // Functions are named Function by typeof: 498,109 -> 498,111.
+        // hashMap(entries) builds a HashMap on the compiled backends:
+        //   498,111 -> 502,525.
+        // Transcendental molds use the shared correctly rounded kernel:
+        //   502,525 -> 503,052.
+        // Int / Bool sets compare by value, and code addresses are not
+        //   objects: 503,052 -> 506,817.
+        // The top-level value table grows as needed: 506,817 -> 508,713.
+        const F1_LEN: usize = 508_713;
         // CORE_SECTION = F1_LEN (before the Error ceiling marker) + F2 (after it).
         // F2 was 200,593 bytes (the previous 200_740 figure was stale: the
         // post-handler-ABI F2 had already shrunk by 147 bytes without this
@@ -1831,7 +1973,41 @@ mod tests {
             //  after the marker: the early-return guard
             //   inside taida_error_type_check_or_rethrow gains the
             //   HASH___TYPE presence probe: +244. F2 233,332 -> 233,576.
-            F1_LEN + 238_617,
+            //  after the marker: the JSON reader rewrite and the fixes listed
+            //   at EXPECTED_TOTAL_LEN: F2 238,617 -> 257,760.
+            //  after the marker: the ownership-aware releases and jsonEncode's
+            //   short escapes: F2 257,760 -> 258,198.
+            //  after the marker: the uncaught-error message rule: F2
+            //   258,198 -> 258,231.
+            //  after the marker: jsonEncode / jsonPretty by the argument's
+            //   static type: F2 258,231 -> 264,133.
+            //  after the marker: jsonEncode's Bytes and Str checks: F2
+            //   264,133 -> 264,633.
+            //  after the marker: displays of functions and methods, stdinLine's
+            //   prompt, custom mold unmold: F2 264,633 -> 265,655.
+            // after the marker: Error values show as packs; custom mold
+            //   unmold found by its fields: 265,655 -> 265,175.
+            // after the marker: rejected Async display of runtime-raised
+            //   errors: 265,175 -> 267,017.
+            // pack display without the name-keyed Bool registry
+            //   (to_string_full): 267,017 -> 266,659.
+            // range saturates the item count in its message: 266,659 ->
+            //   266,817.
+            // jsonEncode writes each HashMap value by its entry kind and
+            //   names Enum values: 266,817 -> 269,246.
+            // AsyncReject keeps its payload's kind, and a payload that is
+            //   not an error is thrown as an AsyncError carrying its text:
+            //   269,246 -> 271,368.
+            // A Result given no error reads and shows its throw as the
+            //   empty Error: 271,368 -> 273,010.
+            // A Result given no error reads and shows its throw as the
+            //   empty Error: 273,010 -> 273,376.
+            // Functions are named Function by typeof: 273,376 -> 273,377.
+            // Error types are told apart by their declaration: 273,377 ->
+            //   277,503.
+            // Field names have no fixed limit; toString shows TODO, Stream
+            //   and Molten as the reference does: 277,503 -> 278,975.
+            F1_LEN + 278_975,
             "core.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F2_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Error ceiling";
@@ -2011,7 +2187,12 @@ mod tests {
         //   (head_scan_pos). F5_LEN: 223,917 + 639 = 224,556.
         // 2026-06-10 F58 poly-string fix: +2 (TAIDA_EMPTY_STR replacement
         // before the HTTP/2 divider). 224,556 -> 224,558.
-        const F5_LEN: usize = 224_558;
+        // HTTP / socket parity work (before the HTTP/2 divider): the
+        //   httparse-equivalent head parser, response framing by body
+        //   length, the growable streaming line buffer, the wsUpgrade span
+        //   lookup + strict base64 and the growable worker pool.
+        //   224,558 -> 228,585. F6 unchanged.
+        const F5_LEN: usize = 228_585;
         // 2026-05-30 HTTP/2 request body cap lands inside fragment 6 (net_h2
         //   server, after the divider): the H2_MAX_REQUEST_BODY_SIZE guard +
         //   ENHANCE_YOUR_CALM reset + the two new #defines net to +1,113 bytes.
@@ -2031,7 +2212,7 @@ mod tests {
         //   F5: 224,556 + 2 = 224,558. F6 untouched.
         assert_eq!(
             NET_H1_H2_SECTION.len(),
-            224_558 + 114_596,
+            228_585 + 114_596,
             "net_h1_h2.c total byte length must equal the expected concatenated runtime fragments"
         );
         const F6_PREFIX: &[u8] = b"// \xE2\x94\x80\xE2\x94\x80 Native HTTP/2 server";

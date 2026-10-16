@@ -340,8 +340,10 @@ impl GlobalStore {
     // The stale-detection path and `--force-refresh` both need to replace
     // `pkg_dir` with a freshly fetched extraction. The old implementation
     // did `rm -rf pkg_dir; fetch`, which destroyed the user's install
-    // if the fetch failed. These three primitives implement a
-    // transaction-like swap:
+    // if the fetch failed. `refetch_and_replace` now fetches into a scratch
+    // directory first and only then swaps (`install_staged`), so neither a
+    // failed nor an interrupted fetch touches the install. The primitives
+    // below implement the older transaction-like swap:
     //
     //   1. `stage_invalidation`  -- rename `pkg_dir` -> `pkg_dir.refresh-staging-<pid>-<nanos>`
     //   2. caller runs `fetch_and_cache_with_meta`
@@ -555,6 +557,180 @@ impl GlobalStore {
         Self::validate_path_component(org, "org")?;
         Self::validate_path_component(name, "package name")?;
         Self::validate_path_component(version, "version")?;
+        let pkg_dir = self.package_path(org, name, version);
+
+        // Already cached
+        if self.is_cached(org, name, version) {
+            return Ok(pkg_dir);
+        }
+
+        let staged = self.fetch_to_staging(org, name, version, commit_sha, expected_integrity)?;
+        self.install_staged(&staged, &pkg_dir)?;
+        Ok(pkg_dir)
+    }
+
+    /// Fetch `<org>/<name>@<version>` again and replace its store entry.
+    ///
+    /// The new copy is downloaded, verified and extracted next to the
+    /// entry first; the entry is swapped only once the copy is complete.
+    /// A failed or interrupted fetch leaves the existing install as it was.
+    pub fn refetch_and_replace(
+        &self,
+        org: &str,
+        name: &str,
+        version: &str,
+        commit_sha: Option<&str>,
+        expected_integrity: Option<&str>,
+    ) -> Result<PathBuf, String> {
+        Self::validate_path_component(org, "org")?;
+        Self::validate_path_component(name, "package name")?;
+        Self::validate_path_component(version, "version")?;
+        let pkg_dir = self.package_path(org, name, version);
+        let staged = self.fetch_to_staging(org, name, version, commit_sha, expected_integrity)?;
+        self.install_staged(&staged, &pkg_dir)?;
+        Ok(pkg_dir)
+    }
+
+    /// Move a completely fetched `staged` directory into `pkg_dir`. Whatever
+    /// was at `pkg_dir` (a previous install, or the remains of an interrupted
+    /// one) is moved aside first and removed once the swap succeeded, or put
+    /// back if it did not.
+    fn install_staged(&self, staged: &Path, pkg_dir: &Path) -> Result<(), String> {
+        let version = pkg_dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let stash = if pkg_dir.exists() {
+            let stash = pkg_dir.with_file_name(format!(
+                "{}.refresh-staging-{}",
+                version,
+                unique_scratch_suffix()
+            ));
+            if let Err(e) = std::fs::rename(pkg_dir, &stash) {
+                let _ = std::fs::remove_dir_all(staged);
+                return Err(format!(
+                    "Cannot move '{}' aside for replacement: {}",
+                    pkg_dir.display(),
+                    e
+                ));
+            }
+            Some(stash)
+        } else {
+            None
+        };
+        if let Err(e) = std::fs::rename(staged, pkg_dir) {
+            let _ = std::fs::remove_dir_all(staged);
+            if let Some(stash) = &stash {
+                let _ = std::fs::rename(stash, pkg_dir);
+            }
+            return Err(format!(
+                "Cannot install fetched package into '{}': {}",
+                pkg_dir.display(),
+                e
+            ));
+        }
+        if let Some(stash) = stash
+            && let Err(e) = std::fs::remove_dir_all(&stash)
+        {
+            eprintln!(
+                "  warning: could not remove previous copy '{}': {}",
+                stash.display(),
+                e
+            );
+        }
+        Ok(())
+    }
+
+    /// Repair what an interrupted `taida ingot install` left next to the
+    /// store entry of `<org>/<name>@<version>`: when the entry itself is
+    /// missing or incomplete, the newest complete copy that was moved aside
+    /// for a refresh is put back; leftover scratch directories of this
+    /// version are removed.
+    ///
+    /// Call only while holding [`Self::acquire_install_lock`] for the same
+    /// version: every process refreshes or fetches a version under that
+    /// lock, so any scratch directory seen here is abandoned.
+    pub fn recover_interrupted_install(
+        &self,
+        org: &str,
+        name: &str,
+        version: &str,
+    ) -> Result<(), String> {
+        Self::validate_path_component(org, "org")?;
+        Self::validate_path_component(name, "package name")?;
+        Self::validate_path_component(version, "version")?;
+        let parent = self.root.join(org).join(name);
+        let Ok(entries) = std::fs::read_dir(&parent) else {
+            return Ok(());
+        };
+        let stash_prefix = format!("{}.refresh-staging-", version);
+        let scratch_prefix = format!(".tmp-{}", version);
+        let mut stashes: Vec<PathBuf> = Vec::new();
+        let mut scratch: Vec<PathBuf> = Vec::new();
+        for entry in entries.filter_map(|e| e.ok()) {
+            let file_name = entry.file_name().to_string_lossy().into_owned();
+            if file_name.starts_with(&stash_prefix) {
+                stashes.push(entry.path());
+            } else if file_name == scratch_prefix
+                || file_name.starts_with(&format!("{}-extract-", scratch_prefix))
+            {
+                scratch.push(entry.path());
+            }
+        }
+
+        let pkg_dir = self.package_path(org, name, version);
+        if !self.is_cached(org, name, version) {
+            // Suffixes are `<pid>-<nanos>`; the latest nanos is the newest copy.
+            let newest_complete = stashes
+                .iter()
+                .filter(|p| p.join(".taida_installed").exists())
+                .max_by_key(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .and_then(|n| n.rsplit('-').next())
+                        .and_then(|nanos| nanos.parse::<u128>().ok())
+                        .unwrap_or(0)
+                })
+                .cloned();
+            if let Some(stash) = newest_complete {
+                if pkg_dir.exists() {
+                    std::fs::remove_dir_all(&pkg_dir).map_err(|e| {
+                        format!("cannot remove incomplete '{}': {}", pkg_dir.display(), e)
+                    })?;
+                }
+                std::fs::rename(&stash, &pkg_dir).map_err(|e| {
+                    format!(
+                        "cannot restore '{}' from '{}': {}",
+                        pkg_dir.display(),
+                        stash.display(),
+                        e
+                    )
+                })?;
+                eprintln!(
+                    "  {}/{}@{}: restored the previous install left by an interrupted refresh",
+                    org, name, version
+                );
+                stashes.retain(|p| p != &stash);
+            }
+        }
+        for leftover in stashes.iter().chain(scratch.iter()) {
+            let _ = std::fs::remove_dir_all(leftover);
+        }
+        Ok(())
+    }
+
+    /// Download, verify and extract `<org>/<name>@<version>` into a scratch
+    /// directory next to its store entry (`.tmp-<version>-extract-*`),
+    /// complete with provenance sidecar and install marker. The store
+    /// entry itself is not touched; see [`Self::install_staged`].
+    fn fetch_to_staging(
+        &self,
+        org: &str,
+        name: &str,
+        version: &str,
+        commit_sha: Option<&str>,
+        expected_integrity: Option<&str>,
+    ) -> Result<PathBuf, String> {
         if org != "taida-lang" {
             return Err(format!(
                 "[E32K3_NON_OFFICIAL_SOURCE_REJECTED] source package {}/{}@{} is not accepted under the current source package policy; source packages are limited to taida-lang/*",
@@ -568,22 +744,6 @@ impl GlobalStore {
             )
         })?;
         let source_signature_policy = source_tarball_verify_policy()?;
-
-        let pkg_dir = self.package_path(org, name, version);
-
-        // Already cached
-        if self.is_cached(org, name, version) {
-            return Ok(pkg_dir);
-        }
-
-        // Create parent directories
-        std::fs::create_dir_all(&pkg_dir).map_err(|e| {
-            format!(
-                "Cannot create store directory '{}': {}",
-                pkg_dir.display(),
-                e
-            )
-        })?;
 
         // Download tarball from GitHub. Debug integration tests may opt into
         // a loopback mock; production builds reject TAIDA_GITHUB_BASE_URL.
@@ -639,7 +799,6 @@ impl GlobalStore {
         let actual = format!("sha256:{}", tarball_sha256);
         if actual != expected_integrity {
             let _ = std::fs::remove_dir_all(&tmp_dir);
-            let _ = std::fs::remove_dir_all(&pkg_dir);
             return Err(format!(
                 "[E32K3_SOURCE_INTEGRITY_MISMATCH] source package {}/{}@{} SHA-256 mismatch: expected {}, got {}",
                 org, name, version, expected_integrity, actual
@@ -657,8 +816,23 @@ impl GlobalStore {
             )
         {
             let _ = std::fs::remove_dir_all(&tmp_dir);
-            let _ = std::fs::remove_dir_all(&pkg_dir);
             return Err(e);
+        }
+
+        // Extract into a scratch directory; `install_staged` moves it into
+        // place once everything below has succeeded.
+        let pkg_dir = self.root.join(org).join(name).join(format!(
+            ".tmp-{}-extract-{}",
+            version,
+            unique_scratch_suffix()
+        ));
+        if let Err(e) = std::fs::create_dir_all(&pkg_dir) {
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            return Err(format!(
+                "Cannot create store directory '{}': {}",
+                pkg_dir.display(),
+                e
+            ));
         }
 
         if let Err(e) = extract_source_tarball_safely(&archive_path, &pkg_dir) {
@@ -675,7 +849,10 @@ impl GlobalStore {
 
         // Post-fetch manifest verification: ensure the extracted package's
         // packages.tdm identity and version match what was requested.
-        Self::verify_fetched_package(&pkg_dir, org, name, version)?;
+        if let Err(e) = Self::verify_fetched_package(&pkg_dir, org, name, version) {
+            let _ = std::fs::remove_dir_all(&pkg_dir);
+            return Err(e);
+        }
 
         // C17-1: write provenance sidecar before the installed marker. The
         // sidecar is written atomically so a crash after the marker but
@@ -703,8 +880,10 @@ impl GlobalStore {
         }
 
         // Create completion marker
-        std::fs::write(pkg_dir.join(".taida_installed"), "")
-            .map_err(|e| format!("Cannot create install marker: {}", e))?;
+        if let Err(e) = std::fs::write(pkg_dir.join(".taida_installed"), "") {
+            let _ = std::fs::remove_dir_all(&pkg_dir);
+            return Err(format!("Cannot create install marker: {}", e));
+        }
 
         Ok(pkg_dir)
     }
@@ -1495,6 +1674,16 @@ pub struct StorePruneReport {
     /// crashed `taida ingot install`). Counted separately from real packages so
     /// the summary does not conflate them.
     pub scratch_removed: u64,
+}
+
+/// `<pid>-<nanos>`: a suffix for scratch directories that concurrent
+/// processes must not share.
+fn unique_scratch_suffix() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{}-{}", std::process::id(), nanos)
 }
 
 /// Classify a version-level directory name.

@@ -117,7 +117,7 @@ fn loads_sample_addon_and_enumerates_function_table() {
         core::ptr::null_mut(),
         core::ptr::null_mut(),
     );
-    assert_eq!(status, taida_addon::TaidaAddonStatus::Ok);
+    assert_eq!(status, taida_addon::TaidaAddonStatus::Ok as u32);
 
     // `echo` with bad arity must produce ArityMismatch through the
     // raw call pointer -- this proves we wired the function pointer
@@ -129,7 +129,7 @@ fn loads_sample_addon_and_enumerates_function_table() {
         core::ptr::null_mut(),
         core::ptr::null_mut(),
     );
-    assert_eq!(status, taida_addon::TaidaAddonStatus::ArityMismatch);
+    assert_eq!(status, taida_addon::TaidaAddonStatus::ArityMismatch as u32);
 }
 
 // ── Phase 3 value-bridge round-trip tests ───────────────────────────

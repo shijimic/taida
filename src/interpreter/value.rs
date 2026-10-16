@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use zeroize::Zeroize;
 
-use crate::parser::{FieldDef, Param, Statement};
+use crate::parser::{Param, Statement};
 
 use super::runtime::str_rope::GapBuffer;
 
@@ -959,6 +959,14 @@ fn scrub_json(jv: &mut serde_json::Value) {
     }
 }
 
+/// Identifies a module (source file) the interpreter has executed. The
+/// main program is `0`; each imported module gets the next number.
+pub type ModuleId = usize;
+
+/// Name prefix of a function value that stands for a prelude function
+/// (`f <= stdout`, `x => debug => y`). Calling it runs the builtin.
+pub(crate) const PRELUDE_FUNCTION_PREFIX: &str = "__prelude::";
+
 /// A function closure.
 #[derive(Debug, Clone)]
 pub struct FuncValue {
@@ -975,41 +983,16 @@ pub struct FuncValue {
     /// Declared return type from function definition (if any).
     /// Used for introspection. Runtime type enforcement is handled by the checker.
     pub return_type: Option<crate::parser::TypeExpr>,
-    /// TypeDef registry from the function's defining module.
-    ///
-    /// When a function is imported into another module and references a schema
-    /// via `JSON[raw, Schema]()`, the schema must be resolved against the
-    /// defining module's TypeDef scope, not the caller module's. This field
-    /// carries the defining module's full TypeDef table (including non-
-    /// exported typedefs) so that `resolve_json_schema` can find the schema
-    /// even when the caller never imported it.
-    ///
-    /// `None` for locally-defined functions — resolution falls back to
-    /// `Interpreter::type_defs` as before. Also `None` for lambdas / partials /
-    /// internal helpers — those can only reference the currently-visible scope.
-    pub module_type_defs: Option<Arc<HashMap<String, Vec<FieldDef>>>>,
-    /// Enum registry from the function's defining module.
-    /// Same semantics as `module_type_defs` but for enum declarations.
-    pub module_enum_defs: Option<Arc<HashMap<String, Vec<String>>>>,
-    /// Module-level symbol table from the function's defining module.
-    ///
-    /// A module function's definition-time closure snapshot does not
-    /// contain siblings defined *after* it, and the eager closure
-    /// enrichment at export time only reaches two levels (the exported
-    /// function and the function values inside its closure). A call
-    /// chain that hops three or more module functions therefore used to
-    /// degrade to a definition-order-truncated closure and die with
-    /// `Undefined variable` (observed as imported mutual tail recursion
-    /// failing past the first retarget, and as chained arm-tail calls
-    /// losing module-local functions and JSON schemas).
-    ///
-    /// This field carries the defining module's full symbol table. The
-    /// closure-scope push and the trampoline retarget resolve siblings
-    /// against it at any depth, re-attaching the same table (plus the
-    /// module typedef / enum registries) to fetched siblings so the
-    /// resolution never degrades. `None` for main-file functions,
-    /// lambdas, and partials — those resolve through the live scope.
-    pub module_symbols: Option<Arc<HashMap<String, Value>>>,
+    /// The module the function was defined in. Its body resolves free
+    /// names against that module's top-level scope and type registries,
+    /// wherever it is called from.
+    pub module: ModuleId,
+    /// The frame the function was defined in, as `(index, id)`. While
+    /// that frame is still on the stack the body resolves names through
+    /// it (so local functions can refer to siblings defined after them);
+    /// afterwards only the `closure` snapshot remains. `None` for
+    /// functions defined at module top level.
+    pub def_site: Option<(usize, u64)>,
 }
 
 /// An error value.
@@ -1350,6 +1333,16 @@ impl Value {
     }
 
     /// Convert to string representation.
+    /// The Error a Result given no error has as its `throw`:
+    /// `@(type <= "", message <= "")` of type `Error`.
+    pub fn empty_error() -> Value {
+        Value::pack(vec![
+            ("type".into(), Value::str(String::new())),
+            ("message".into(), Value::str(String::new())),
+            ("__type".into(), Value::str("Error".into())),
+        ])
+    }
+
     pub fn to_display_string(&self) -> String {
         match self {
             Value::Int(n) => n.to_string(),
@@ -1415,6 +1408,7 @@ impl Value {
                     return format!("Set({{{}}})", strs.join(", "));
                 }
                 let is_lax = type_tag == Some("Lax");
+                let is_result = type_tag == Some("Result");
                 let mut s = String::from("@(");
                 let mut visible = 0;
                 for (name, val) in fields.iter() {
@@ -1424,7 +1418,14 @@ impl Value {
                     if visible > 0 {
                         s.push_str(", ");
                     }
-                    s.push_str(&format!("{} <= {}", name, val.to_debug_string()));
+                    // A Result given no error shows the empty Error its
+                    // `throw` reads as.
+                    let shown = if is_result && name == "throw" && matches!(val, Value::Unit) {
+                        Value::empty_error().to_debug_string()
+                    } else {
+                        val.to_debug_string()
+                    };
+                    s.push_str(&format!("{} <= {}", name, shown));
                     visible += 1;
                 }
                 s.push(')');
@@ -1441,7 +1442,17 @@ impl Value {
                 s.push(']');
                 s
             }
-            Value::Function(f) => format!("<function {}>", f.name),
+            // The default of a function type is an anonymous function, as
+            // the compiled backends show it.
+            Value::Function(f) if f.name == super::eval::Interpreter::DEFAULT_FN_SENTINEL_NAME => {
+                "<function <lambda>>".to_string()
+            }
+            Value::Function(f) => format!(
+                "<function {}>",
+                f.name
+                    .strip_prefix(PRELUDE_FUNCTION_PREFIX)
+                    .unwrap_or(&f.name)
+            ),
             Value::AsyncTask(_) => "AsyncTask[<task>]".to_string(),
             Value::Gorilla => "><".to_string(),
             Value::Unit => "@()".to_string(),

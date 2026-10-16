@@ -260,7 +260,17 @@ export async function handleTaidaRequest(request, env, ctx) {{
       }}
       const body = base64ToUint8Array(result.bodyBase64 || "");
       const status = clampStatus(result.status || 200);
-      return new Response(body, {{
+      // A Fetch Response cannot carry an informational (1xx) status, and
+      // 204 / 205 / 304 are sent without a body: the constructor throws
+      // for either, which used to surface as an opaque 500.
+      if (status < 200) {{
+        return taidaErrorResponse(
+          500,
+          "handler returned status " + status + ", which a Fetch Response cannot carry",
+        );
+      }}
+      const nullBody = status === 204 || status === 205 || status === 304;
+      return new Response(nullBody ? null : body, {{
         status,
         headers: responseHeaders,
       }});

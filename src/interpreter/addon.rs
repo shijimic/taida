@@ -59,7 +59,8 @@ fn addon_call_error_to_error_value(call_err: &crate::addon::AddonCallError) -> E
         crate::addon::AddonCallError::UnsupportedInput { .. } => {
             ("AddonUnsupportedInput".to_string(), call_err.to_string(), 0)
         }
-        crate::addon::AddonCallError::AddonStatus { .. } => {
+        crate::addon::AddonCallError::AddonStatus { .. }
+        | crate::addon::AddonCallError::InvalidStatus { .. } => {
             ("AddonStatus".to_string(), call_err.to_string(), 0)
         }
         crate::addon::AddonCallError::MalformedOutput { .. } => {

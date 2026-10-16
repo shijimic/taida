@@ -2,14 +2,23 @@
 ///
 /// Provides:
 /// - Parse errors (severity: Error)
-/// - Type errors from TypeChecker (severity: Warning)
+/// - Type errors from TypeChecker (severity: Error, the same errors that stop
+///   `taida <FILE>` and `taida way check`)
+/// - Direct non-tail recursion (`[E0701]`), which `taida way check` reports
+///   from its verify stage
 /// - Type mismatches in assignments
-/// - Undefined variable warnings (when TypeChecker reports unknown types)
+/// - Undefined variable errors (when TypeChecker reports unknown types)
 /// - Empty list literal without type annotation
-use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
+///
+/// Each diagnostic carries its `[E####]` code in `Diagnostic.code`.
+use std::path::Path;
 
+use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Position, Range};
+
+use crate::diagnostics::split_diag_code_and_hint;
+use crate::graph::walk;
 use crate::parser::{ParseError, parse};
-use crate::types::TypeChecker;
+use crate::types::{CompileTarget, TypeChecker};
 
 /// Result of analyzing a Taida source file.
 pub struct AnalysisResult {
@@ -18,6 +27,13 @@ pub struct AnalysisResult {
 
 /// Analyze source code and produce LSP diagnostics.
 pub fn analyze(source: &str) -> AnalysisResult {
+    analyze_file(source, None)
+}
+
+/// [`analyze`] for a document stored at `path`. The path lets the checker
+/// find the modules the document imports, so it reports what
+/// `taida way check` reports for the same file.
+pub fn analyze_file(source: &str, path: Option<&Path>) -> AnalysisResult {
     let mut diagnostics = Vec::new();
 
     // Phase 1: Parse errors
@@ -26,16 +42,75 @@ pub fn analyze(source: &str) -> AnalysisResult {
         diagnostics.push(parse_error_to_diagnostic(err, source));
     }
 
-    // Phase 2: Type errors (only if parse succeeded)
+    // Phase 2: Type errors (only if parse succeeded). The server answers on
+    // its main thread, whose stack is the process default, so a deeply nested
+    // program is checked, and dropped, on a stack sized for it.
     if parse_errors.is_empty() {
-        let mut checker = TypeChecker::new();
-        checker.check_program(&program);
-        for err in &checker.errors {
-            diagnostics.push(type_error_to_diagnostic(err, source));
-        }
+        let checked = walk::with_stack_for_owned(program, |program| {
+            let mut diagnostics = Vec::new();
+            let mut checker = TypeChecker::new();
+            checker.set_compile_target(CompileTarget::Interpreter);
+            if let Some(path) = path {
+                checker.set_source_file(path);
+            }
+            checker.check_program(program);
+            for err in &checker.errors {
+                diagnostics.push(type_error_to_diagnostic(err, source));
+            }
+
+            // Phase 3: the verify stage of `taida way check` ([E0701]).
+            let file_label = path.map(|p| p.to_string_lossy().to_string());
+            let findings = crate::graph::verify::run_check(
+                "direct-non-tail-recursion",
+                program,
+                file_label.as_deref().unwrap_or("<document>"),
+            );
+            for finding in findings {
+                diagnostics.push(verify_finding_to_diagnostic(&finding, source));
+            }
+            diagnostics
+        });
+        diagnostics.extend(checked);
+    } else {
+        walk::with_stack_for_owned(program, |_| ());
     }
 
     AnalysisResult { diagnostics }
+}
+
+/// The `[E####]` code a message starts with, as an LSP diagnostic code.
+fn diagnostic_code(message: &str) -> Option<NumberOrString> {
+    split_diag_code_and_hint(message)
+        .0
+        .map(NumberOrString::String)
+}
+
+/// The document position of char index `col` on 0-based `line`, as the UTF-16
+/// offset the protocol counts in.
+fn position_at(line_text: &str, line: usize, col: usize) -> Position {
+    Position {
+        line: line as u32,
+        character: super::utf16::char_index_to_utf16_offset(line_text, col) as u32,
+    }
+}
+
+/// The 0-based char index in its line where `span` starts. The lexer numbers
+/// columns after a leading byte order mark, which the editor counts as the
+/// first character of the first line; the char offsets (`start`, `end`)
+/// include it, so they are used when the span has an extent.
+fn span_start_col(span: &crate::lexer::Span, source: &str, line: usize) -> usize {
+    if span.end > span.start {
+        let line_start_char = line_start_char_offset(source, line);
+        if span.start >= line_start_char {
+            return span.start - line_start_char;
+        }
+    }
+    let col = span.column.saturating_sub(1);
+    if line == 0 && source.starts_with('\u{feff}') {
+        col + 1
+    } else {
+        col
+    }
 }
 
 /// Convert a ParseError to an LSP Diagnostic with improved range calculation.
@@ -45,11 +120,7 @@ fn parse_error_to_diagnostic(err: &ParseError, source: &str) -> Diagnostic {
     } else {
         0
     };
-    let col = if err.span.column > 0 {
-        err.span.column - 1
-    } else {
-        0
-    };
+    let col = span_start_col(&err.span, source, line);
 
     let line_text = source.lines().nth(line).unwrap_or("");
 
@@ -66,22 +137,13 @@ fn parse_error_to_diagnostic(err: &ParseError, source: &str) -> Diagnostic {
         col + remaining.clamp(1, 10)
     };
 
-    // Convert 0-based char indices to 0-based UTF-16 offsets for LSP.
-    let start_utf16 = super::utf16::char_index_to_utf16_offset(line_text, col);
-    let end_utf16 = super::utf16::char_index_to_utf16_offset(line_text, end_col_char);
-
     Diagnostic {
         range: Range {
-            start: Position {
-                line: line as u32,
-                character: start_utf16 as u32,
-            },
-            end: Position {
-                line: line as u32,
-                character: end_utf16 as u32,
-            },
+            start: position_at(line_text, line, col),
+            end: position_at(line_text, line, end_col_char),
         },
         severity: Some(DiagnosticSeverity::ERROR),
+        code: diagnostic_code(&err.message),
         source: Some("taida".to_string()),
         message: err.message.clone(),
         ..Default::default()
@@ -89,17 +151,16 @@ fn parse_error_to_diagnostic(err: &ParseError, source: &str) -> Diagnostic {
 }
 
 /// Convert a TypeError to an LSP Diagnostic with improved range calculation.
+///
+/// Every type error stops `taida <FILE>` and fails `taida way check`, so
+/// every one is an Error here.
 fn type_error_to_diagnostic(err: &crate::types::TypeError, source: &str) -> Diagnostic {
     let line = if err.span.line > 0 {
         err.span.line - 1
     } else {
         0
     };
-    let col = if err.span.column > 0 {
-        err.span.column - 1
-    } else {
-        0
-    };
+    let col = span_start_col(&err.span, source, line);
 
     let line_text = source.lines().nth(line).unwrap_or("");
 
@@ -113,33 +174,36 @@ fn type_error_to_diagnostic(err: &crate::types::TypeError, source: &str) -> Diag
         line_text.chars().count()
     };
 
-    // Determine severity based on the error message content
-    let severity = if err.message.contains("Type mismatch")
-        || err.message.contains("requires a type annotation")
-    {
-        DiagnosticSeverity::ERROR
-    } else {
-        DiagnosticSeverity::WARNING
-    };
-
-    // Convert 0-based char indices to 0-based UTF-16 offsets for LSP.
-    let start_utf16 = super::utf16::char_index_to_utf16_offset(line_text, col);
-    let end_utf16 = super::utf16::char_index_to_utf16_offset(line_text, end_col_char);
-
     Diagnostic {
         range: Range {
-            start: Position {
-                line: line as u32,
-                character: start_utf16 as u32,
-            },
-            end: Position {
-                line: line as u32,
-                character: end_utf16 as u32,
-            },
+            start: position_at(line_text, line, col),
+            end: position_at(line_text, line, end_col_char),
         },
-        severity: Some(severity),
+        severity: Some(DiagnosticSeverity::ERROR),
+        code: diagnostic_code(&err.message),
         source: Some("taida-typecheck".to_string()),
         message: err.message.clone(),
+        ..Default::default()
+    }
+}
+
+/// A finding of the verify stage, over the whole line it names.
+fn verify_finding_to_diagnostic(
+    finding: &crate::graph::verify::VerifyFinding,
+    source: &str,
+) -> Diagnostic {
+    let line = finding.line.unwrap_or(1).saturating_sub(1);
+    let line_text = source.lines().nth(line).unwrap_or("");
+    let indent = line_text.chars().take_while(|c| c.is_whitespace()).count();
+    Diagnostic {
+        range: Range {
+            start: position_at(line_text, line, indent),
+            end: position_at(line_text, line, line_text.chars().count()),
+        },
+        severity: Some(DiagnosticSeverity::ERROR),
+        code: diagnostic_code(&finding.message),
+        source: Some("taida-verify".to_string()),
+        message: finding.message.clone(),
         ..Default::default()
     }
 }

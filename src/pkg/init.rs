@@ -49,22 +49,37 @@ pub enum InitTarget {
 /// Returns `Ok(files)` with a list of relative paths that were
 /// created, or `Err(msg)` on the first I/O failure.
 ///
+/// `dir` (and its missing parents) is created here, after the checks below.
+///
 /// # Errors
 ///
+/// * `name` is not a valid project name.
 /// * `packages.tdm` already exists in `dir` (conflict guard).
+/// * `--target rust-addon`: one of the scaffold's source files
+///   (`Cargo.toml`, `src/lib.rs`, ...) already exists. Nothing is
+///   written in that case.
 /// * Any filesystem write fails.
+///
+/// Existing files are never overwritten: every file is created with
+/// `create_new`, so a file (or a symlink) that appears at a scaffold
+/// path is reported instead of being replaced.
 pub fn init_project(dir: &Path, name: &str, target: InitTarget) -> Result<Vec<String>, String> {
     // ── Name validation ─────────────────────────────────
     validate_project_name(name)?;
 
     // ── Conflict check (both flows) ─────────────────────
     let manifest_path = dir.join("packages.tdm");
-    if manifest_path.exists() {
+    if path_is_taken(&manifest_path) {
         return Err(format!(
             "packages.tdm already exists in '{}'",
             dir.display()
         ));
     }
+
+    // The directory is only created once the name and the target are known to
+    // be acceptable, so a rejected `init` leaves nothing behind.
+    fs::create_dir_all(dir)
+        .map_err(|e| format!("Error creating directory '{}': {}", dir.display(), e))?;
 
     match target {
         InitTarget::SourceOnly => init_source_only(dir, name),
@@ -84,7 +99,7 @@ fn init_source_only(dir: &Path, name: &str) -> Result<Vec<String>, String> {
 
     // main.td (only if it does not already exist)
     let main_path = dir.join("main.td");
-    if !main_path.exists() {
+    if !path_is_taken(&main_path) {
         let main_content = Manifest::default_main();
         write_file(dir, "main.td", main_content)?;
         created.push("main.td".to_string());
@@ -102,7 +117,7 @@ fn init_source_only(dir: &Path, name: &str) -> Result<Vec<String>, String> {
 
     // .gitignore (only if it does not already exist)
     let gitignore_path = dir.join(".gitignore");
-    if !gitignore_path.exists() {
+    if !path_is_taken(&gitignore_path) {
         write_file(dir, ".gitignore", GITIGNORE_SOURCE_ONLY)?;
         created.push(".gitignore".to_string());
     }
@@ -118,6 +133,33 @@ fn init_rust_addon(dir: &Path, name: &str) -> Result<Vec<String>, String> {
     // Sanitise the name for use as a Rust crate identifier:
     // replace hyphens with underscores.
     let crate_name = name.replace('-', "_");
+    let facade_path = format!("taida/{name}.td");
+
+    // ── Conflict check ──────────────────────────────────
+    // The scaffold's source files are checked before anything is
+    // written, so running this in an existing crate fails without
+    // touching it. `.gitignore` and `README.md` are only created when
+    // absent (below), like `main.td` / `.gitignore` in a source-only
+    // project.
+    let conflicts: Vec<&str> = [
+        "Cargo.toml",
+        "src/lib.rs",
+        "native/addon.toml",
+        facade_path.as_str(),
+        ".github/workflows/release.yml",
+    ]
+    .into_iter()
+    .filter(|rel| path_is_taken(&dir.join(rel)))
+    .collect();
+    if !conflicts.is_empty() {
+        return Err(format!(
+            "refusing to overwrite existing file(s) in '{}': {}. \
+             `taida init --target rust-addon` creates a new addon project; \
+             run it in a new directory or move these files away first.",
+            dir.display(),
+            conflicts.join(", ")
+        ));
+    }
 
     // ── packages.tdm ────────────────────────────────────
     // B11-10d: Show canonical surface as a comment.
@@ -148,15 +190,17 @@ fn init_rust_addon(dir: &Path, name: &str) -> Result<Vec<String>, String> {
     // ── native/addon.toml ───────────────────────────────
     fs::create_dir_all(dir.join("native"))
         .map_err(|e| format!("Cannot create native/ directory: {}", e))?;
-    let addon_toml = addon_manifest(&crate_name);
+    let addon_toml = addon_manifest(name, &crate_name);
     write_file(dir, "native/addon.toml", &addon_toml)?;
     created.push("native/addon.toml".to_string());
 
     // ── taida/<name>.td ─────────────────────────────────
+    // The loader reads the facade from `taida/<stem>.td`, where
+    // `<stem>` is the last segment of the manifest's `package`
+    // (`OWNER/<name>`), so the file name must use the same `<name>`.
     fs::create_dir_all(dir.join("taida"))
         .map_err(|e| format!("Cannot create taida/ directory: {}", e))?;
     let facade = addon_facade(name);
-    let facade_path = format!("taida/{name}.td");
     write_file(dir, &facade_path, &facade)?;
     created.push(facade_path);
 
@@ -164,8 +208,10 @@ fn init_rust_addon(dir: &Path, name: &str) -> Result<Vec<String>, String> {
     // RC2.6-3d: addon projects additionally ignore target/ (cargo
     // build output). Cargo.lock is NOT ignored (binary crate
     // convention: commit the lockfile for reproducibility).
-    write_file(dir, ".gitignore", GITIGNORE_RUST_ADDON)?;
-    created.push(".gitignore".to_string());
+    if !path_is_taken(&dir.join(".gitignore")) {
+        write_file(dir, ".gitignore", GITIGNORE_RUST_ADDON)?;
+        created.push(".gitignore".to_string());
+    }
 
     // ── .taida/ directory (same as source-only) ─────────
     let taida_dir = dir.join(".taida");
@@ -178,9 +224,11 @@ fn init_rust_addon(dir: &Path, name: &str) -> Result<Vec<String>, String> {
     }
 
     // ── README.md ───────────────────────────────────────
-    let readme = addon_readme(name);
-    write_file(dir, "README.md", &readme)?;
-    created.push("README.md".to_string());
+    if !path_is_taken(&dir.join("README.md")) {
+        let readme = addon_readme(name);
+        write_file(dir, "README.md", &readme)?;
+        created.push("README.md".to_string());
+    }
 
     // ── .github/workflows/release.yml (C14-3) ──
     // CI workflow for tag-push-triggered release. The static template
@@ -256,6 +304,11 @@ taida-addon = {{ path = "../taida/crates/addon-rs" }}
     )
 }
 
+/// `src/lib.rs` for a Rust addon project.
+///
+/// The generated file must build, pass `cargo fmt --check` and
+/// `cargo clippy -- -D warnings` unchanged: the scaffolded release
+/// workflow runs exactly those checks in its `gate` job.
 fn addon_lib_rs(crate_name: &str) -> String {
     format!(
         r#"//! `{crate_name}` — Taida Rust addon.
@@ -264,12 +317,14 @@ fn addon_lib_rs(crate_name: &str) -> String {
 //! See https://github.com/taida-lang/taida for documentation.
 
 use core::ffi::c_char;
+use core::sync::atomic::{{AtomicPtr, Ordering}};
+use std::ffi::CString;
+
+use taida_addon::bridge::{{BorrowedValue, HostValueBuilder}};
 use taida_addon::{{
-    TaidaAddonErrorV1, TaidaAddonFunctionV1, TaidaAddonStatus,
+    TaidaAddonErrorV1, TaidaAddonFunctionV1, TaidaAddonStatus, TaidaAddonValueTag,
     TaidaAddonValueV1, TaidaHostV1,
 }};
-use taida_addon::bridge::HostValueBuilder;
-use core::sync::atomic::{{AtomicPtr, Ordering}};
 
 /// Host callback table, populated by `addon_init`.
 static HOST_PTR: AtomicPtr<TaidaHostV1> = AtomicPtr::new(core::ptr::null_mut());
@@ -284,8 +339,13 @@ extern "C" fn addon_init(host: *const TaidaHostV1) -> TaidaAddonStatus {{
 
 // ── echo ────────────────────────────────────────────────────────
 //
-// Identity function: returns its single argument unchanged.
+// Identity function: returns a copy of its single argument.
 // Replace or extend this with your addon's real functions.
+//
+// Arguments are borrowed from the host for the duration of the call.
+// A return value is always a new value built through the host callback
+// table (`HostValueBuilder`); the host takes ownership of it. Never
+// write an argument pointer into `out_value`.
 
 extern "C" fn echo(
     args_ptr: *const TaidaAddonValueV1,
@@ -296,21 +356,88 @@ extern "C" fn echo(
     if args_len != 1 {{
         return TaidaAddonStatus::ArityMismatch;
     }}
-    // Return the argument as-is (identity).
-    if !out_value.is_null() && !args_ptr.is_null() {{
-        unsafe {{ *out_value = args_ptr as *mut TaidaAddonValueV1 }};
+    if args_ptr.is_null() || out_value.is_null() {{
+        return TaidaAddonStatus::NullPointer;
     }}
-    TaidaAddonStatus::Ok
+    // SAFETY: the host table stored by `addon_init` outlives the addon.
+    let Some(builder) = (unsafe {{ HostValueBuilder::from_raw(HOST_PTR.load(Ordering::Acquire)) }})
+    else {{
+        return TaidaAddonStatus::InvalidState;
+    }};
+    // SAFETY: the host passes `args_len` valid values for this call.
+    let Some(arg) = (unsafe {{ taida_addon::bridge::borrow_arg(args_ptr, args_len, 0) }}) else {{
+        return TaidaAddonStatus::NullPointer;
+    }};
+    match copy_value(&builder, arg) {{
+        Some(value) => {{
+            // SAFETY: `out_value` was null-checked above.
+            unsafe {{ *out_value = value }};
+            TaidaAddonStatus::Ok
+        }}
+        None => TaidaAddonStatus::UnsupportedValue,
+    }}
+}}
+
+/// Build a host-owned copy of `src`. Returns `None` for a value this
+/// addon does not understand, after releasing what was already built.
+fn copy_value(
+    builder: &HostValueBuilder<'_>,
+    src: BorrowedValue<'_>,
+) -> Option<*mut TaidaAddonValueV1> {{
+    let value = match src.tag()? {{
+        TaidaAddonValueTag::Unit => builder.unit(),
+        TaidaAddonValueTag::Int => builder.int(src.as_int()?),
+        TaidaAddonValueTag::Float => builder.float(src.as_float()?),
+        TaidaAddonValueTag::Bool => builder.bool(src.as_bool()?),
+        TaidaAddonValueTag::Str => builder.str(src.as_str()?),
+        TaidaAddonValueTag::Bytes => builder.bytes(src.as_bytes()?),
+        TaidaAddonValueTag::List => {{
+            let mut items = Vec::new();
+            for child in src.as_list()?.iter() {{
+                let Some(item) = copy_value(builder, child) else {{
+                    release_all(builder, &items);
+                    return None;
+                }};
+                items.push(item);
+            }}
+            builder.list(&items)
+        }}
+        TaidaAddonValueTag::Pack => {{
+            let mut names = Vec::new();
+            let mut values = Vec::new();
+            for (name, child) in src.as_pack()?.iter() {{
+                let Ok(name) = CString::new(name) else {{
+                    release_all(builder, &values);
+                    return None;
+                }};
+                let Some(value) = copy_value(builder, child) else {{
+                    release_all(builder, &values);
+                    return None;
+                }};
+                names.push(name);
+                values.push(value);
+            }}
+            let name_ptrs: Vec<*const c_char> = names.iter().map(|name| name.as_ptr()).collect();
+            builder.pack(&name_ptrs, &values)
+        }}
+    }};
+    (!value.is_null()).then_some(value)
+}}
+
+/// Release values built by `copy_value` that were not handed to the host.
+fn release_all(builder: &HostValueBuilder<'_>, values: &[*mut TaidaAddonValueV1]) {{
+    for &value in values {{
+        // SAFETY: each value was built by this host and is still owned here.
+        unsafe {{ builder.release(value) }};
+    }}
 }}
 
 /// Function table for this addon.
-static FUNCTIONS: &[TaidaAddonFunctionV1] = &[
-    TaidaAddonFunctionV1 {{
-        name: c"echo".as_ptr() as *const c_char,
-        arity: 1,
-        call: echo,
-    }},
-];
+static FUNCTIONS: &[TaidaAddonFunctionV1] = &[TaidaAddonFunctionV1 {{
+    name: c"echo".as_ptr() as *const c_char,
+    arity: 1,
+    call: echo,
+}}];
 
 taida_addon::declare_addon! {{
     name: "{crate_name}",
@@ -321,10 +448,15 @@ taida_addon::declare_addon! {{
     )
 }
 
-fn addon_manifest(crate_name: &str) -> String {
+/// `native/addon.toml` for a Rust addon project.
+///
+/// `package` uses the project name (`OWNER/<name>`), so its last segment
+/// matches the facade file `taida/<name>.td`; `library` is the cargo
+/// library stem (`<name>` with `-` replaced by `_`).
+fn addon_manifest(name: &str, crate_name: &str) -> String {
     // The URL template uses only the four allowed variables:
     // {version}, {target}, {ext}, {name}. The GitHub org/repo prefix
-    // is a placeholder ("OWNER/<crate_name>") that the user must set
+    // is a placeholder ("OWNER/<name>") that the user must set
     // manually before publishing.
     format!(
         r#"# native/addon.toml — ABI v1 manifest
@@ -333,19 +465,20 @@ fn addon_manifest(crate_name: &str) -> String {
 # See https://github.com/taida-lang/taida for schema documentation.
 #
 # URL template for prebuild binary downloads.
-# Before publishing, replace OWNER and NAME with your GitHub org/repo.
+# Before publishing, replace OWNER with your GitHub org / user name
+# (here and in `package`).
 # Example: https://github.com/my-org/my-addon/releases/download/{{version}}/lib{{name}}-{{target}}.{{ext}}
 
 abi = 1
 entry = "taida_addon_get_v1"
-package = "OWNER/{crate_name}"
+package = "OWNER/{name}"
 library = "{crate_name}"
 
 [functions]
 echo = 1
 
 [library.prebuild]
-url = "https://github.com/OWNER/{crate_name}/releases/download/{{version}}/lib{{name}}-{{target}}.{{ext}}"
+url = "https://github.com/OWNER/{name}/releases/download/{{version}}/lib{{name}}-{{target}}.{{ext}}"
 
 [library.prebuild.targets]
 "#
@@ -357,7 +490,10 @@ fn addon_facade(name: &str) -> String {
         r#"// {name}.td — Taida facade for the {name} addon.
 //
 // Generated by `taida init --target rust-addon`.
-// Export the addon's functions so downstream packages can import them.
+// Bind every function listed in native/addon.toml [functions]
+// explicitly, then export the names downstream packages import.
+
+echo <= RustAddon["echo"](arity <= 1)
 
 Echo <= echo
 
@@ -407,9 +543,9 @@ Created with `taida init --target rust-addon`.
 ## Usage
 
 ```taida
->>> {name}@a.1 => @(Echo)
+>>> OWNER/{name}@a.1 => @(Echo)
 
-result <= Echo("hello")
+result: Str <= Echo("hello")
 stdout(result)
 ```
 
@@ -489,9 +625,24 @@ fn validate_project_name(name: &str) -> Result<(), String> {
 
 // ── Helpers ─────────────────────────────────────────────────────
 
+/// Whether something (a file, a directory, or a symlink, even a dangling
+/// one) already occupies `path`.
+fn path_is_taken(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
+}
+
+/// Create `dir/rel_path` with `content`. Fails instead of overwriting
+/// when the path already exists (and never follows a symlink there).
 fn write_file(dir: &Path, rel_path: &str, content: &str) -> Result<(), String> {
+    use std::io::Write;
+
     let abs = dir.join(rel_path);
-    fs::write(&abs, content).map_err(|e| format!("Error writing '{}': {}", abs.display(), e))
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&abs)
+        .and_then(|mut file| file.write_all(content.as_bytes()))
+        .map_err(|e| format!("Error writing '{}': {}", abs.display(), e))
 }
 
 // ── Tests ───────────────────────────────────────────────────────
@@ -735,8 +886,9 @@ mod tests {
         assert_eq!(manifest.functions["echo"], 1);
         assert!(manifest.prebuild.has_prebuild());
         // RC2.6B-024: package field is the qualified name source for
-        // release titles. Scaffold uses "OWNER/<crate_name>" placeholder.
-        assert_eq!(manifest.package, "OWNER/test_pkg");
+        // release titles. Scaffold uses the "OWNER/<name>" placeholder,
+        // whose last segment names the facade file `taida/<name>.td`.
+        assert_eq!(manifest.package, "OWNER/test-pkg");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -748,11 +900,11 @@ mod tests {
         let dir = temp_dir("addon_b024_pkg");
         init_project(&dir, "cool-addon", InitTarget::RustAddon).unwrap();
 
-        // Scaffold generates "OWNER/cool_addon"; simulate user setting
+        // Scaffold generates "OWNER/cool-addon"; simulate user setting
         // the real org/name before publishing.
         let toml_path = dir.join("native/addon.toml");
         let content = std::fs::read_to_string(&toml_path).unwrap();
-        let updated = content.replace("OWNER/cool_addon", "my-org/cool-addon");
+        let updated = content.replace("OWNER/cool-addon", "my-org/cool-addon");
         std::fs::write(&toml_path, &updated).unwrap();
 
         let manifest = crate::addon::manifest::parse_addon_manifest(&toml_path).unwrap();

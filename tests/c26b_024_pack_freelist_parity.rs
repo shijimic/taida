@@ -20,7 +20,7 @@
 //! `free()`. These fixtures deliberately exceed 32 concurrent Lax
 //! allocations to exercise the bounded-push path.
 //!
-//! See `src/codegen/native_runtime/core.c::taida_pack4_freelist_{pop,push}`
+//! See `src/codegen/native_runtime/core.c::taida_pack_freelist_{pop,push}`
 //! and `C26B-024` in `.dev/C26_BLOCKERS.md`.
 
 mod common;

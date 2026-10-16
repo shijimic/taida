@@ -3266,6 +3266,11 @@ function __taida_normalise_monadic_field(k, v) {
   if (k === 'has_value') {
     return !!v;
   }
+  // A Result given no `throw` reads as the empty Error, as in the
+  // interpreter.
+  if (k === 'throw' && (v === null || v === undefined)) {
+    return Object.freeze({ message: '', type: '' });
+  }
   // Absent-error sentinels (null / function / undefined) render as `{}` to
   // match the interpreter's `Value::Unit` → `serde_json` empty object.
   if ((k === '__error' || k === '__predicate' || k === 'throw') &&

@@ -147,7 +147,7 @@ fn phase_1e_alpha_child_pack_binding_is_surfaced_via_parent_facade() {
     let terminal_td = r#"
 >>> ./keys.td => @(KeyKind)
 
-TerminalSize <= terminalSize
+TerminalSize <= RustAddon["terminalSize"](arity <= 0)
 
 <<< @(TerminalSize, KeyKind)
 "#;
@@ -183,7 +183,7 @@ stdout(`phase1e cha=${KeyKind.Char} ent=${KeyKind.Enter}`)
 
 /// Aliases declared in a child file are merged into the parent
 /// facade's surface, so a user importing `TerminalSize` (defined as
-/// `TerminalSize <= terminalSize` inside `aliases.td`) resolves to
+/// `TerminalSize <= RustAddon["terminalSize"](arity <= 0)` inside `aliases.td`) resolves to
 /// the same addon sentinel as if it had been written in `terminal.td`.
 #[test]
 fn phase_1e_alpha_child_alias_binding_is_surfaced_via_parent_facade() {
@@ -199,7 +199,7 @@ KeyKind <= @(Char <= 0, Enter <= 1)
 <<< @(TerminalSize, KeyKind)
 "#;
     let aliases_td = r#"
-TerminalSize <= terminalSize
+TerminalSize <= RustAddon["terminalSize"](arity <= 0)
 
 <<< @(TerminalSize)
 "#;

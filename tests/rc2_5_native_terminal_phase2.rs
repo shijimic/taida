@@ -8,7 +8,7 @@
 //! (RC2.5-2a / RC2.5-2b) exercises the full RC2 facade surface on
 //! the Cranelift native path:
 //!
-//!   1. Uppercase facade aliases (`TerminalSize <= terminalSize`)
+//!   1. Uppercase facade bindings (`TerminalSize <= RustAddon["terminalSize"](arity <= 0)`)
 //!      route through `taida_addon_call` when the user writes
 //!      `TerminalSize[]()` or `terminalSize()`. Both forms must
 //!      resolve to the same addon sentinel.
@@ -97,8 +97,8 @@ const TERMINAL_FACADE_TD: &str = r#"KeyKind <= @(
   Unknown    <= 27
 )
 
-TerminalSize <= terminalSize
-ReadKey      <= readKey
+TerminalSize <= RustAddon["terminalSize"](arity <= 0)
+ReadKey      <= RustAddon["readKey"](arity <= 0)
 
 <<< @(TerminalSize, ReadKey, KeyKind)
 "#;
@@ -209,7 +209,7 @@ stdout(`rc2_5_phase2: mold lowercase cols=${size.cols} rows=${size.rows}`)
 }
 
 /// RC2.5-2a, facade uppercase path: `TerminalSize[]()` must resolve
-/// through the facade alias `TerminalSize <= terminalSize`. This is
+/// through the facade binding `TerminalSize <= RustAddon["terminalSize"](arity <= 0)`. This is
 /// the full RC2 user-facing surface.
 #[test]
 fn mold_inst_facade_uppercase_alias_compiles_on_cranelift_native() {

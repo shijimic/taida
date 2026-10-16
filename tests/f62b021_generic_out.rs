@@ -8,7 +8,7 @@
 //   Stage 2: a generic body may pass a type parameter into a host-call Out
 //   slot (`Uncage[b, m, T]()` / `HostCall[steps, T]()`). The Out schema is
 //   compile-time per call site: codegen gives such functions hidden
-//   `__taida_schema_{T}` string parameters and explicit call sites append
+//   `#schema_{T}` string parameters and explicit call sites append
 //   the resolved schema descriptors (dictionary passing). Inference-form
 //   calls to such functions are rejected at check time.
 //

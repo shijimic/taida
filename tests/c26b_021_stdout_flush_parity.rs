@@ -84,7 +84,7 @@ fn write_fixture(dir: &Path, body: &str) -> PathBuf {
 /// `>>> taida-lang/os => @(sleep)` import only built because bundled
 /// packages used to skip import validation. No import is needed.
 const FIXTURE_SLEEP_BETWEEN_LINES: &str = r#"stdout("first")
-sleep(0.2)
+sleep(200)
 stdout("second")
 "#;
 

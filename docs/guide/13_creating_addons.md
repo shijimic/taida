@@ -19,19 +19,40 @@ ABI バージョン、パッケージ名、関数表、任意のプレビルド�
 | バックエンド | 状態 | 備考 |
 |--------------|------|------|
 | インタプリタ | 対応 | アドオンファサードを動的モジュールとして読み込みます。既定ビルドの cdylib は `dlopen` 経由でディスパッチされます。 |
-| ネイティブ (AOT) | 対応 | ファサードはビルド時に静的解析され、関数定義はネイティブコード向けの中間表現に変換されます。 |
+| ネイティブ (AOT) | 対応 | ファサードはビルド時に静的解析され、関数定義はネイティブコード向けの中間表現に変換されます。実行ファイルはビルド時に解決した cdylib の絶対パスから、実行時にアドオンを読み込みます (cdylib は同梱されません)。 |
 | 旧 JS ターゲット | 非対応 | JS 側にディスパッチャがないため、アドオン由来のインポートはエラーになります。 |
 | WASM (`wasm-min` / `wasm-wasi` / `wasm-edge`) | 非対応 | これらのプロファイルはアドオンを扱いません。アドオンを扱う WASM プロファイルは `wasm-full` のみです。詳細は [WASM プロファイル](../reference/wasm_profiles.md) を参照してください。 |
 
 インタプリタとネイティブを対象とする作者は、ファサードファイルを 2
 通り書く必要はありません。同じ `taida/<stem>.td` が両方で動作します。
 
+### ネイティブではアドオンの戻り値に型を書く
+
+マニフェストは関数の戻り値の型を持たないので、型検査器はアドオン関数の戻り値の型を知りません。
+インタプリタは値そのものから Int / Float / Bool を区別できますが、ネイティブのコードは区別できません。
+そのため `taida build native` は、型の分からない戻り値を表示 (`stdout` / テンプレート / `toString` /
+`jsonEncode` / `debug`)、算術や比較、リストやぶちパックの要素に使う箇所を `[E1414]` で拒否します。
+束縛に型を書くか、型を宣言した引数に渡してください。
+
+```taida
+>>> taida-lang/addon-rs-sample => @(echo)
+
+greeting: Str <= echo("hello")
+stdout(greeting)
+```
+
+戻り値のフィールドを読む使い方 (`size.cols`) や、型を宣言した関数の引数に渡す使い方は、型を書かなくても通ります。
+
 ### ネイティブバックエンドがファサード内で理解する構文
 
 ファサードローダーは、最上位に次の構文要素を許容します。
 
+- **明示束縛** — `lowercaseAddonFn <= RustAddon["lowercaseAddonFn"](arity <= N)`。
+  マニフェストの `[functions]` 表の関数をファサードで使うときは、先頭で
+  この形で束縛します (束縛していない関数名の参照は、インタプリタでも
+  ネイティブでも `[E1413]` になります)。`N` は `[functions]` のアリティと一致させます。
 - **エイリアス** — `FacadeName <= lowercaseAddonFn`。`lowercaseAddonFn`
-  はマニフェストの `[functions]` 表に列挙された関数名です。
+  は上の形で束縛した、`[functions]` 表の関数名です。
 - **pack リテラル** — `FacadeName <= @(field <= value, ...)`。
 - **スカラ / リスト / 算術 / テンプレートバインディング** —
   `N <= 0`、`msg <= "hello"`、`greet <= \`hi, ${who}\``、算術式、関数
@@ -78,7 +99,9 @@ $ taida init --target rust-addon my-addon
 次にやることは 3 つだけです。
 
 1. `packages.tdm` の `<<<@a owner/name` の `owner` を自分の GitHub
-   ユーザー / 組織名に書き換えてコミットする。
+   ユーザー / 組織名に書き換えてコミットする。`native/addon.toml` の
+   `package` と `prebuild.url` にある `OWNER` も同じ名前に書き換えます
+   (`package` の最後の要素がファサード `taida/<name>.td` の名前です)。
 2. `cargo build --release` で cdylib がビルドできることを確認する。
 3. (任意) `native/addon.toml` の `prebuild.url` を相対 `file://target/release/lib<name>.so`
    に向け、ローカルで `taida ingot install` を試す ([§5](#5-file-を使ったローカルテスト))。

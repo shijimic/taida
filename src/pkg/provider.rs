@@ -444,17 +444,16 @@ impl StoreProvider {
     /// Returns a `StaleOutcome` telling the caller (`resolve`) what to do:
     /// - `Skip` -> fast-path / offline-warning / strong-warning / no-remote-check
     /// skip. The caller does not touch the cache.
-    /// - `Refresh { sha }` -> the caller must stage-swap the existing
-    /// package directory out of the way, call `fetch_and_cache_with_meta`
-    /// with this SHA, and then commit or rollback the swap depending on
-    /// whether the fetch succeeded. `sha` is `None` when the remote lookup
-    /// failed but a refresh was still requested (e.g. `--force-refresh`
-    /// without online access).
+    /// - `Refresh { sha }` -> the caller fetches a new copy with this SHA
+    /// via `GlobalStore::refetch_and_replace`, which swaps it in only once
+    /// it is complete. `sha` is `None` when the remote lookup failed but a
+    /// refresh was still requested (e.g. `--force-refresh` without online
+    /// access).
     ///
     /// This function intentionally does NOT call
     /// `invalidate_package` any more. The old contract deleted `pkg_dir`
     /// unconditionally before the fetch, so a failed fetch destroyed the
-    /// user's working install. The stage-swap lives in `resolve()`.
+    /// user's working install.
     ///
     /// Side effects:
     /// - stderr warning on rows 4 and 5 (`offline, cannot verify
@@ -602,13 +601,12 @@ impl StoreProvider {
                     extra_hint
                 );
                 // C17B-001: do NOT call `invalidate_package` here. The
-                // caller (`StoreProvider::resolve`) stages a backup via
-                // `GlobalStore::stage_invalidation` /
-                // `commit_invalidation` / `rollback_invalidation` so a
-                // failed fetch rolls back the user's previous working
-                // install instead of leaving them with an empty directory.
+                // caller (`StoreProvider::resolve`) fetches the new copy
+                // next to the existing one and swaps it in only when it is
+                // complete, so a failed fetch leaves the user's previous
+                // working install in place instead of an empty directory.
                 // The `Ok(StaleOutcome::Refresh { sha })` return tells the
-                // caller to perform the swap.
+                // caller to refetch.
                 Ok(StaleOutcome::Refresh { sha: remote_sha })
             }
         }
@@ -696,6 +694,16 @@ impl PackageProvider for StoreProvider {
                     Err(e) => return ProviderResult::Error(e),
                 };
 
+                // An earlier install may have been killed mid-refresh (Ctrl-C,
+                // crash). Put its previous copy back before looking at the
+                // cache, so the decision below sees a working install.
+                if let Err(e) = self
+                    .store
+                    .recover_interrupted_install(org, name, &exact_version)
+                {
+                    eprintln!("  warning: {}", e);
+                }
+
                 // Stale-detection decision table.
                 //
                 // Only engaged when the package is already cached -- an
@@ -703,12 +711,11 @@ impl PackageProvider for StoreProvider {
                 // `fetch_and_cache_with_meta` below, which is the natural
                 // "first install" path.
                 //
-                // When the outcome is `Refresh`, we stage the
-                // existing directory aside (rename to `<dir>.refresh-staging`)
-                // BEFORE calling the fetcher. If the fetch fails we
-                // restore the backup so the user's working install is
-                // preserved. On success we drop the backup.
-                let (remote_sha_for_sidecar, stash) =
+                // When the outcome is `Refresh`, the new copy is fetched
+                // next to the existing directory and swapped in only once
+                // it is complete (`refetch_and_replace`), so a failed or
+                // interrupted fetch leaves the user's working install alone.
+                let (remote_sha_for_sidecar, refresh) =
                     if self.store.is_cached(org, name, &exact_version) {
                         match self.apply_stale_decision(org, name, &exact_version) {
                             Err(msg) => return ProviderResult::Error(msg),
@@ -721,14 +728,9 @@ impl PackageProvider for StoreProvider {
                                 ) {
                                     return ProviderResult::Error(msg);
                                 }
-                                (None, None)
+                                (None, false)
                             }
-                            Ok(StaleOutcome::Refresh { sha }) => {
-                                match self.store.stage_invalidation(org, name, &exact_version) {
-                                    Ok(stash) => (sha, stash),
-                                    Err(e) => return ProviderResult::Error(e),
-                                }
-                            }
+                            Ok(StaleOutcome::Refresh { sha }) => (sha, true),
                         }
                     } else {
                         // Uncached: do not do an extra remote round-trip here.
@@ -737,77 +739,53 @@ impl PackageProvider for StoreProvider {
                         // `None` -- the next `taida ingot install` will detect the
                         // missing SHA and do a pessimistic refresh that fills
                         // it in. This keeps the first-install UX unchanged.
-                        (None, None)
+                        (None, false)
                     };
 
-                let fetch_result = self.store.fetch_and_cache_with_meta(
-                    org,
-                    name,
-                    &exact_version,
-                    remote_sha_for_sidecar.as_deref(),
-                    Some(source_integrity),
-                );
+                let fetch_result = if refresh {
+                    self.store.refetch_and_replace(
+                        org,
+                        name,
+                        &exact_version,
+                        remote_sha_for_sidecar.as_deref(),
+                        Some(source_integrity),
+                    )
+                } else {
+                    self.store.fetch_and_cache_with_meta(
+                        org,
+                        name,
+                        &exact_version,
+                        remote_sha_for_sidecar.as_deref(),
+                        Some(source_integrity),
+                    )
+                };
 
                 match fetch_result {
-                    Ok(path) => {
-                        // Fetch succeeded; drop the backup (if any).
-                        if let Some(stash_path) = stash
-                            && let Err(e) = self.store.commit_invalidation(&stash_path)
-                        {
-                            // Non-fatal: the new install is already in
-                            // place, the stash is just leftover disk
-                            // space. Warn the user once.
-                            eprintln!(
-                                "  warning: could not remove refresh backup '{}': {}",
-                                stash_path.display(),
-                                e
-                            );
-                        }
-                        match compute_dir_hash(&path) {
-                            Ok(integrity) => ProviderResult::Resolved(ResolvedPackage {
-                                name: dep_name.to_string(),
-                                version: exact_version,
-                                source: PackageSource::Store {
-                                    org: org.clone(),
-                                    name: name.clone(),
-                                },
-                                path,
-                                integrity,
-                            }),
-                            Err(e) => ProviderResult::Error(format!(
-                                "Dependency '{}': integrity calculation failed: {}",
-                                dep_name, e
-                            )),
-                        }
-                    }
+                    Ok(path) => match compute_dir_hash(&path) {
+                        Ok(integrity) => ProviderResult::Resolved(ResolvedPackage {
+                            name: dep_name.to_string(),
+                            version: exact_version,
+                            source: PackageSource::Store {
+                                org: org.clone(),
+                                name: name.clone(),
+                            },
+                            path,
+                            integrity,
+                        }),
+                        Err(e) => ProviderResult::Error(format!(
+                            "Dependency '{}': integrity calculation failed: {}",
+                            dep_name, e
+                        )),
+                    },
                     Err(e) => {
-                        // C17B-001: fetch failed. Roll back the stash so
-                        // the user's previous install reappears instead of
-                        // being silently lost.
-                        if let Some(stash_path) = stash {
-                            let pkg_dir = self.store.package_path(org, name, &exact_version);
-                            match self.store.rollback_invalidation(&stash_path, &pkg_dir) {
-                                Ok(()) => {
-                                    eprintln!(
-                                        "  refresh of {}/{}@{} failed ({}); \
-                                         restored previous install from backup",
-                                        org, name, &exact_version, e
-                                    );
-                                }
-                                Err(rb_err) => {
-                                    eprintln!(
-                                        "  refresh of {}/{}@{} failed ({}); \
-                                         rollback also failed ({}). Previous \
-                                         install may be in '{}'",
-                                        org,
-                                        name,
-                                        &exact_version,
-                                        e,
-                                        rb_err,
-                                        stash_path.display()
-                                    );
-                                }
-                            }
+                        // C17B-001: a failed refresh never touched the
+                        // existing install; say that it is still in use.
+                        if refresh {
+                            eprintln!(
+                                "  refresh of {}/{}@{} failed ({}); \
+                                 kept the previous install",
+                                org, name, &exact_version, e
+                            );
                         }
                         ProviderResult::Error(e)
                     }

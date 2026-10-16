@@ -184,7 +184,7 @@ pilot_data.sync_rate >=> rate_value  // 78
 
 リストは `@[...]` で表現します:
 
-```taida
+```taida fragment
 numbers <= @[1, 2, 3, 4, 5]
 names <= @["Asuka", "Shinji", "Rei"]
 empty: @[Int] <= @[]

@@ -50,17 +50,49 @@ Environment variables:
                                off           — skip cosign entirely (not recommended)
                                best-effort   — warn on missing cosign / bundle
                                required      — fail hard on any gap (default, CI-grade)
+                             Any other value is rejected.
 EOF
 }
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --version) TAIDA_VERSION="$2"; shift 2 ;;
-        --prefix) TAIDA_INSTALL_PREFIX="$2"; shift 2 ;;
+        --version|--prefix)
+            if [ $# -lt 2 ]; then
+                echo "$1 needs a value" >&2; usage >&2; exit 1
+            fi
+            if [ "$1" = "--version" ]; then TAIDA_VERSION="$2"; else TAIDA_INSTALL_PREFIX="$2"; fi
+            shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown argument: $1" >&2; usage; exit 1 ;;
     esac
 done
+
+# ── signature policy ──────────────────────────────────────────
+# Only an explicit `best-effort` or `off` weakens verification. Values
+# that read as "yes, verify" select `required`; anything unrecognised is
+# a usage error rather than a silent downgrade.
+case "$(printf '%s' "${TAIDA_VERIFY_SIGNATURES}" | tr '[:upper:]' '[:lower:]')" in
+    off|0|false|no) SEC011_MODE="off" ;;
+    best-effort) SEC011_MODE="best-effort" ;;
+    required|enforce|1|true|yes|on) SEC011_MODE="required" ;;
+    *)
+        echo "unsupported TAIDA_VERIFY_SIGNATURES='${TAIDA_VERIFY_SIGNATURES}'; use required, best-effort, or off" >&2
+        exit 1
+        ;;
+esac
+
+# ── install prefix ────────────────────────────────────────────
+# The prefix is used after `cd` into the scratch directory below, so a
+# relative prefix is resolved against the directory the installer was
+# started from.
+if [ -z "${TAIDA_INSTALL_PREFIX}" ]; then
+    echo "install prefix must not be empty" >&2
+    exit 1
+fi
+case "${TAIDA_INSTALL_PREFIX}" in
+    /*) ;;
+    *) TAIDA_INSTALL_PREFIX="$(pwd)/${TAIDA_INSTALL_PREFIX#./}" ;;
+esac
 
 # ── detect host triple ─────────────────────────────────────────
 os="$(uname -s)"
@@ -75,10 +107,16 @@ esac
 
 # ── resolve tag ────────────────────────────────────────────────
 if [ "${TAIDA_VERSION}" = "latest" ]; then
-    TAIDA_VERSION="$(curl -fsSL "https://api.github.com/repos/${TAIDA_REPO}/releases/latest" \
-        | grep -o '"tag_name": *"[^"]*"' | head -1 | cut -d'"' -f4)"
+    # Under `set -e` / `pipefail`, a failing request or a response without
+    # `tag_name` would end the script before the message below. Both are
+    # network-side failures (exit 2), e.g. the GitHub API rate limit.
+    latest_json="$(curl -fsSL "https://api.github.com/repos/${TAIDA_REPO}/releases/latest")" \
+        || latest_json=""
+    TAIDA_VERSION="$(printf '%s\n' "${latest_json}" \
+        | grep -o '"tag_name": *"[^"]*"' | head -1 | cut -d'"' -f4)" || TAIDA_VERSION=""
     if [ -z "${TAIDA_VERSION}" ]; then
         echo "cannot resolve latest release tag for ${TAIDA_REPO}" >&2
+        echo "(the GitHub API request failed or returned no tag_name; pass --version <TAG> to skip the lookup)" >&2
         exit 2
     fi
 fi
@@ -116,12 +154,7 @@ fi
 echo "  SHA-256: OK"
 
 # ── Sigstore cosign verification (C26B-007 Sub-phase 7.4 / SEC-011) ──
-case "${TAIDA_VERIFY_SIGNATURES}" in
-    off|0|false|no) SEC011_MODE="off" ;;
-    required|enforce|1) SEC011_MODE="required" ;;
-    *) SEC011_MODE="best-effort" ;;
-esac
-
+# SEC011_MODE was resolved from TAIDA_VERIFY_SIGNATURES before any download.
 if [ "${SEC011_MODE}" != "off" ]; then
     echo "  downloading ${ASSET}.cosign.bundle"
     curl -fsSL -o "${tmpdir}/${ASSET}.cosign.bundle" "${BUNDLE_URL}" || BUNDLE_MISS=1
@@ -177,6 +210,10 @@ fi
 # ── install ───────────────────────────────────────────────────
 mkdir -p "${TAIDA_INSTALL_PREFIX}/bin"
 tar -xzf "${ASSET}" -C "${TAIDA_INSTALL_PREFIX}/bin" --strip-components=1
+if [ ! -x "${TAIDA_INSTALL_PREFIX}/bin/taida" ]; then
+    echo "archive ${ASSET} did not install ${TAIDA_INSTALL_PREFIX}/bin/taida" >&2
+    exit 3
+fi
 
 echo "Installed Taida ${TAIDA_VERSION} to ${TAIDA_INSTALL_PREFIX}/bin/"
 echo "Add to PATH:  export PATH=\"${TAIDA_INSTALL_PREFIX}/bin:\$PATH\""

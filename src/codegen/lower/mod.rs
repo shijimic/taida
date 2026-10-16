@@ -34,6 +34,19 @@ pub(crate) fn simple_hash(s: &str) -> u64 {
 
 const OS_NET_DEFAULT_TIMEOUT_MS: i64 = 30_000;
 
+/// Prefix of the names the lowering gives its own bindings in a scope that
+/// also holds user names (`#pipe_prev`, `#pa_cap_0`, ...). `#` cannot appear
+/// in a Taida identifier, so a user variable or parameter never shares, and
+/// never overwrites, one of these.
+pub(crate) const HIDDEN: &str = "#";
+
+/// The previous pipeline stage's value, which a `_` in the next stage reads.
+pub(crate) const PIPE_PREV: &str = "#pipe_prev";
+
+/// What one import statement brings: the module inits to run and the
+/// imported values to bind (alias, exported name, module key).
+type ImportSite = (Vec<String>, Vec<(String, String, String)>);
+
 pub struct Lowering {
     /// ユーザー定義関数名のセット
     pub(crate) user_funcs: std::collections::HashSet<String>,
@@ -43,7 +56,7 @@ pub struct Lowering {
     pub(crate) generic_fn_type_params: std::collections::HashMap<String, Vec<String>>,
     /// F62B-021: generic functions whose body passes a type parameter into
     /// a host-call Out slot (fn name → schema-needing type params in
-    /// declared order). Such functions gain hidden `__taida_schema_{T}`
+    /// declared order). Such functions gain hidden `#schema_{T}`
     /// string parameters; explicit call sites append the resolved schema
     /// descriptors as extra string-literal arguments.
     pub(crate) generic_schema_params: std::collections::HashMap<String, Vec<String>>,
@@ -67,6 +80,10 @@ pub struct Lowering {
     lambda_vars: std::collections::HashMap<String, String>,
     /// 変数名 → ラムダ関数名（キャプチャありクロージャ）
     closure_vars: std::collections::HashSet<String>,
+    /// Names bound to a prelude / core function used as a value
+    /// (`g <= jsonEncode`). The checker gives such a value no full type, so
+    /// this is how a later `g` is still known to hold a function.
+    function_ref_vars: std::collections::HashSet<String>,
     /// 現在の関数内でヒープに確保された変数名のリスト（RC用）
     current_heap_vars: Vec<String>,
     /// stdlib ランタイム関数: インポート名 → C ランタイム関数名
@@ -74,6 +91,9 @@ pub struct Lowering {
     stdlib_runtime_funcs: std::collections::HashMap<String, String>,
     /// stdlib 定数: インポート名 → f64 値
     stdlib_constants: std::collections::HashMap<String, f64>,
+    /// Core-package molds imported under an alias (`@(Exists => Present)`):
+    /// alias → the mold's exported name, which the mold lowering matches on.
+    core_mold_aliases: std::collections::HashMap<String, String>,
     /// int 値を保持する変数名のセット（FL-16: poly_add 誤発火防止）
     pub(super) int_vars: std::collections::HashSet<String>,
     /// float を返す stdlib 関数の結果変数（型追跡用）
@@ -85,6 +105,38 @@ pub struct Lowering {
     pub(super) bool_vars: std::collections::HashSet<String>,
     /// 現在処理中の関数名（末尾再帰検出用）
     current_func_name: Option<String>,
+    /// How many lambda, local closure and method bodies enclose the code
+    /// being lowered. Their bindings are local: only a binding outside all
+    /// of them is a top-level value a function may read from the globals.
+    pub(super) local_body_depth: usize,
+    /// Scopes of local function definitions compiled as plain functions,
+    /// innermost last: source name → IR symbol. A local function is visible
+    /// only inside the body that defines it, so two functions may each
+    /// define a local `helper`, and a local function may share its name
+    /// with a top-level one.
+    pub(super) inner_func_scopes: Vec<std::collections::HashMap<String, String>>,
+    /// Scopes of local function definitions compiled as closures, pushed
+    /// and popped with `inner_func_scopes`: source name → closure symbol
+    /// (whose parameters are recorded in `func_param_defs`).
+    pub(super) local_closure_scopes: Vec<std::collections::HashMap<String, String>>,
+    /// For each scope of `inner_func_scopes`: the local functions whose
+    /// definition the body being lowered has not reached yet. In that body a
+    /// name means a local function only from its definition on, as in the
+    /// interpreter; the bodies of the local functions see all of them.
+    pub(super) inner_funcs_ahead: Vec<std::collections::HashSet<String>>,
+    /// While lowering the body of a local function compiled as a closure:
+    /// its source name and IR symbol. A call to that name inside the body
+    /// re-enters the symbol with the same environment.
+    pub(super) closure_self: Option<(String, String)>,
+    /// The name a lambda about to be lowered is bound to (`name <= _ x = ...`),
+    /// so its body can call itself by that name.
+    pub(super) lambda_binding_name: Option<String>,
+    /// While lowering the tail of the body an error ceiling guards, when the
+    /// ceiling opens the enclosing function's body: the number of that
+    /// function's parameters, which are the only values in the body's
+    /// environment. A self tail call there re-enters the body with updated
+    /// parameters under the same ceiling instead of nesting another one.
+    pub(super) ceiling_tail_params: Option<usize>,
     /// BuchiPack フィールド名のセット（jsonEncode 用フィールド名レジストリ）
     field_names: std::collections::HashSet<String>,
     /// フィールド名 → 型タグ (0=unknown, 1=Int, 2=Float, 3=Str, 4=Bool, 5=Enum)
@@ -115,7 +167,7 @@ pub struct Lowering {
     pub(crate) enum_type_ids: std::collections::HashMap<String, i64>,
     /// Value-tag track: variables bound by unmolding a Lax whose payload
     /// kind is only known at runtime (mixed-list get / first / last ...).
-    /// Each carries a companion `__ekind__<name>` IR variable holding the
+    /// Each carries a companion `#ekind_<name>` IR variable holding the
     /// payload's recorded kind, which tagged poly comparisons consume.
     /// Cleared per function body; a plain rebind of the name drops it.
     pub(crate) shadow_kind_vars: std::collections::HashSet<String>,
@@ -152,6 +204,8 @@ pub struct Lowering {
     pack_field_kinds: std::collections::HashMap<String, std::collections::HashMap<String, i64>>,
     /// TypeDef 名 → メソッド定義リスト（メソッド名, FuncDef）
     type_method_defs: std::collections::HashMap<String, Vec<(String, crate::parser::FuncDef)>>,
+    /// TypeDef 名 → JSON から作ったぶちパックをメソッド付きのインスタンスに組み直す関数のシンボル
+    json_rebuild_fns: std::collections::HashMap<String, String>,
     /// トップレベルで定義される変数名のセット（Native グローバル変数テーブル用）
     top_level_vars: std::collections::HashSet<String>,
     /// 関数から参照されるトップレベル変数名のセット（GlobalSet の emit 対象）
@@ -167,6 +221,11 @@ pub struct Lowering {
     imported_value_symbols: Vec<(String, String, String)>,
     /// init が必要な依存モジュール関数シンボルのリスト（重複排除済み）
     module_inits_needed: Vec<String>,
+    /// The module inits and value bindings each import statement brings,
+    /// keyed by the statement (`import_site_key`): they are made where the
+    /// import stands, as the interpreter runs an imported module at its
+    /// import statement.
+    import_sites: std::collections::HashMap<usize, ImportSite>,
     /// 現在のモジュールを一意に識別するキー
     module_key: Option<String>,
     /// ライブラリモジュールかどうか（is_library の早期判定用）
@@ -179,6 +238,10 @@ pub struct Lowering {
     /// QF-17: インポートされた TypeDef シンボル
     /// lower_type_inst で型メタデータが無い場合に constructor 呼び出しにフォールバック
     imported_type_symbols: std::collections::HashSet<String>,
+    /// Imported types built by their defining module: local name → the
+    /// link symbol of that module's constructor (`<Type>__new`). Their
+    /// methods and field defaults read the defining module's names.
+    pub(super) imported_type_ctors: std::collections::HashMap<String, String>,
     /// ソースファイルのディレクトリ（インポートモジュール解決用）
     source_dir: Option<std::path::PathBuf>,
     /// import 関数名（alias 含む）→ 実リンクシンボル名のマッピング
@@ -223,6 +286,20 @@ pub struct Lowering {
     /// call. Populated in `lower_addon_import` during the `Statement::Import`
     /// pass.
     addon_func_refs: std::collections::HashMap<String, AddonFuncRef>,
+    /// Names bound, without an annotation, to an addon function's return
+    /// value the checker could not type, mapped to that function. Native
+    /// code cannot tell such a value's kind (an Int from a Float or a
+    /// Bool), so using it where the kind decides the result is `[E1414]`.
+    untyped_addon_vars: std::collections::HashMap<String, String>,
+    /// The declaration of each type this module declares or imports, by
+    /// the name the module calls it: `<module key>:<declared name>`. Its
+    /// instances' `__type` is that declaration's tag, so same-named types
+    /// of two modules are told apart (`|==`, `TypeIs`).
+    type_decl_keys: std::collections::HashMap<String, String>,
+    /// True while an addon facade's function is lowered: the facade is the
+    /// package's code, which the program cannot annotate, so `[E1414]` is
+    /// not raised there.
+    lowering_facade_func: bool,
     /// Facade-declared pure-Taida value bindings pulled in
     /// through an addon-backed package import. Each entry is an assignment
     /// of the form `Name <= <expr>` (e.g. `KeyKind <= @(Char <= 0, ...)`)

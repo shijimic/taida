@@ -179,6 +179,7 @@ impl Manifest {
                                 .to_string(),
                         );
                     }
+                    validate_entry_path(&imp.path)?;
                     entry = imp.path.clone();
                 }
                 Statement::Export(exp) => {
@@ -335,6 +336,7 @@ impl Manifest {
             Some(AstValue::Str(s)) => s.clone(),
             _ => "main.td".to_string(),
         };
+        validate_entry_path(&entry)?;
 
         // Extract dependencies from the `deps` field
         if let Some(AstValue::BuchiPack(dep_entries)) = fields.get("deps") {
@@ -466,6 +468,29 @@ fn is_valid_version_label(s: &str) -> bool {
     }
     s.chars()
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// The entry module of a package (`>>> ./main.td`) must live inside the
+/// package directory: a relative path, optionally starting with `./`,
+/// without `..` components. Resolvers join it onto the installed package
+/// directory, so an absolute path or `..` would load code from outside it.
+fn validate_entry_path(entry: &str) -> Result<(), String> {
+    let relative = entry.strip_prefix("./").unwrap_or(entry);
+    let inside = !relative.is_empty()
+        && !relative.starts_with('/')
+        && !relative.contains('\\')
+        && Path::new(relative)
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)));
+    if inside {
+        Ok(())
+    } else {
+        Err(format!(
+            "packages.tdm: entry module '{}' must be a relative path inside the package \
+             directory (no absolute path, no '..')",
+            entry
+        ))
+    }
 }
 
 /// Parse "org/name" from an import path.

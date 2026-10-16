@@ -306,7 +306,7 @@ impl TypeChecker {
 
     pub(super) fn check_str_plus_known_non_str_in_expr(&mut self, expr: &Expr) {
         match expr {
-            Expr::BinaryOp(lhs, BinOp::Add, rhs, _) => {
+            Expr::BinaryOp(lhs, BinOp::Add, rhs, span) => {
                 let lhs_type = Self::static_add_operand_type(lhs);
                 let rhs_type = Self::static_add_operand_type(rhs);
 
@@ -315,17 +315,132 @@ impl TypeChecker {
                 let rhs_bad = matches!(rhs_type, Some(Type::Str))
                     && !matches!(lhs_type, Some(Type::Str) | None);
                 if lhs_bad || rhs_bad {
-                    let _ = self.infer_expr_type(expr);
-                } else {
-                    self.check_str_plus_known_non_str_in_expr(lhs);
-                    self.check_str_plus_known_non_str_in_expr(rhs);
+                    // The walk can reach one expression twice (a mold's
+                    // arguments inside a builtin's); report it once.
+                    let already_reported = self
+                        .errors
+                        .iter()
+                        .any(|e| e.message.starts_with("[E1619]") && e.span == *span);
+                    if !already_reported {
+                        let _ = self.infer_expr_type(expr);
+                    }
+                    return;
                 }
+                // Operands that are not literals: reject only when the
+                // inference knows both types for certain and `+` accepts
+                // neither pairing of them (the interpreter fails every such
+                // addition at run time, while a compiled build would carry
+                // on with some representation of the operands).
+                let lhs_certain = self.certain_add_operand_type(lhs);
+                let rhs_certain = self.certain_add_operand_type(rhs);
+                if let (Some(l), Some(r)) = (lhs_certain, rhs_certain)
+                    && !((l.is_numeric() && r.is_numeric())
+                        || (matches!(l, Type::Str) && matches!(r, Type::Str)))
+                {
+                    let already_reported = self
+                        .errors
+                        .iter()
+                        .any(|e| e.message.starts_with("[E1619]") && e.span == *span);
+                    if !already_reported {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1619] Cannot apply `+` to {} and {}. \
+                                 Hint: convert the operands to matching types explicitly.",
+                                l, r
+                            ),
+                            span: span.clone(),
+                        });
+                    }
+                    return;
+                }
+                self.check_str_plus_known_non_str_in_expr(lhs);
+                self.check_str_plus_known_non_str_in_expr(rhs);
+            }
+            Expr::BinaryOp(lhs, op @ (BinOp::Sub | BinOp::Mul), rhs, span) => {
+                // `-` / `*` take numbers only: with both operand types known
+                // for certain, anything else fails every time it runs.
+                if let (Some(l), Some(r)) = (self.certain_type(lhs), self.certain_type(rhs))
+                    && !(l.is_numeric() && r.is_numeric())
+                {
+                    let already_reported = self
+                        .errors
+                        .iter()
+                        .any(|e| e.message.starts_with("[E1619]") && e.span == *span);
+                    if !already_reported {
+                        let op_sym = if matches!(op, BinOp::Sub) { "-" } else { "*" };
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1619] Cannot apply `{}` to {} and {}. \
+                                 Hint: convert the operands to matching types explicitly.",
+                                op_sym, l, r
+                            ),
+                            span: span.clone(),
+                        });
+                    }
+                    return;
+                }
+                self.check_str_plus_known_non_str_in_expr(lhs);
+                self.check_str_plus_known_non_str_in_expr(rhs);
             }
             Expr::BinaryOp(lhs, _, rhs, _) => {
                 self.check_str_plus_known_non_str_in_expr(lhs);
                 self.check_str_plus_known_non_str_in_expr(rhs);
             }
-            Expr::MethodCall(obj, _, args, _) => {
+            Expr::UnaryOp(op @ (UnaryOp::Neg | UnaryOp::Not), inner, span)
+                if self.certain_type(inner).is_some_and(|ty| match op {
+                    UnaryOp::Neg => !ty.is_numeric(),
+                    _ => ty != Type::Bool,
+                }) =>
+            {
+                let ty = self.certain_type(inner).unwrap_or(Type::Unknown);
+                let already_reported = self
+                    .errors
+                    .iter()
+                    .any(|e| e.message.starts_with("[E1607]") && e.span == *span);
+                if !already_reported {
+                    let message = if matches!(op, UnaryOp::Neg) {
+                        format!(
+                            "[E1607] Unary negation `-` requires a numeric operand, got {}. \
+                             Hint: Use `-` only with Int or Float values.",
+                            ty
+                        )
+                    } else {
+                        format!(
+                            "[E1607] Logical not `!` requires a Bool operand, got {}. \
+                             Hint: Use `!` only with boolean expressions.",
+                            ty
+                        )
+                    };
+                    self.errors.push(TypeError {
+                        message,
+                        span: span.clone(),
+                    });
+                }
+            }
+            Expr::MethodCall(obj, method, args, span) => {
+                // A method a primitive value, list, HashMap or Set does not
+                // have fails every time it runs (`"".isEmpty()`).
+                if let Some(ty) = self.certain_builtin_receiver(obj)
+                    && method != "toString"
+                    && super::method_spec::builtin_recv_of(&ty).is_some_and(|recv| {
+                        super::method_spec::builtin_method_spec(recv, method).is_none()
+                    })
+                {
+                    let already_reported = self
+                        .errors
+                        .iter()
+                        .any(|e| e.message.starts_with("[E1509]") && e.span == *span);
+                    if !already_reported {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "[E1509] Unknown method '{}' on type {}. \
+                                 Hint: Check the method name for typos, or use a mold instead.",
+                                method, ty
+                            ),
+                            span: span.clone(),
+                        });
+                    }
+                }
                 self.check_str_plus_known_non_str_in_expr(obj);
                 for arg in args {
                     self.check_str_plus_known_non_str_in_expr(arg);
@@ -369,7 +484,189 @@ impl TypeChecker {
             }
             Expr::Lambda(_, body, _) => self.check_str_plus_known_non_str_in_expr(body),
             Expr::FieldAccess(obj, _, _) => self.check_str_plus_known_non_str_in_expr(obj),
+            Expr::MoldInst(_, type_args, fields, _) => {
+                for arg in type_args {
+                    if !matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
+                        self.check_str_plus_known_non_str_in_expr(arg);
+                    }
+                }
+                for field in fields {
+                    self.check_str_plus_known_non_str_in_expr(&field.value);
+                }
+            }
+            Expr::TemplateLit(template, span) => {
+                for inner in template_interpolation_exprs(template, span.node_id) {
+                    self.check_str_plus_known_non_str_in_expr(&inner);
+                }
+            }
             _ => {}
+        }
+    }
+
+    /// The type of the `+` operand `operand` when the inference knows it
+    /// for certain: a concrete primitive, list, function, non-empty pack or
+    /// `Lax`. Type variables, JSON / Molten data, values whose run-time
+    /// representation may differ from their checked type, and anything
+    /// partly unknown give `None`.
+    fn certain_add_operand_type(&mut self, operand: &Expr) -> Option<Type> {
+        self.certain_type(operand)
+    }
+
+    /// The type of a receiver known for certain to be a primitive value, a
+    /// list, a HashMap or a Set (element types may be unknown): their methods
+    /// are only the builtin ones.
+    fn certain_builtin_receiver(&mut self, expr: &Expr) -> Option<Type> {
+        let ty = self.infer_expr_type_recording_only(expr);
+        if self.is_dynamic_value(expr) {
+            return None;
+        }
+        let builtin_only = match &ty {
+            Type::Int | Type::Float | Type::Str | Type::Bool | Type::Bytes | Type::List(_) => true,
+            Type::Named(n) | Type::Generic(n, _) => n == "HashMap" || n == "Set",
+            _ => false,
+        };
+        builtin_only.then_some(ty)
+    }
+
+    /// The type of `expr` when the inference knows it for certain (see
+    /// [`Self::certain_add_operand_type`]).
+    pub(super) fn certain_type(&mut self, expr: &Expr) -> Option<Type> {
+        let operand = expr;
+        let ty = self.infer_expr_type_recording_only(operand);
+        if self.is_dynamic_value(operand) || Self::contains_unknown(&ty) {
+            return None;
+        }
+        let certain = match &ty {
+            Type::Int | Type::Float | Type::Num | Type::Str | Type::Bool | Type::Bytes => true,
+            Type::List(_) | Type::Function(_, _) => true,
+            Type::BuchiPack(fields) => !fields.is_empty(),
+            Type::Generic(name, _) => name == "Lax",
+            _ => false,
+        };
+        certain.then_some(ty)
+    }
+
+    /// The kinds the positional arguments of builtin mold `name` must have:
+    /// `N` numeric, `I` Int, `S` Str, `L` list, `R` Str or list, `B` Str or
+    /// Bytes, `_` any.
+    fn builtin_mold_arg_kinds(name: &str) -> Option<&'static str> {
+        Some(match name {
+            "Sqrt" | "Exp" | "Ln" | "Log2" | "Log10" | "Sin" | "Cos" | "Tan" | "Asin" | "Acos"
+            | "Atan" | "Sinh" | "Cosh" | "Tanh" | "Floor" | "Ceil" | "Round" | "Truncate"
+            | "Abs" => "N",
+            "Pow" | "Atan2" | "Log" => "NN",
+            "Clamp" => "NNN",
+            "ToFixed" => "NI",
+            "Upper" | "Lower" | "Trim" => "S",
+            "Replace" | "ReplaceAll" | "Split" => "S__",
+            "Repeat" | "CharAt" | "Pad" => "SI",
+            "PadLeft" | "PadRight" => "SI_",
+            "Reverse" => "R",
+            "Join" => "LS",
+            "Zip" => "LL",
+            "Div" | "Mod" => "NN",
+            "Stub" => "S",
+            "ByteLength" => "B",
+            "ByteAt" => "BI",
+            "ByteSlice" => "BII",
+            _ => return None,
+        })
+    }
+
+    /// The kinds the positional arguments of builtin function `name` must
+    /// have (same letters as [`Self::builtin_mold_arg_kinds`], and `H` a
+    /// list or a pack).
+    fn builtin_fn_arg_kinds(name: &str) -> Option<&'static str> {
+        Some(match name {
+            "sleep" | "exit" => "I",
+            "Regex" => "SS",
+            "hashMap" => "H",
+            _ => return None,
+        })
+    }
+
+    /// Check the arguments of a call of the builtin function `name`.
+    pub(super) fn check_builtin_fn_arg_kinds(&mut self, name: &str, args: &[Expr], span: &Span) {
+        if let Some(kinds) = Self::builtin_fn_arg_kinds(name) {
+            self.check_arg_kinds(name, kinds, args, span);
+        }
+    }
+
+    /// A builtin mold argument whose type is certainly not the kind the mold
+    /// takes (`Sqrt["x"]`, `Upper[42]`, `Upper[Lax["a"]()]`): the reference
+    /// fails every such call.
+    pub(super) fn check_builtin_mold_arg_kinds(
+        &mut self,
+        name: &str,
+        type_args: &[Expr],
+        span: &Span,
+    ) {
+        if let Some(kinds) = Self::builtin_mold_arg_kinds(name) {
+            self.check_arg_kinds(name, kinds, type_args, span);
+        }
+    }
+
+    /// Each argument whose type is known for certain (or a sealed carrier,
+    /// which no such parameter takes) must have the kind its letter in
+    /// `kinds` asks for: a call breaking that fails every time it runs.
+    fn check_arg_kinds(&mut self, name: &str, kinds: &str, type_args: &[Expr], span: &Span) {
+        for (idx, (arg, kind)) in type_args.iter().zip(kinds.chars()).enumerate() {
+            if kind == '_' || matches!(arg, Expr::Hole(_) | Expr::Placeholder(_)) {
+                continue;
+            }
+            let actual = match self.certain_type(arg) {
+                Some(actual) => actual,
+                None => match self.first_direct_sealed_operand(arg) {
+                    Some(sealed) if matches!(arg, Expr::Ident(..) | Expr::MoldInst(..)) => sealed,
+                    _ => continue,
+                },
+            };
+            let (fits, label) = match kind {
+                'N' => (actual.is_numeric(), "Int or Float"),
+                'I' => (matches!(actual, Type::Int | Type::Num), "Int"),
+                'S' => (actual == Type::Str, "Str"),
+                'L' => (matches!(actual, Type::List(_)), "a list"),
+                'B' => (matches!(actual, Type::Str | Type::Bytes), "Str or Bytes"),
+                'H' => (
+                    match &actual {
+                        Type::List(elem) => !matches!(
+                            elem.as_ref(),
+                            Type::Int
+                                | Type::Float
+                                | Type::Num
+                                | Type::Bool
+                                | Type::Str
+                                | Type::Bytes
+                        ),
+                        Type::BuchiPack(_) => true,
+                        _ => false,
+                    },
+                    "a list of @(key, value) packs or a pack",
+                ),
+                _ => (
+                    actual == Type::Str || matches!(actual, Type::List(_)),
+                    "Str or a list",
+                ),
+            };
+            if fits {
+                continue;
+            }
+            let already_reported = self
+                .errors
+                .iter()
+                .any(|e| e.message.starts_with("[E1506]") && e.span == *span);
+            if !already_reported {
+                self.errors.push(TypeError {
+                    message: format!(
+                        "[E1506] `{}` argument {} has type {}, expected {}.",
+                        name,
+                        idx + 1,
+                        actual,
+                        label
+                    ),
+                    span: span.clone(),
+                });
+            }
         }
     }
 
@@ -517,6 +814,7 @@ impl TypeChecker {
         match stmt {
             Statement::EnumDef(_) => {}
             Statement::Assignment(assign) => {
+                self.reject_binding_named_like_a_type(&assign.target, &assign.span);
                 let is_addon_binding = assign.as_rust_addon_binding().is_some();
                 let expected_annotation = assign
                     .type_annotation
@@ -540,14 +838,30 @@ impl TypeChecker {
                             ),
                             span: assign.span.clone(),
                         });
+                    } else if let Some((entry, part)) =
+                        self.hashmap_entry_mismatch(&assign.value, &expected)
+                    {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "Type mismatch in assignment to '{}': expected {}, got a HashMap with a {} of type {}",
+                                assign.target, expected, part, entry
+                            ),
+                            span: assign.span.clone(),
+                        });
                     }
                     // Register with the annotated type
+                    let accepted_other_kind = inferred != expected
+                        && !matches!(inferred, Type::Unknown | Type::Any)
+                        && self.type_is_representation_distinct(&inferred, &expected);
                     if self.define_var_with_span(&assign.target, expected, Some(&assign.span)) {
                         self.define_string_const_from_expr(&assign.target, &assign.value);
                         self.define_branch_info(
                             &assign.target,
                             self.branch_info_for_assignment_expr(&assign.value, &inferred),
                         );
+                        if accepted_other_kind || self.is_dynamic_value(&assign.value) {
+                            self.mark_var_dynamic(&assign.target);
+                        }
                     }
                 } else {
                     // @[] without type annotation is ambiguous — element type is unknown
@@ -565,9 +879,25 @@ impl TypeChecker {
                     // Register with the inferred type
                     let branch_info =
                         self.branch_info_for_assignment_expr(&assign.value, &inferred);
+                    let dynamic_value = self.is_dynamic_value(&assign.value);
+                    let pack_literal = self.is_pack_literal_value(&assign.value);
+                    let hashmap_entries = self.hashmap_set_chain_entries(&assign.value);
                     if self.define_var_with_span(&assign.target, inferred, Some(&assign.span)) {
                         self.define_string_const_from_expr(&assign.target, &assign.value);
                         self.define_branch_info(&assign.target, branch_info);
+                        if dynamic_value {
+                            self.mark_var_dynamic(&assign.target);
+                        }
+                        if pack_literal
+                            && let Some(scope) = self.pack_literal_scope_stack.last_mut()
+                        {
+                            scope.insert(assign.target.clone());
+                        }
+                        if let Some(entries) = hashmap_entries
+                            && let Some(scope) = self.hashmap_entry_scope_stack.last_mut()
+                        {
+                            scope.insert(assign.target.clone(), entries);
+                        }
                     }
                 }
                 if is_addon_binding {
@@ -716,6 +1046,7 @@ impl TypeChecker {
                 for body_stmt in fd.body.iter().take(check_up_to) {
                     self.check_statement(body_stmt);
                 }
+                self.check_handler_returns_against(&fd.body, &ret_ty);
 
                 // FL-1 + C13-1: Enforce return type annotation against body's tail value.
                 // The tail value is:
@@ -750,6 +1081,17 @@ impl TypeChecker {
                         _ => None,
                     };
 
+                    // A body ending in a value of one fixed primitive type
+                    // returns that type whatever the caller takes the
+                    // declared type parameter to be; calls are checked
+                    // against it.
+                    if let (Type::Named(tp), Some(body)) = (&ret_ty, &body_ty_opt)
+                        && matches!(body, Type::Int | Type::Float | Type::Str | Type::Bool)
+                        && fd.type_params.iter().any(|param| param.name == *tp)
+                    {
+                        self.generic_fixed_returns
+                            .insert(fd.name.clone(), (tp.clone(), body.clone()));
+                    }
                     if let Some(body_ty) = body_ty_opt {
                         if !(body_ty == Type::Unknown
                             || Self::contains_unknown(&body_ty)
@@ -875,6 +1217,9 @@ impl TypeChecker {
                 }
 
                 self.define_var(&ec.error_param, err_ty);
+                if let Some(scope) = self.caught_error_scope_stack.last_mut() {
+                    scope.insert(ec.error_param.clone());
+                }
 
                 for body_stmt in &ec.handler_body {
                     self.check_statement(body_stmt);
@@ -988,7 +1333,9 @@ impl TypeChecker {
                 // without hitting [E1608]. Also detects variant-order mismatch
                 // between a local redefinition and the imported module and emits
                 // [E1618] when they disagree.
-                self.register_imported_types(imp);
+                if !self.early_registered_imports.contains(&imp.span.start) {
+                    self.register_imported_types(imp);
+                }
                 self.register_worker_addon_imports(imp);
                 // C19B-002: pin typed signatures for select `taida-lang/os`
                 // symbols (runInteractive / execShellInteractive) so that
@@ -1001,6 +1348,23 @@ impl TypeChecker {
                 }
                 for sym in &imp.symbols {
                     let name = sym.alias.as_ref().unwrap_or(&sym.name);
+                    let source = (imp.path.clone(), sym.name.clone());
+                    match self.imported_name_sources.get(name.as_str()) {
+                        Some(previous) if *previous != source => {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "[E1501] Name '{}' is already imported from '{}'. \
+                                     Redefinition in the same scope is not allowed. \
+                                     Hint: Import one of them under another name (`@({} => other)`).",
+                                    name, previous.0, sym.name
+                                ),
+                                span: imp.span.clone(),
+                            });
+                        }
+                        _ => {
+                            self.imported_name_sources.insert(name.to_string(), source);
+                        }
+                    }
                     if imp.path == "taida-lang/net" || os_import {
                         self.worker_effect_symbols.insert(name.to_string());
                     }
@@ -1019,6 +1383,7 @@ impl TypeChecker {
                     } else {
                         let value_ty = self
                             .imported_function_value_type(name)
+                            .or_else(|| self.imported_value_types.get(name.as_str()).cloned())
                             .unwrap_or(Type::Unknown);
                         self.define_var(name, value_ty);
                     }
@@ -1026,14 +1391,16 @@ impl TypeChecker {
             }
             Statement::UnmoldForward(uf) => {
                 // `expr >=> target` -- target gets the unmolded (inner) value
+                self.reject_binding_named_like_a_type(&uf.target, &uf.span);
                 let source_ty = self.infer_expr_type(&uf.source);
                 self.reject_sealed_carrier_unmold(&source_ty, &uf.span);
                 self.reject_bare_unmold_source(&uf.source, &source_ty, &uf.span);
                 let inferred_target = self.unmold_type(&source_ty);
+                let checked_target = self.unmolded_hashmap_value(&uf.source, &inferred_target);
                 let target_ty = self.apply_unmold_target_annotation(
                     &uf.target,
                     uf.type_annotation.as_ref(),
-                    inferred_target.clone(),
+                    checked_target,
                     &uf.span,
                 );
                 self.define_var_with_span(&uf.target, target_ty, Some(&uf.span));
@@ -1045,14 +1412,16 @@ impl TypeChecker {
             }
             Statement::UnmoldBackward(ub) => {
                 // `target <=< expr` / `target: Type <=< expr`
+                self.reject_binding_named_like_a_type(&ub.target, &ub.span);
                 let source_ty = self.infer_expr_type(&ub.source);
                 self.reject_sealed_carrier_unmold(&source_ty, &ub.span);
                 self.reject_bare_unmold_source(&ub.source, &source_ty, &ub.span);
                 let inferred_target = self.unmold_type(&source_ty);
+                let checked_target = self.unmolded_hashmap_value(&ub.source, &inferred_target);
                 let target_ty = self.apply_unmold_target_annotation(
                     &ub.target,
                     ub.type_annotation.as_ref(),
-                    inferred_target.clone(),
+                    checked_target,
                     &ub.span,
                 );
                 self.define_var_with_span(&ub.target, target_ty, Some(&ub.span));
@@ -1087,12 +1456,201 @@ impl TypeChecker {
                     });
                 }
             }
-            // N-65: Intentional catch-all — TypeDef, MoldDef, and InheritanceDef
-            // are registered in the first pass of check_program(). Additional
-            // statement kinds (e.g., future AST variants) will need explicit arms
-            // added here when introduced.
-            _ => {}
+            // TypeDef, MoldDef, and InheritanceDef are registered in the
+            // first pass of check_program(); only their bodies are walked here.
+            Statement::ClassLikeDef(cl) => self.record_class_like_body_types(cl),
         }
+    }
+
+    /// Check a class-like definition's field defaults and method bodies,
+    /// and record their types (the backends lower them like any other
+    /// expression). A default must have its field's type and a method body
+    /// must compute its declared return type, as for functions, and an
+    /// operator in a method body must take its operands; the other
+    /// diagnostics the walk raises inside the bodies are not kept yet.
+    fn record_class_like_body_types(&mut self, cl: &ClassLikeDef) {
+        let fields = self.registry.get_type_fields(&cl.name).unwrap_or_default();
+        self.current_func_type_params.push(cl.type_params.clone());
+        let mut kept = Vec::new();
+        for field in &cl.fields {
+            if let Some(default) = &field.default_value {
+                let error_count = self.errors.len();
+                self.typed_expr_table.begin_best_effort();
+                let default_ty = self.infer_expr_type(default);
+                self.typed_expr_table.end_best_effort();
+                self.errors.truncate(error_count);
+                if let Some(declared) = field.type_annotation.as_ref()
+                    && field.method_def.is_none()
+                {
+                    let declared_ty = self.registry.resolve_type(declared);
+                    if Self::is_checkable_slot_type(&declared_ty)
+                        && Self::is_checkable_slot_type(&default_ty)
+                        && !self.registry.is_subtype_of(&default_ty, &declared_ty)
+                    {
+                        kept.push(TypeError {
+                            message: format!(
+                                "[E1303] Default value type mismatch for field '{}' of '{}': expected {}, got {}. \
+                                 Hint: Make the default expression assignable to the field type.",
+                                field.name, cl.name, declared_ty, default_ty
+                            ),
+                            span: field.span.clone(),
+                        });
+                    }
+                }
+            }
+            let Some(method) = &field.method_def else {
+                continue;
+            };
+            let error_count = self.errors.len();
+            self.typed_expr_table.begin_best_effort();
+            self.push_scope();
+            self.current_func_type_params
+                .push(method.type_params.clone());
+            for (name, ty) in &fields {
+                self.define_var_silent(name, ty.clone());
+            }
+            for param in &method.params {
+                let ty = param
+                    .type_annotation
+                    .as_ref()
+                    .map(|t| self.registry.resolve_type(t))
+                    .unwrap_or(Type::Unknown);
+                self.define_var_silent(&param.name, ty);
+            }
+            for stmt in &method.body {
+                self.check_statement(stmt);
+            }
+            let body_ty = match method.body.last() {
+                Some(Statement::Expr(last)) => self.typed_expr_table.lookup(last).cloned(),
+                _ => None,
+            };
+            self.current_func_type_params.pop();
+            self.pop_scope();
+            self.typed_expr_table.end_best_effort();
+            // An operator applied to operands it cannot take fails whenever
+            // the method runs: those diagnostics are kept — unless an operand
+            // is a type parameter, which may be a type the operator takes.
+            let header_params = cl
+                .name_args
+                .iter()
+                .flatten()
+                .chain(match &cl.kind {
+                    ClassLikeKind::Inheritance {
+                        parent_args: Some(args),
+                        ..
+                    }
+                    | ClassLikeKind::Mold { mold_args: args } => args.iter(),
+                    _ => [].iter(),
+                })
+                .filter_map(|arg| match arg {
+                    MoldHeaderArg::TypeParam(tp) => Some(tp),
+                    MoldHeaderArg::Concrete(_) => None,
+                });
+            let type_params: Vec<String> = cl
+                .type_params
+                .iter()
+                .chain(method.type_params.iter())
+                .chain(header_params)
+                .map(|tp| tp.name.clone())
+                .collect();
+            kept.extend(self.errors.drain(error_count..).filter(|err| {
+                ["[E1619]", "[E1605]", "[E1607]"]
+                    .iter()
+                    .any(|code| err.message.starts_with(code))
+                    && !type_params.iter().any(|tp| {
+                        err.message.contains(&format!(" {} ", tp))
+                            || err.message.contains(&format!(" {}.", tp))
+                            || err.message.contains(&format!(" {},", tp))
+                    })
+            }));
+            if let (Some(body_ty), Some(declared)) = (body_ty, method.return_type.as_ref()) {
+                let declared_ty = self.registry.resolve_type(declared);
+                if Self::is_checkable_slot_type(&declared_ty)
+                    && Self::is_checkable_slot_type(&body_ty)
+                    && !self.registry.is_subtype_of(&body_ty, &declared_ty)
+                {
+                    kept.push(TypeError {
+                        message: format!(
+                            "[E1601] Method '{}' of '{}' declares return type {}, but body returns {}. \
+                             Hint: Ensure the last expression in the method body matches the declared return type.",
+                            field.name, cl.name, declared_ty, body_ty
+                        ),
+                        span: field.span.clone(),
+                    });
+                }
+            }
+        }
+        self.current_func_type_params.pop();
+        self.errors.extend(kept);
+    }
+
+    /// An error handler written directly in a function body gives the
+    /// function its result: one declaring another primitive type than the
+    /// function returns a value the function's callers do not expect.
+    fn check_handler_returns_against(&mut self, body: &[Statement], func_ret: &Type) {
+        let primitive = |ty: &Type| matches!(ty, Type::Int | Type::Float | Type::Str | Type::Bool);
+        if !primitive(func_ret) {
+            return;
+        }
+        for stmt in body {
+            let Statement::ErrorCeiling(ec) = stmt else {
+                continue;
+            };
+            let Some(declared) = ec.return_type.as_ref() else {
+                continue;
+            };
+            let declared = self.registry.resolve_type(declared);
+            if primitive(&declared) && !self.registry.is_subtype_of(&declared, func_ret) {
+                self.errors.push(TypeError {
+                    message: format!(
+                        "[E1601] Error handler declares return type {}, but the enclosing function returns {}. \
+                         Hint: The handler's value becomes the function's result; declare the function's return type.",
+                        declared, func_ret
+                    ),
+                    span: ec.span.clone(),
+                });
+            }
+        }
+    }
+
+    /// A top-level binding cannot take the name of a type or enum declared
+    /// at the top level: both live in one scope.
+    fn reject_binding_named_like_a_type(&mut self, target: &str, span: &Span) {
+        if self.scope_stack.len() == self.top_level_depth
+            && self.top_level_type_names.contains(target)
+        {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1501] Name '{}' is already defined in this scope (as a type). \
+                     Redefinition in the same scope is not allowed. \
+                     Hint: Use a different name, or define it in an inner scope (shadowing is allowed).",
+                    target
+                ),
+                span: span.clone(),
+            });
+        }
+    }
+
+    /// A type a default or a method body can be compared with: a primitive
+    /// (Int / Float / Str / Bool), which the checker infers exactly.
+    fn is_checkable_slot_type(ty: &Type) -> bool {
+        matches!(ty, Type::Int | Type::Float | Type::Str | Type::Bool)
+    }
+
+    /// `map.get(key)` on a HashMap built by `.set` calls whose values all
+    /// have one type certainly unmolds to that type (a missing key gives its
+    /// default); otherwise the inferred type stands.
+    fn unmolded_hashmap_value(&mut self, source: &Expr, inferred: &Type) -> Type {
+        if matches!(inferred, Type::Unknown | Type::Any)
+            && let Expr::MethodCall(map, method, args, _) = source
+            && method == "get"
+            && args.len() == 1
+            && let Some(value) = self.hashmap_uniform_value_type(map)
+            && matches!(value, Type::Int | Type::Float | Type::Str | Type::Bool)
+        {
+            return value;
+        }
+        inferred.clone()
     }
 
     /// Resolve an optional `: Type` annotation on an unmold-binding target
@@ -1265,7 +1823,15 @@ impl TypeChecker {
                         (&arm_ty, &result_ty),
                         (Type::Int, Type::Float) | (Type::Float, Type::Int)
                     );
-                    if mixed_numeric_pair || !self.registry.is_subtype_of(&arm_ty, &result_ty) {
+                    if Self::contains_any_type(&result_ty)
+                        && self.registry.is_subtype_of(&result_ty, &arm_ty)
+                    {
+                        // The first arm left its type open (`AsyncReject`);
+                        // this arm decides it.
+                        result_ty = arm_ty;
+                    } else if mixed_numeric_pair
+                        || !self.registry.is_subtype_of(&arm_ty, &result_ty)
+                    {
                         self.errors.push(TypeError {
                             message: format!(
                                 "[E1603] Condition branch type mismatch: first resolved arm returns {}, but this arm returns {}. \
@@ -1322,7 +1888,14 @@ impl TypeChecker {
     // partial trees.
     fn parse_template_interpolation_expr(source: &str) -> Option<Expr> {
         fn parse_expr(source: &str) -> Option<Expr> {
-            let (program, _parse_errors) = crate::parser::parse(source);
+            let (mut program, _parse_errors) = crate::parser::parse(source);
+            // Only diagnostics come out of this parse: number its nodes in
+            // the synthetic range so nothing it records can alias a node
+            // the backends look up.
+            let mut allocator = crate::parser::NodeIdAllocator::synthetic();
+            for stmt in &mut program.statements {
+                crate::parser::reassign_statement_expr_node_ids(stmt, &mut allocator);
+            }
             if let Some(Statement::Expr(parsed_expr)) = program.statements.first() {
                 return Some(parsed_expr.clone());
             }
@@ -1507,11 +2080,34 @@ impl TypeChecker {
         if later_funcs.is_empty() {
             return;
         }
+        // A call from top-level code runs the callee's body at that moment:
+        // every function the body reaches (directly or through others) must
+        // already be defined too.
+        let mut ctx = ForwardRefCtx::default();
+        for (i, stmt) in program.statements.iter().enumerate() {
+            if let Statement::FuncDef(fd) = stmt {
+                ctx.def_index.entry(fd.name.clone()).or_insert(i);
+                ctx.callees.insert(
+                    fd.name.clone(),
+                    crate::graph::tail_pos::collect_call_sites(fd)
+                        .into_iter()
+                        .map(|site| site.callee)
+                        .collect(),
+                );
+            }
+        }
+        self.forward_ref_ctx = Some(ctx);
         let mut defined: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        for stmt in &program.statements {
+        for (index, stmt) in program.statements.iter().enumerate() {
+            if let Some(ctx) = self.forward_ref_ctx.as_mut() {
+                ctx.cur = index;
+            }
             match stmt {
                 Statement::FuncDef(fd) => {
                     defined.insert(fd.name.as_str());
+                    if let Some(ctx) = self.forward_ref_ctx.as_mut() {
+                        ctx.funcs_in_scope.insert(fd.name.clone());
+                    }
                 }
                 Statement::Import(imp) => {
                     // Imported names are bound when the import executes;
@@ -1526,6 +2122,9 @@ impl TypeChecker {
                     // A top-level value binding shadows a later function
                     // of the same name for subsequent statements.
                     defined.insert(a.target.as_str());
+                    if let Some(ctx) = self.forward_ref_ctx.as_mut() {
+                        ctx.funcs_in_scope.remove(&a.target);
+                    }
                 }
                 Statement::Expr(e) => self.scan_expr_forward_refs(e, &later_funcs, &defined),
                 Statement::UnmoldForward(u) => {
@@ -1569,6 +2168,7 @@ impl TypeChecker {
                 _ => {}
             }
         }
+        self.forward_ref_ctx = None;
     }
 
     fn scan_expr_forward_refs(
@@ -1587,6 +2187,18 @@ impl TypeChecker {
                         ),
                         span: span.clone(),
                     });
+                } else if let Some(late) = self
+                    .forward_ref_ctx
+                    .as_ref()
+                    .and_then(|ctx| ctx.later_function_reached_from(name))
+                {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "[E1539] Function '{}' reaches '{}', which is defined later. Top-level code runs in order, so move this statement below the definition of '{}'.",
+                            name, late, late
+                        ),
+                        span: span.clone(),
+                    });
                 }
             }
             // Deferred-execution bodies: resolution happens at call time.
@@ -1594,8 +2206,8 @@ impl TypeChecker {
             // The interpreter parses and evaluates `${...}` bodies as
             // expressions, so a forward reference inside one fails at
             // runtime like any other — scan them.
-            Expr::TemplateLit(template, _) => {
-                for inner in template_interpolation_exprs(template) {
+            Expr::TemplateLit(template, span) => {
+                for inner in template_interpolation_exprs(template, span.node_id) {
                     self.scan_expr_forward_refs(&inner, later_funcs, defined);
                 }
             }
@@ -1678,6 +2290,45 @@ impl TypeChecker {
                 }
             }
         }
+    }
+}
+
+/// The top-level forward-reference pass's view of the program: where each
+/// top-level function is defined and which functions its body calls.
+#[derive(Debug, Default)]
+pub(crate) struct ForwardRefCtx {
+    /// Index of the top-level statement being scanned.
+    pub(crate) cur: usize,
+    /// Index of each top-level function's definition.
+    pub(crate) def_index: std::collections::HashMap<String, usize>,
+    /// The functions each top-level function's body calls directly.
+    pub(crate) callees: std::collections::HashMap<String, Vec<String>>,
+    /// Names that currently refer to a defined top-level function.
+    pub(crate) funcs_in_scope: std::collections::HashSet<String>,
+}
+
+impl ForwardRefCtx {
+    /// A function defined after the current statement that calling `name`
+    /// now would reach, through `name`'s body and the bodies it calls.
+    pub(crate) fn later_function_reached_from(&self, name: &str) -> Option<String> {
+        if !self.funcs_in_scope.contains(name) {
+            return None;
+        }
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut stack: Vec<&str> = vec![name];
+        while let Some(f) = stack.pop() {
+            if !seen.insert(f) {
+                continue;
+            }
+            for callee in self.callees.get(f).into_iter().flatten() {
+                match self.def_index.get(callee.as_str()) {
+                    Some(&at) if at > self.cur => return Some(callee.clone()),
+                    Some(_) => stack.push(callee.as_str()),
+                    None => {}
+                }
+            }
+        }
+        None
     }
 }
 
@@ -1843,9 +2494,10 @@ impl TypeChecker {
 /// skipped here too). Used by the order-sensitive checks ([E1539] /
 /// [E1540]) so a forward reference inside `${...}` does not slip
 /// through the scan.
-pub(super) fn template_interpolation_exprs(template: &str) -> Vec<Expr> {
+pub(super) fn template_interpolation_exprs(template: &str, template_node_id: usize) -> Vec<Expr> {
     let mut out = Vec::new();
     let mut chars = template.chars().peekable();
+    let mut index = 0;
     while let Some(ch) = chars.next() {
         if ch == '$' && chars.peek() == Some(&'{') {
             chars.next();
@@ -1862,7 +2514,12 @@ pub(super) fn template_interpolation_exprs(template: &str) -> Vec<Expr> {
                 }
                 expr_str.push(c);
             }
-            let (program, errors) = crate::parser::parse(&expr_str);
+            let (program, errors) = crate::parser::parse_template_interpolation(
+                expr_str.trim(),
+                template_node_id,
+                index,
+            );
+            index += 1;
             if errors.is_empty()
                 && let Some(Statement::Expr(expr)) = program.statements.into_iter().next()
             {

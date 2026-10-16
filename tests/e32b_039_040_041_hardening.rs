@@ -641,31 +641,35 @@ fn e32b_082_native_runtime_str_byte_length_uses_heap_header() {
     // `taida_str_byte_length` (the public C entrypoint exported via
     // header) and `taida_str_byte_slice` (used by the polymorphic
     // slice mold) must reach for the heap-header byte length first
-    // so embedded-NUL static strings are not truncated.
+    // so embedded-NUL static strings are not truncated. Both go through
+    // the shared `taida_byte_mold_bytes`, which reads that header.
     let core: &str = include_str!("../src/codegen/native_runtime/core.c");
-    let length_body = core
-        .split("taida_val taida_str_byte_length(const char* s) {")
-        .nth(1)
-        .expect("taida_str_byte_length body must exist");
-    let length_body_end = length_body
-        .find("\n}")
-        .expect("taida_str_byte_length must terminate");
-    let length_body = &length_body[..length_body_end];
+    let body_of = |signature: &str| -> &str {
+        let body = core
+            .split(signature)
+            .nth(1)
+            .unwrap_or_else(|| panic!("{signature} body must exist"));
+        let body_end = body
+            .find("\n}")
+            .unwrap_or_else(|| panic!("{signature} must terminate"));
+        &body[..body_end]
+    };
+
+    let helper = body_of(
+        "static const unsigned char *taida_byte_mold_bytes(const char *s, const char *what, size_t *len,",
+    );
     assert!(
-        length_body.contains("taida_str_byte_len(s, &out_len)"),
+        helper.contains("taida_str_byte_len(s, &byte_len)"),
+        "taida_byte_mold_bytes must read the heap-header byte length"
+    );
+    assert!(
+        body_of("taida_val taida_str_byte_length(const char* s) {")
+            .contains("taida_byte_mold_bytes(s, "),
         "taida_str_byte_length must prefer the heap-header byte length"
     );
-
-    let slice_body = core
-        .split("taida_val taida_str_byte_slice(const char* s, taida_val start, taida_val end) {")
-        .nth(1)
-        .expect("taida_str_byte_slice body must exist");
-    let slice_body_end = slice_body
-        .find("\n}")
-        .expect("taida_str_byte_slice must terminate");
-    let slice_body = &slice_body[..slice_body_end];
     assert!(
-        slice_body.contains("taida_str_byte_len(s, &byte_len)"),
+        body_of("taida_val taida_str_byte_slice(const char* s, taida_val start, taida_val end) {")
+            .contains("taida_byte_mold_bytes(s, "),
         "taida_str_byte_slice must prefer the heap-header byte length"
     );
 }

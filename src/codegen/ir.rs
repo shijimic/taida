@@ -104,6 +104,25 @@ pub enum IrInst {
     /// TailCall(args) — 引数の IrVar リスト
     TailCall(Vec<IrVar>),
 
+    // ── 末尾再帰ループの引数の所有 ──
+    //
+    // A self tail-recursive loop receives its first parameter values from
+    // the caller (borrowed), but later iterations may receive values the
+    // loop itself created. One ownership bit per tracked parameter records
+    // which case holds: 0 on entry, updated before every `TailCall`. The
+    // bits are loop machinery (like the parameters themselves), so they
+    // live in the emitter rather than in named IR variables. Only the
+    // native lifetime pass emits these; backends without reference
+    // counting treat them as no-ops (`ParamOwned` reads 0).
+    /// Release the current value of parameter `index` when the loop owns it.
+    ReleaseParamIfOwned(usize),
+    /// Record whether the value the following `TailCall` passes for
+    /// parameter `index` is owned by the loop.
+    SetParamOwned(usize, bool),
+    /// `dst` = 1 when the loop owns the current value of parameter `index`,
+    /// else 0.
+    ParamOwned(IrVar, usize),
+
     // ── グローバル変数（トップレベル変数の関数間共有） ──
     /// グローバル変数への書き込み: GlobalSet(name_hash, value_var)
     /// name_hash: Val, value_var: Val (boxed)

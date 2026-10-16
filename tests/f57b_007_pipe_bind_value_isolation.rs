@@ -5,7 +5,7 @@
 // its value after the pipeline. The native/WASM lowerer used to emit
 // `DefVar(name, current)`, overwriting the outer slot — a parity violation
 // (and, for a String outer value, a native segfault). The fix lowers each
-// `=> name` to a fresh synthetic (`__pipe_bind_<id>_<name>`) and rewrites the
+// `=> name` to a fresh synthetic (`#pipe_bind_<id>_<name>`) and rewrites the
 // steps that consume the binding to read the synthetic, leaving the outer
 // `name` untouched.
 //

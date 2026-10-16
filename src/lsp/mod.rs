@@ -9,4 +9,5 @@ pub mod hover;
 /// - Hover: variable types, function signatures, type/mold definitions, doc_comments
 /// - Completion: variables, functions, types, molds, prelude functions, operators, dot-completion
 pub mod server;
+mod transport;
 pub(super) mod utf16;

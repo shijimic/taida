@@ -62,10 +62,10 @@ fn removed_command_replacement(command: &str) -> Option<&'static str> {
 fn reject_removed_command(command: &str) -> ! {
     let replacement = removed_command_replacement(command).unwrap_or("taida --help");
     eprintln!(
-        "[E1700] Command '{}' was removed in @e.X. Use '{}' instead.",
+        "[E1700] Command '{}' was removed. Use '{}' instead.",
         command, replacement
     );
-    eprintln!("        See `taida --help` for the new command set.");
+    eprintln!("        See `taida --help` for the current command set.");
     std::process::exit(2);
 }
 

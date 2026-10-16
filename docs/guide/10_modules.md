@@ -32,7 +32,7 @@ TypeName[42]()  // "Int"
 
 `>>> ./path.td => @(symbols)` でローカルファイルからシンボルをインポートします。
 
-```taida
+```taida fragment
 // 同じディレクトリのファイルから
 >>> ./utils.td => @(helper, format)
 
@@ -44,7 +44,7 @@ TypeName[42]()  // "Int"
 
 `=> @(symbols)` を省略すると、対象モジュールがエクスポートした全シンボルをインポートします。
 
-```taida
+```taida fragment
 >>> ./utils.td                    // utils.td の全エクスポートを取り込む
 >>> ./utils.td => @(helper)       // helper だけを取り込む
 ```
@@ -55,7 +55,7 @@ TypeName[42]()  // "Int"
 
 インポート時にシンボルの名前を変更できます。
 
-```taida
+```taida fragment
 >>> ./math.td => @(add, subtract => sub)
 // subtract を sub として使用できます
 result <= sub(10, 3)  // 7
@@ -106,7 +106,7 @@ npm import (Molten / branch=JS)
 
 ### 使用例
 
-```taida
+```taida fragment
 >>> ./utils.td => @(helper, double)
 
 result <= double(8)       // 16
@@ -176,7 +176,7 @@ mathUtils <= @(
 capitalize text: Str =
   | text == "" |> ""
   | _ |>
-    first <= CharAt[text, 0]()
+    CharAt[text, 0]() >=> first
     rest <= Slice[text](start <= 1)
     Upper[first]() + rest
 => :Str
@@ -207,7 +207,7 @@ Staff = @(
 
 ### メインモジュール（main.td）
 
-```taida
+```taida fragment
 >>> ./utils.td => @(capitalize, clamp)
 >>> ./types.td => @(Staff)
 
@@ -250,7 +250,7 @@ $ taida ./main.td
 
 循環参照は自動検出され、コンパイルエラーになります。
 
-```taida
+```taida fragment
 // a.td
 >>> ./b.td => @(funcB)
 <<< funcA
@@ -276,7 +276,7 @@ $ taida ./main.td
 
 ```taida fragment
 // ./main.td
->>> taida-lang/os@a.1 => @(stdout)
+>>> taida-lang/os => @(stdout)
 
 hello name: Str =
   "Hello, " + name + "!"

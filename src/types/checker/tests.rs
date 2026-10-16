@@ -345,10 +345,9 @@ fn test_error_type_registration() {
         .registry
         .get_type_fields("ValidationError")
         .expect("ValidationError type should be registered after check");
-    // type, message, kind, code inherited from the base Error (
-    // added kind/code) + field declared here; the declared code: Int
-    // merges with the inherited one
-    assert_eq!(fields.len(), 5);
+    // type, message inherited from the base Error + field, code declared
+    // here
+    assert_eq!(fields.len(), 4);
 }
 
 #[test]
@@ -377,22 +376,21 @@ AppError => ValidationError = @(field: Str)
     assert!(checker.registry.is_error_type("AppError"));
     assert!(checker.registry.is_error_type("ValidationError"));
 
-    // AppError should have 5 fields: type, message, kind, code, app_code
-    // ( added kind/code to the base Error declaration)
+    // AppError should have 3 fields: type, message, app_code
     let app_fields = checker
         .registry
         .get_type_fields("AppError")
         .expect("AppError should be registered");
-    assert_eq!(app_fields.len(), 5, "AppError fields: {:?}", app_fields);
+    assert_eq!(app_fields.len(), 3, "AppError fields: {:?}", app_fields);
 
-    // ValidationError should have 6 fields: type, message, kind, code, app_code, field
+    // ValidationError should have 4 fields: type, message, app_code, field
     let val_fields = checker
         .registry
         .get_type_fields("ValidationError")
         .expect("ValidationError should be registered");
     assert_eq!(
         val_fields.len(),
-        6,
+        4,
         "ValidationError fields: {:?}",
         val_fields
     );
@@ -7411,10 +7409,11 @@ handle x: Int =
 fn f64b010_error_kind_via_errorinfo_still_allowed() {
     // The documented route to kind/code is errorInfo, whose ErrorInfo
     // pack declares type/message/kind/code. That path must keep passing.
+    // errorInfo() returns Lax[ErrorInfo], so the pack is unmolded first.
     let source = r#"
 handle =
   |== err: Error =
-    info <= err.errorInfo()
+    err.errorInfo() >=> info
     "kind: " + info.kind
   => :Str
   "ok"

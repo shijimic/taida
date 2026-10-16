@@ -5,6 +5,7 @@ use super::extract::GraphExtractor;
 use super::model::*;
 use super::query;
 use super::tail_pos;
+use super::walk;
 use crate::diagnostics::split_diag_code_and_hint;
 use crate::module_graph;
 use crate::parser::*;
@@ -402,6 +403,10 @@ pub const ALL_CHECKS: &[&str] = &[
 
 /// Run a specific verification check.
 pub fn run_check(check: &str, program: &Program, file: &str) -> Vec<VerifyFinding> {
+    walk::with_stack_for(program, || run_check_here(check, program, file))
+}
+
+fn run_check_here(check: &str, program: &Program, file: &str) -> Vec<VerifyFinding> {
     match check {
         "error-coverage" => check_error_coverage(program, file),
         "no-circular-deps" => check_no_circular_deps(program, file),
@@ -428,14 +433,16 @@ pub fn run_check(check: &str, program: &Program, file: &str) -> Vec<VerifyFindin
 
 /// Run all verification checks.
 pub fn run_all_checks(program: &Program, file: &str) -> VerifyReport {
-    let mut report = VerifyReport::new();
-    for check in ALL_CHECKS {
-        let findings = run_check(check, program, file);
-        for f in findings {
-            report.add(f);
+    walk::with_stack_for(program, || {
+        let mut report = VerifyReport::new();
+        for check in ALL_CHECKS {
+            let findings = run_check_here(check, program, file);
+            for f in findings {
+                report.add(f);
+            }
         }
-    }
-    report
+        report
+    })
 }
 
 // ── Check: error-coverage ─────────────────────────────
@@ -896,6 +903,10 @@ struct DirectionFlags {
 }
 
 /// Verify single-direction constraint: no mixing => with <= or >=> with <=< within one statement.
+///
+/// The parser already rejects a statement that writes both arrows, so on a
+/// parsed program this check is a safety net for syntax trees built or
+/// rewritten some other way.
 fn check_direction_constraint(program: &Program, file: &str) -> Vec<VerifyFinding> {
     let mut findings = Vec::new();
     for stmt in &program.statements {
@@ -904,39 +915,60 @@ fn check_direction_constraint(program: &Program, file: &str) -> Vec<VerifyFindin
     findings
 }
 
+fn direction_finding(code: &str, message: &str, line: usize, file: &str) -> VerifyFinding {
+    VerifyFinding {
+        check: "direction-constraint".to_string(),
+        severity: Severity::Error,
+        message: format!("[{}] {}", code, message),
+        file: Some(file.to_string()),
+        line: Some(line),
+    }
+}
+
+const MIXED_ARROWS: &str = "単一方向制約違反 — 一つの文内で => と <= を混在させることはできません";
+const MIXED_UNMOLD_ARROWS: &str =
+    "単一方向制約違反 — 一つの文内で >=> と <=< を混在させることはできません";
+
 fn scan_stmt_for_direction(stmt: &Statement, file: &str, findings: &mut Vec<VerifyFinding>) {
     match stmt {
         Statement::Assignment(assign) => {
-            // <= is used at statement level
-            let mut flags = DirectionFlags {
-                has_backward_arrow: true,
-                ..Default::default()
-            };
-            scan_expr_for_direction(&assign.value, &mut flags);
+            // The arrow that binds the target is recorded on the statement:
+            // `expr => name` is forward, `name <= expr` backward. A pipeline
+            // held as the value is this statement's own chain (`a => f(_) =>
+            // name` and `name <= f(_) <= a` are both stored as a Pipeline),
+            // so it is not an arrow of its own.
+            let mut flags = DirectionFlags::default();
+            if assign.forward {
+                flags.has_forward_arrow = true;
+            } else {
+                flags.has_backward_arrow = true;
+            }
+            scan_value_for_direction(&assign.value, &mut flags);
 
             if flags.has_forward_arrow && flags.has_backward_arrow {
-                findings.push(VerifyFinding {
-                    check: "direction-constraint".to_string(),
-                    severity: Severity::Error,
-                    message: "[E0301] 単一方向制約違反 — 一つの文内で => と <= を混在させることはできません".to_string(),
-                    file: Some(file.to_string()),
-                    line: Some(assign.span.line),
-                });
+                findings.push(direction_finding(
+                    "E0301",
+                    MIXED_ARROWS,
+                    assign.span.line,
+                    file,
+                ));
             }
         }
         Statement::Expr(expr) => {
-            // Check if expression uses => (pipeline) and also contains <=
+            // A bare pipeline statement is a forward chain.
             let mut flags = DirectionFlags::default();
-            scan_expr_for_direction(expr, &mut flags);
+            scan_value_for_direction(expr, &mut flags);
+            if matches!(expr, Expr::Pipeline(..)) {
+                flags.has_forward_arrow = true;
+            }
 
             if flags.has_forward_arrow && flags.has_backward_arrow {
-                findings.push(VerifyFinding {
-                    check: "direction-constraint".to_string(),
-                    severity: Severity::Error,
-                    message: "[E0301] 単一方向制約違反 — 一つの文内で => と <= を混在させることはできません".to_string(),
-                    file: Some(file.to_string()),
-                    line: Some(expr.span().line),
-                });
+                findings.push(direction_finding(
+                    "E0301",
+                    MIXED_ARROWS,
+                    expr.span().line,
+                    file,
+                ));
             }
         }
         Statement::UnmoldForward(uf) => {
@@ -945,17 +977,16 @@ fn scan_stmt_for_direction(stmt: &Statement, file: &str, findings: &mut Vec<Veri
                 has_unmold_forward: true,
                 ..Default::default()
             };
-            scan_expr_for_direction(&uf.source, &mut flags);
+            scan_value_for_direction(&uf.source, &mut flags);
 
             // Check for <=< inside the source expression (shouldn't happen but safety net)
             if flags.has_unmold_forward && flags.has_unmold_backward {
-                findings.push(VerifyFinding {
-                    check: "direction-constraint".to_string(),
-                    severity: Severity::Error,
-                    message: "[E0302] 単一方向制約違反 — 一つの文内で >=> と <=< を混在させることはできません".to_string(),
-                    file: Some(file.to_string()),
-                    line: Some(uf.span.line),
-                });
+                findings.push(direction_finding(
+                    "E0302",
+                    MIXED_UNMOLD_ARROWS,
+                    uf.span.line,
+                    file,
+                ));
             }
         }
         Statement::UnmoldBackward(ub) => {
@@ -964,108 +995,74 @@ fn scan_stmt_for_direction(stmt: &Statement, file: &str, findings: &mut Vec<Veri
                 has_unmold_backward: true,
                 ..Default::default()
             };
-            scan_expr_for_direction(&ub.source, &mut flags);
+            scan_value_for_direction(&ub.source, &mut flags);
 
             if flags.has_unmold_forward && flags.has_unmold_backward {
-                findings.push(VerifyFinding {
-                    check: "direction-constraint".to_string(),
-                    severity: Severity::Error,
-                    message: "[E0302] 単一方向制約違反 — 一つの文内で >=> と <=< を混在させることはできません".to_string(),
-                    file: Some(file.to_string()),
-                    line: Some(ub.span.line),
-                });
-            }
-        }
-        Statement::FuncDef(fd) => {
-            // Recurse into function body — each body statement is its own direction scope
-            for body_stmt in &fd.body {
-                scan_stmt_for_direction(body_stmt, file, findings);
-            }
-        }
-        Statement::ErrorCeiling(ec) => {
-            for handler_stmt in &ec.handler_body {
-                scan_stmt_for_direction(handler_stmt, file, findings);
+                findings.push(direction_finding(
+                    "E0302",
+                    MIXED_UNMOLD_ARROWS,
+                    ub.span.line,
+                    file,
+                ));
             }
         }
         // TypeDef, MoldDef, InheritanceDef, Import, Export — no direction operators
-        _ => {}
+        Statement::EnumDef(_)
+        | Statement::ClassLikeDef(_)
+        | Statement::FuncDef(_)
+        | Statement::ErrorCeiling(_)
+        | Statement::Import(_)
+        | Statement::Export(_) => {}
+    }
+
+    // Statements nested in bodies, handlers and arms are separate
+    // statements, each with its own direction.
+    walk::for_each_child_of_stmt(stmt, &mut |child| {
+        scan_nested_for_direction(child, file, findings)
+    });
+}
+
+fn scan_nested_for_direction(child: walk::Node<'_>, file: &str, findings: &mut Vec<VerifyFinding>) {
+    match child {
+        walk::Node::Stmt(stmt) => scan_stmt_for_direction(stmt, file, findings),
+        walk::Node::Expr(expr) => {
+            walk::for_each_child_of_expr(expr, &mut |inner| {
+                scan_nested_for_direction(inner, file, findings)
+            });
+        }
     }
 }
 
-/// Scan an expression tree for direction operator usage, updating flags.
-fn scan_expr_for_direction(expr: &Expr, flags: &mut DirectionFlags) {
-    match expr {
+/// Scan the value of a statement. A pipeline that is the value itself is the
+/// statement's own chain; only its stages are looked into.
+fn scan_value_for_direction(value: &Expr, flags: &mut DirectionFlags) {
+    match value {
         Expr::Pipeline(stages, _) => {
-            flags.has_forward_arrow = true;
-            // Pipeline stages are sub-expressions — scan them too
             for stage in stages {
                 scan_expr_for_direction(stage, flags);
             }
         }
-        Expr::BinaryOp(left, _, right, _) => {
-            scan_expr_for_direction(left, flags);
-            scan_expr_for_direction(right, flags);
-        }
-        Expr::UnaryOp(_, inner, _) => {
-            scan_expr_for_direction(inner, flags);
-        }
-        Expr::FuncCall(func, args, _) => {
-            scan_expr_for_direction(func, flags);
-            for arg in args {
-                scan_expr_for_direction(arg, flags);
-            }
-        }
-        Expr::MethodCall(obj, _, args, _) => {
-            scan_expr_for_direction(obj, flags);
-            for arg in args {
-                scan_expr_for_direction(arg, flags);
-            }
-        }
-        Expr::FieldAccess(obj, _, _) => {
-            scan_expr_for_direction(obj, flags);
-        }
-        Expr::ListLit(items, _) => {
-            for item in items {
-                scan_expr_for_direction(item, flags);
-            }
-        }
-        Expr::Lambda(_, body, _) => {
-            scan_expr_for_direction(body, flags);
-        }
-        Expr::CondBranch(branches, _) => {
-            for branch in branches {
-                if let Some(cond) = &branch.condition {
-                    scan_expr_for_direction(cond, flags);
-                }
-                for stmt in &branch.body {
-                    if let Statement::Expr(e) = stmt {
-                        scan_expr_for_direction(e, flags);
-                    }
-                }
-            }
-        }
-        Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => {
-            for field in fields {
-                scan_expr_for_direction(&field.value, flags);
-            }
-        }
-        Expr::MoldInst(_, args, fields, _) => {
-            for arg in args {
-                scan_expr_for_direction(arg, flags);
-            }
-            for field in fields {
-                scan_expr_for_direction(&field.value, flags);
-            }
-        }
-        Expr::Unmold(inner, _) => {
-            scan_expr_for_direction(inner, flags);
-        }
-        Expr::Throw(inner, _) => {
-            scan_expr_for_direction(inner, flags);
-        }
-        // Literals and identifiers — no direction operators
-        _ => {}
+        other => scan_expr_for_direction(other, flags),
     }
+}
+
+/// Scan an expression tree for direction operator usage, updating flags.
+/// Statements nested in the tree (arm bodies, blocks) are separate scopes and
+/// are checked on their own.
+fn scan_expr_for_direction(expr: &Expr, flags: &mut DirectionFlags) {
+    // A `${...}` slot of a template is text the template holds, not an
+    // operand of the statement: what is written in it is its own expression.
+    if matches!(expr, Expr::TemplateLit(..)) {
+        return;
+    }
+    if matches!(expr, Expr::Pipeline(..)) {
+        flags.has_forward_arrow = true;
+    }
+    walk::for_each_child_of_expr(expr, &mut |child| {
+        if let walk::Node::Expr(inner) = child {
+            scan_expr_for_direction(inner, flags);
+        }
+    });
 }
 
 // ── Check: secret-flow ─────────────────────────────
@@ -1238,15 +1235,25 @@ fn is_lax_producing_expr(expr: &Expr) -> bool {
     }
 }
 
-/// Check if an expression safely handles a Lax variable (via.has_value,.map,.flatMap, >=>).
+/// Methods that check a Lax or take its value out safely: a check
+/// (`hasValue`, `isEmpty`), an extraction with a fallback (`getOrDefault`,
+/// `unmold`) or a monadic step (`map`, `flatMap`).
+fn is_lax_safe_method(method: &str) -> bool {
+    matches!(
+        method,
+        "map" | "flatMap" | "hasValue" | "isEmpty" | "getOrDefault" | "unmold"
+    )
+}
+
+/// Check if an expression safely handles a Lax variable (via .has_value, a safe method, >=>).
 fn is_safe_lax_usage(expr: &Expr, var_name: &str) -> bool {
     match expr {
         // .has_value field access on the variable
         Expr::FieldAccess(obj, field, _) if field == "has_value" => {
             expr_references_var(obj, var_name)
         }
-        // .map(), .flatMap() method calls on the variable
-        Expr::MethodCall(obj, method, _, _) if method == "map" || method == "flatMap" => {
+        // a safe method call on the variable
+        Expr::MethodCall(obj, method, _, _) if is_lax_safe_method(method) => {
             expr_references_var(obj, var_name)
         }
         // Unmold expression: expr >=> (as expression)
@@ -1276,11 +1283,10 @@ fn expr_uses_lax_unsafely(expr: &Expr, var_name: &str) -> bool {
         {
             false
         }
-        Expr::MethodCall(obj, method, _, _)
-            if (method == "map" || method == "flatMap" || method == "hasValue")
-                && expr_references_var(obj, var_name) =>
+        Expr::MethodCall(obj, method, args, _)
+            if is_lax_safe_method(method) && expr_references_var(obj, var_name) =>
         {
-            false
+            args.iter().any(|a| expr_uses_lax_unsafely(a, var_name))
         }
         Expr::Unmold(inner, _) if expr_references_var(inner, var_name) => false,
 
@@ -1444,6 +1450,10 @@ fn check_expr_for_unsafe_lax_use(
 
 /// Generate a structural summary in JSON format.
 pub fn structural_summary(program: &Program, file: &str) -> String {
+    walk::with_stack_for(program, || structural_summary_here(program, file))
+}
+
+fn structural_summary_here(program: &Program, file: &str) -> String {
     let mut extractor = GraphExtractor::new(file);
 
     let dataflow_graph = extractor.extract(program, GraphView::Dataflow);
@@ -1465,10 +1475,13 @@ pub fn structural_summary(program: &Program, file: &str) -> String {
     // Inheritance kind 内の Error 親判定は `metadata["inheritance_parent"]`
     // を使う。structural_summary JSON contract (mold_types / error_types
     // フィールド) は維持する。
-    let types = type_graph
-        .nodes
+    // Every definition counts once: the parent nodes that inheritance edges
+    // hang off in the hierarchy graph (`Error`, `Mold[T]`) are not
+    // definitions of this program, and an `Enum` has no node there at all.
+    let types = program
+        .statements
         .iter()
-        .filter(|n| n.kind == NodeKind::ClassLikeType)
+        .filter(|stmt| matches!(stmt, Statement::ClassLikeDef(_) | Statement::EnumDef(_)))
         .count();
 
     let mold_types: Vec<String> = type_graph
@@ -1540,7 +1553,13 @@ pub fn structural_summary(program: &Program, file: &str) -> String {
         _ => 0,
     };
 
-    let cycles = match query::find_cycles(&module_graph) {
+    // The module graph above holds this file's own imports only; a cycle
+    // runs through the imported files, so follow them the way the
+    // `no-circular-deps` check does.
+    let cycles = matches!(
+        module_graph::detect_local_import_cycle(Path::new(file)),
+        Err(module_graph::ModuleGraphError::Circular { .. })
+    ) || match query::find_cycles(&module_graph) {
         query::QueryResult::Cycles(c) => !c.is_empty(),
         _ => false,
     };
@@ -2312,6 +2331,71 @@ mod tests {
     }
 
     #[test]
+    fn test_direction_constraint_forward_pipeline_statements_ok() {
+        // `expr => stage => name` is one forward statement, however many
+        // stages it has.
+        for source in [
+            "42 => answer",
+            "input <= \"  a  \"\ninput => Trim[_]() => Upper[_]() => result",
+            "double x: Int =\n  x * 2\n=> :Int\n5 => double(_) => double(_) => r",
+        ] {
+            let program = parse_source(source);
+            let findings = check_direction_constraint(&program, "test.td");
+            assert!(
+                findings.is_empty(),
+                "forward pipeline must pass: {source:?} -> {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_direction_constraint_backward_chain_ok() {
+        // `name <= f(_) <= data` is the backward form of the same chain.
+        let source = "plusOne x: Int =\n  x + 1\n=> :Int\ndouble x: Int =\n  x * 2\n=> :Int\nchained <= plusOne(_) <= double(_) <= 4\ntyped: Int <= plusOne(_) <= double(_) <= 10";
+        let program = parse_source(source);
+        let findings = check_direction_constraint(&program, "test.td");
+        assert!(findings.is_empty(), "<= chain must pass: {:?}", findings);
+    }
+
+    #[test]
+    fn test_direction_constraint_pipelines_in_arms_and_bodies_ok() {
+        let source =
+            "f x: Int =\n  | x > 0 |>\n    x => Str[_]() => s\n    s\n  | _ |> \"none\"\n=> :Str";
+        let program = parse_source(source);
+        let findings = check_direction_constraint(&program, "test.td");
+        assert!(findings.is_empty(), "{:?}", findings);
+    }
+
+    #[test]
+    fn test_direction_constraint_detects_mixed_arrows_in_hand_built_tree() {
+        // The parser rejects a statement that writes both arrows, so build
+        // one directly: a `name <= ...` binding whose value nests a `=>`
+        // pipeline inside another expression.
+        let program = parse_source("x <= 1 + 2\ny <= 3");
+        let mut mixed = program.clone();
+        let Statement::Assignment(assign) = &mut mixed.statements[0] else {
+            panic!("expected an assignment");
+        };
+        let span = assign.span.clone();
+        assign.value = Expr::BinaryOp(
+            Box::new(Expr::Pipeline(
+                vec![
+                    Expr::IntLit(1, span.clone()),
+                    Expr::Ident("f".to_string(), span.clone()),
+                ],
+                span.clone(),
+            )),
+            BinOp::Add,
+            Box::new(Expr::IntLit(2, span.clone())),
+            span,
+        );
+        let findings = check_direction_constraint(&mixed, "test.td");
+        assert_eq!(findings.len(), 1, "{:?}", findings);
+        assert!(findings[0].message.contains("E0301"));
+        assert!(check_direction_constraint(&program, "test.td").is_empty());
+    }
+
+    #[test]
     fn test_direction_constraint_different_categories_ok() {
         // => and <=< are different categories, should be allowed
         let program = parse_source("x <=< Lax[42]()");
@@ -2503,6 +2587,22 @@ outer input =
             ".map() on Lax should be safe. Findings: {:?}",
             findings.iter().map(|f| &f.message).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn test_unchecked_lax_get_or_default_and_unmold_are_safe() {
+        let source = "lax <= Div[10, 0]()\nv <= lax.getOrDefault(99)\nopt <= Lax[5]()\nw <= opt.unmold() + 1\nfull <= Lax[1]()\nu <= full.isEmpty()";
+        let program = parse_source(source);
+        let findings = check_unchecked_lax(&program, "test.td");
+        assert!(findings.is_empty(), "{:?}", findings);
+    }
+
+    #[test]
+    fn test_unchecked_lax_default_argument_using_the_lax_still_warns() {
+        let source = "lax <= Div[10, 0]()\nv <= lax.getOrDefault(lax)";
+        let program = parse_source(source);
+        let findings = check_unchecked_lax(&program, "test.td");
+        assert_eq!(findings.len(), 1, "{:?}", findings);
     }
 
     #[test]

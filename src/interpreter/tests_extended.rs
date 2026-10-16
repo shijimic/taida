@@ -8,7 +8,6 @@
 mod tests {
     use crate::interpreter::eval::eval;
     use crate::interpreter::value::{AsyncStatus, Value};
-    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     fn eval_ok(source: &str) -> Value {
@@ -27,7 +26,10 @@ mod tests {
     }
 
     #[test]
-    fn test_function_closure_reuses_captured_env_arc() {
+    fn test_top_level_function_closure_does_not_copy_module_scope() {
+        // Top-level names are resolved in the module scope when a function
+        // runs, so a top-level function's closure copies none of them —
+        // closures never nest copies of earlier functions.
         let source = r#"
 f0 x =
   x
@@ -41,35 +43,25 @@ f2 x =
   f1(x)
 => :Int
 
-0
+f2(7)
 "#;
 
         let (program, errors) = crate::parser::parse(source);
         assert!(errors.is_empty(), "Parse errors: {:?}", errors);
         let mut interpreter = crate::interpreter::eval::Interpreter::new();
-        let _ = interpreter
+        let result = interpreter
             .eval_program(&program)
             .unwrap_or_else(|e| panic!("Eval failed: {}", e));
+        assert_eq!(result, Value::Int(7));
 
-        let f1 = match interpreter.env.get("f1") {
-            Some(Value::Function(f)) => f.clone(),
-            other => panic!("Expected f1 function, got {:?}", other),
-        };
         let f2 = match interpreter.env.get("f2") {
             Some(Value::Function(f)) => f.clone(),
             other => panic!("Expected f2 function, got {:?}", other),
         };
-        let captured_f1 = match f2.closure.get("f1") {
-            Some(Value::Function(f)) => f,
-            other => panic!(
-                "Expected captured f1 function in f2 closure, got {:?}",
-                other
-            ),
-        };
-
         assert!(
-            Arc::ptr_eq(&f1.closure, &captured_f1.closure),
-            "captured function closure should share Arc to avoid recursive deep clone"
+            f2.closure.is_empty(),
+            "a top-level function captures no module-level bindings, got {:?}",
+            f2.closure.keys().collect::<Vec<_>>()
         );
     }
 
@@ -553,11 +545,11 @@ TestError(type <= "TestError", message <= "Boom").throw()
         assert!(result.unwrap_err().contains("Unhandled error"));
     }
 
-    // E32B-074 item 9 (Codex review HIGH 1): an empty `message` field on the
-    // thrown BuchiPack used to render as `Error[TestError]: ` with a trailing
-    // colon-space, because `Some("")` short-circuited `unwrap_or("Unknown")`.
+    // An uncaught error shows an explicit empty `message <= ""` as it is
+    // and an omitted message as the type name
+    // (`docs/guide/08_error_handling.md`).
     #[test]
-    fn test_eval_gorilla_ceiling_empty_message_renders_unknown() {
+    fn test_eval_gorilla_ceiling_empty_message_renders_as_written() {
         let source = r#"
 Error => TestError = @()
 TestError(type <= "TestError", message <= "").throw()
@@ -566,8 +558,22 @@ TestError(type <= "TestError", message <= "").throw()
         let err = result.unwrap_err();
         assert!(err.contains("Unhandled error"), "err={err}");
         assert!(
-            err.contains("Error[TestError]: Unknown"),
-            "empty message must render as Unknown placeholder; err={err}"
+            err.ends_with("Error[TestError]: "),
+            "an explicit empty message is shown as it is; err={err}"
+        );
+    }
+
+    #[test]
+    fn test_eval_gorilla_ceiling_omitted_message_renders_type_name() {
+        let source = r#"
+Error => TestError = @()
+TestError(type <= "TestError").throw()
+"#;
+        let result = eval(source);
+        let err = result.unwrap_err();
+        assert!(
+            err.ends_with("Error[TestError]: TestError"),
+            "an omitted message is shown as the type name; err={err}"
         );
     }
 

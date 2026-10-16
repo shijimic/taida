@@ -148,7 +148,7 @@ static int _wf_is_valid_ptr(int64_t val, unsigned int min_bytes) {
     unsigned int pages = __builtin_wasm_memory_size(0);
     unsigned int mem_size = pages * 65536;
     unsigned int addr = (unsigned int)val;
-    if (addr + min_bytes > mem_size) return 0;
+    if ((uint64_t)addr + min_bytes > (uint64_t)mem_size) return 0; /* no wrap-around */
     return 1;
 }
 
@@ -240,29 +240,6 @@ static uint64_t _wf_fnv1a(const char *s, int len) {
 // ===========================================================================
 // Full-specific overrides (#define redirect targets)
 // ===========================================================================
-
-/// Int[str]() -- parse string to int, returning Lax[Int]
-/// This overrides core's version which returns raw value (no Lax wrapper).
-/// Linked via #define redirect: taida_int_mold_str -> _full.
-int64_t taida_int_mold_str_full(int64_t v) {
-    const char *s = (const char *)(intptr_t)v;
-    if (!s || s[0] == '\0') return taida_lax_empty(0);
-    int neg = 0;
-    int i = 0;
-    if (s[0] == '-') { neg = 1; i = 1; }
-    else if (s[0] == '+') { i = 1; }
-    int64_t acc = 0;
-    int found_digit = 0;
-    while (s[i] >= '0' && s[i] <= '9') {
-        acc = acc * 10 + (s[i] - '0');
-        found_digit = 1;
-        i++;
-    }
-    if (found_digit && s[i] == '\0') {
-        return taida_lax_new(neg ? -acc : acc, 0);
-    }
-    return taida_lax_empty(0); // parse failed
-}
 
 /// Polymorphic .get(key_or_index) -- wasm-full override.
 /// The core version returns raw values for List.get(); this version wraps in Lax
@@ -726,7 +703,9 @@ int64_t taida_bytes_cursor_take(int64_t cursor_ptr, int64_t size) {
     int64_t def_step = _wf_bytes_cursor_step(taida_bytes_default_value(), cur);
     if (size < 0) return taida_lax_empty(def_step);
     int64_t len = taida_bytes_len(bytes_ptr);
-    if (offset + size > len) return taida_lax_empty(def_step);
+    /* `offset + size` could wrap for a huge size; compare against what
+       is left instead. */
+    if (offset < 0 || offset > len || size > len - offset) return taida_lax_empty(def_step);
     int64_t *src = (int64_t *)(intptr_t)bytes_ptr;
     int64_t out = taida_bytes_new_filled(size, 0);
     int64_t *dst = (int64_t *)(intptr_t)out;

@@ -44,37 +44,51 @@ pub struct StoreRefreshFlags {
 }
 
 /// Receiving-side addon install policy.
-#[derive(Debug, Clone, Copy)]
+///
+/// The configured release ages are kept as read, errors included: an
+/// invalid `min_release_age` is reported when an addon's age is checked
+/// (like an invalid `TAIDA_MIN_RELEASE_AGE`) instead of silently falling
+/// back to the weaker default.
+#[derive(Debug, Clone)]
 pub struct AddonInstallPolicy {
     /// Explicit one-shot override for fresh release refusal.
     pub allow_fresh: bool,
-    project_min_age_seconds: Option<u64>,
-    global_min_age_seconds: Option<u64>,
+    project_min_age_seconds: Result<Option<u64>, String>,
+    global_min_age_seconds: Result<Option<u64>, String>,
 }
 
 impl AddonInstallPolicy {
     pub fn default_with_allow_fresh(allow_fresh: bool) -> Self {
         Self {
             allow_fresh,
-            project_min_age_seconds: None,
-            global_min_age_seconds: read_global_min_release_age().ok().flatten(),
+            project_min_age_seconds: Ok(None),
+            global_min_age_seconds: read_global_min_release_age(),
         }
     }
 
     pub fn from_manifest(manifest: &Manifest, allow_fresh: bool) -> Self {
         Self {
             allow_fresh,
-            project_min_age_seconds: read_project_min_release_age(manifest).ok().flatten(),
-            global_min_age_seconds: read_global_min_release_age().ok().flatten(),
+            project_min_age_seconds: read_project_min_release_age(manifest),
+            global_min_age_seconds: read_global_min_release_age(),
         }
     }
 
     fn min_age_seconds_for(&self, package_name: &str) -> Result<u64, String> {
-        if let Some(age) = self.project_min_age_seconds {
-            return Ok(age);
+        match &self.project_min_age_seconds {
+            Ok(Some(age)) => return Ok(*age),
+            Ok(None) => {}
+            Err(e) => return Err(format!("packages.tdm [security] min_release_age: {}", e)),
         }
-        if let Some(age) = self.global_min_age_seconds {
-            return Ok(age);
+        match &self.global_min_age_seconds {
+            Ok(Some(age)) => return Ok(*age),
+            Ok(None) => {}
+            Err(e) => {
+                return Err(format!(
+                    "~/.taida/config.toml [security] min_release_age: {}",
+                    e
+                ));
+            }
         }
         if let Some(raw) = std::env::var("TAIDA_MIN_RELEASE_AGE")
             .ok()
@@ -271,15 +285,22 @@ fn try_resolve_with_providers(
                     resolved_by_identity.entry(pkg_identity)
                 {
                     e.insert(alias_key.to_string());
-                    if let Ok(Some(sub_manifest)) = super::manifest::Manifest::from_dir(&pkg_path) {
-                        for (sub_name, sub_dep) in &sub_manifest.deps {
-                            queue.push_back((
-                                sub_name.clone(),
-                                sub_dep.clone(),
-                                alias_key.to_string(),
-                                sub_manifest.root_dir.clone(),
-                            ));
+                    match super::manifest::Manifest::from_dir(&pkg_path) {
+                        Ok(Some(sub_manifest)) => {
+                            for (sub_name, sub_dep) in &sub_manifest.deps {
+                                queue.push_back((
+                                    sub_name.clone(),
+                                    sub_dep.clone(),
+                                    alias_key.to_string(),
+                                    sub_manifest.root_dir.clone(),
+                                ));
+                            }
                         }
+                        Ok(None) => {}
+                        // The package still installs, but its own dependencies
+                        // are unknown and imports fall back to `main.td`; say so
+                        // instead of dropping the error.
+                        Err(e) => eprintln!("  Warning: dependency '{}': {}", alias_key, e),
                     }
                 }
                 return true;
@@ -467,12 +488,42 @@ fn resolve_deps_inner(
     }
 }
 
+/// Refuse to write project state through a symbolic link.
+///
+/// `.taida/` and `.taida/deps/` hold this project's installed dependencies
+/// and lockfile. Installing replaces and deletes `.taida/deps/` wholesale,
+/// so if either path is a symlink (for example one committed to a cloned
+/// repository) the install would delete and rewrite whatever directory it
+/// points to. Missing directories are fine; they are created as real ones.
+pub fn check_project_state_dirs(project_root: &Path) -> Result<(), String> {
+    for rel in [".taida", ".taida/deps"] {
+        let path = project_root.join(rel);
+        let is_link = std::fs::symlink_metadata(&path)
+            .map(|meta| meta.file_type().is_symlink())
+            .unwrap_or(false);
+        if is_link {
+            let target = std::fs::read_link(&path)
+                .map(|t| t.display().to_string())
+                .unwrap_or_else(|_| "?".to_string());
+            return Err(format!(
+                "refusing to use '{}': it is a symbolic link (-> {}). `.taida/` holds this \
+                 project's installed dependencies and lockfile; replace the link with a \
+                 directory.",
+                path.display(),
+                target
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Install resolved dependencies by creating symlinks in `.taida/deps/`.
 ///
 /// RC-1q: Supports version-qualified package names (e.g., `org/pkg@version`).
 /// These are installed to `.taida/deps/org/pkg@version/` directories, enabling
 /// multiple versions of the same package to coexist (pnpm-style).
 pub fn install_deps(manifest: &Manifest, result: &ResolveResult) -> Result<(), String> {
+    check_project_state_dirs(&manifest.root_dir)?;
     let taida_dir = manifest.root_dir.join(".taida");
     let deps_dir = manifest.root_dir.join(".taida").join("deps");
     std::fs::create_dir_all(&taida_dir).map_err(|e| format!("Cannot create .taida/: {}", e))?;
@@ -613,6 +664,7 @@ pub fn install_addon_prebuilds(
     allow_local_addon_build: bool,
     install_policy: AddonInstallPolicy,
 ) -> Result<BTreeMap<String, crate::pkg::lockfile::LockedAddon>, String> {
+    check_project_state_dirs(&manifest.root_dir)?;
     let deps_dir = manifest.root_dir.join(".taida").join("deps");
     let mut addon_info: BTreeMap<String, crate::pkg::lockfile::LockedAddon> = BTreeMap::new();
 
@@ -649,7 +701,7 @@ pub fn install_addon_prebuilds(
             &host,
             lockfile,
             force_refresh,
-            install_policy,
+            &install_policy,
         );
 
         match prebuild_result {
@@ -733,6 +785,7 @@ fn record_allow_fresh_audit(
     pkg: &ResolvedPackage,
     metadata: &ReleaseMetadata,
 ) -> Result<(), String> {
+    check_project_state_dirs(project_root)?;
     let audit_path = project_root.join(".taida").join("install-audit.log");
     if let Some(parent) = audit_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
@@ -777,9 +830,18 @@ fn record_allow_fresh_audit(
 
 /// Place an addon binary at `.taida/deps/<pkg>/native/lib<library>.<ext>`.
 ///
-/// Creates the `native/` directory if needed and copies the binary from
-/// `source_path`. Extracted from the prebuild success and local build
-/// fallback arms to eliminate code duplication.
+/// `.taida/deps/<pkg>` is normally a symlink to a shared directory: the
+/// global store entry (`~/.taida/store/...`) or a path dependency's source
+/// tree. The binary is this project's install state and must not land
+/// there: it would change the shared directory's contents (and so the
+/// integrity the next install computes from it), and it would overwrite a
+/// file that programs of other projects may have loaded. The package
+/// directory is first turned into a project-local directory of links
+/// ([`localize_linked_dir`]), so only the binary itself is a real file.
+///
+/// The binary is written under a temporary name and renamed into place.
+/// A running program that has the previous file mapped keeps its (now
+/// unlinked) copy instead of seeing it truncated and rewritten.
 fn place_addon_binary(
     deps_dir: &Path,
     pkg_name: &str,
@@ -787,15 +849,117 @@ fn place_addon_binary(
     ext: &str,
     source_path: &Path,
 ) -> Result<PathBuf, String> {
-    let native_dir = deps_dir.join(pkg_name).join("native");
+    let pkg_dir = deps_dir.join(pkg_name);
+    let native_dir = pkg_dir.join("native");
+    localize_linked_dir(&pkg_dir)
+        .and_then(|()| localize_linked_dir(&native_dir))
+        .map_err(|e| format!("cannot prepare native dir for '{}': {}", pkg_name, e))?;
     std::fs::create_dir_all(&native_dir)
         .map_err(|e| format!("cannot create native dir for '{}': {}", pkg_name, e))?;
 
-    let dest = native_dir.join(format!("lib{}.{}", library, ext));
-    std::fs::copy(source_path, &dest)
-        .map_err(|e| format!("cannot copy addon binary to {}: {}", dest.display(), e))?;
+    let file_name = format!("lib{}.{}", library, ext);
+    let dest = native_dir.join(&file_name);
+    let staging = native_dir.join(format!(".{}.{}.tmp", file_name, unique_suffix()));
+    let placed = std::fs::copy(source_path, &staging)
+        .and_then(|_| std::fs::rename(&staging, &dest))
+        .map_err(|e| format!("cannot copy addon binary to {}: {}", dest.display(), e));
+    if placed.is_err() {
+        let _ = std::fs::remove_file(&staging);
+    }
+    placed.map(|()| dest)
+}
 
-    Ok(dest)
+/// `<pid>-<nanos>`, for scratch names that concurrent processes must not share.
+fn unique_suffix() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{}-{}", std::process::id(), nanos)
+}
+
+/// If `dir` is a symlink to a directory, replace it with a real directory
+/// whose entries are symlinks to the target's entries. What reads through
+/// `dir` sees the same files, but new files can be added to `dir` without
+/// touching the target. A real directory or a missing path is left as is.
+fn localize_linked_dir(dir: &Path) -> Result<(), String> {
+    let is_link = std::fs::symlink_metadata(dir)
+        .map(|meta| meta.file_type().is_symlink())
+        .unwrap_or(false);
+    if !is_link {
+        return Ok(());
+    }
+    let target = dir
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve '{}': {}", dir.display(), e))?;
+    if !target.is_dir() {
+        return Err(format!(
+            "'{}' links to '{}', which is not a directory",
+            dir.display(),
+            target.display()
+        ));
+    }
+    let name = dir
+        .file_name()
+        .ok_or_else(|| format!("'{}' has no file name", dir.display()))?
+        .to_string_lossy()
+        .into_owned();
+    let parent = dir
+        .parent()
+        .ok_or_else(|| format!("'{}' has no parent directory", dir.display()))?;
+    let staging = parent.join(format!(".{}.localize-{}", name, unique_suffix()));
+    let filled = std::fs::create_dir(&staging)
+        .map_err(|e| format!("cannot create '{}': {}", staging.display(), e))
+        .and_then(|()| link_dir_entries(&target, &staging));
+    let swapped = filled.and_then(|()| {
+        std::fs::remove_file(dir)
+            .and_then(|()| std::fs::rename(&staging, dir))
+            .map_err(|e| format!("cannot replace '{}': {}", dir.display(), e))
+    });
+    if swapped.is_err() {
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+    swapped
+}
+
+/// Create, in `dest`, one symlink per entry of `source`.
+fn link_dir_entries(source: &Path, dest: &Path) -> Result<(), String> {
+    let entries = std::fs::read_dir(source)
+        .map_err(|e| format!("cannot read '{}': {}", source.display(), e))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("cannot read '{}': {}", source.display(), e))?;
+        let original = entry.path();
+        let link = dest.join(entry.file_name());
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(&original, &link);
+        #[cfg(windows)]
+        let linked = if original.is_dir() {
+            std::os::windows::fs::symlink_dir(&original, &link)
+        } else {
+            std::os::windows::fs::symlink_file(&original, &link)
+        };
+        linked.map_err(|e| format!("cannot link '{}': {}", link.display(), e))?;
+    }
+    Ok(())
+}
+
+/// The package directory an installed `.taida/deps/<pkg>` stands for.
+///
+/// Normally `.taida/deps/<pkg>` is a symlink to it. For an addon whose
+/// binary was placed by `taida ingot install` it is a project-local
+/// directory of links (see [`place_addon_binary`]); the package directory
+/// is then the one its `native/addon.toml` link points into.
+pub fn installed_package_dir(dep_dir: &Path) -> PathBuf {
+    let is_real_dir = std::fs::symlink_metadata(dep_dir)
+        .map(|meta| meta.file_type().is_dir())
+        .unwrap_or(false);
+    if is_real_dir
+        && let Ok(manifest_link) = std::fs::read_link(dep_dir.join("native").join("addon.toml"))
+        && let Some(source) = manifest_link.parent().and_then(Path::parent)
+    {
+        return source.to_path_buf();
+    }
+    dep_dir.to_path_buf()
 }
 
 // ── RC2.7: prebuild fetch result type ────────────────────────
@@ -922,7 +1086,7 @@ fn try_fetch_prebuild(
     host: &host_target::HostTarget,
     lockfile: Option<&Lockfile>,
     force_refresh: bool,
-    install_policy: AddonInstallPolicy,
+    install_policy: &AddonInstallPolicy,
 ) -> Result<PrebuildSuccess, PrebuildFailure> {
     // Check if the host target is supported by this addon.
     //
@@ -1099,10 +1263,19 @@ fn try_fetch_prebuild(
                 && locked_addon.target == host.as_triple()
                 && locked_addon.sha256 != expected_sha256
             {
-                // RC1.5-3b-5: mismatch -> reject (integrity)
+                // RC1.5-3b-5: mismatch -> reject (integrity). The lock is
+                // the trusted side; `--force-refresh` only re-extracts the
+                // store and cannot change this, so point at the lock entry.
                 return Err(PrebuildFailure::IntegrityMismatch(format!(
-                    "lockfile addon SHA-256 mismatch for package '{}' (expected {}, got {}). Re-run `taida ingot install --force-refresh`.",
-                    pkg.name, expected_sha256, locked_addon.sha256
+                    "lockfile addon SHA-256 mismatch for package '{}' on {}: .taida/taida.lock \
+                     pins {}, but the release declares {}. The prebuild was not installed. If \
+                     the new prebuild is expected, review it, remove this package's \
+                     `[[package.addon]]` entry from .taida/taida.lock, and run \
+                     `taida ingot install` again.",
+                    pkg.name,
+                    host.as_triple(),
+                    locked_addon.sha256,
+                    expected_sha256
                 )));
             }
         }
@@ -1167,7 +1340,7 @@ fn try_fetch_prebuild(
             use crate::addon::signature_verify::{
                 VerifyError, VerifyOutcome, VerifyPolicy, verify_artifact,
             };
-            let policy = VerifyPolicy::resolve(&url);
+            let policy = VerifyPolicy::resolve(&url).map_err(PrebuildFailure::IntegrityMismatch)?;
             match verify_artifact(&path, &url, policy) {
                 Ok(VerifyOutcome::Verified) => {
                     eprintln!("  SEC-011 verify: OK ({})", pkg.name);
@@ -1390,7 +1563,7 @@ fn enforce_release_metadata_policy(
     pkg: &ResolvedPackage,
     metadata: &ReleaseMetadata,
     lockfile: Option<&Lockfile>,
-    policy: AddonInstallPolicy,
+    policy: &AddonInstallPolicy,
 ) -> Result<(), String> {
     let published_at = parse_rfc3339_utc_seconds(&metadata.published_at).ok_or_else(|| {
         format!(
@@ -1587,6 +1760,7 @@ fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
 
 /// Generate/update the lockfile after dependency resolution.
 pub fn write_lockfile(manifest: &Manifest, result: &ResolveResult) -> Result<(), String> {
+    check_project_state_dirs(&manifest.root_dir)?;
     let lock_path = manifest.root_dir.join(".taida").join("taida.lock");
 
     // Ensure .taida/ directory exists
@@ -1614,6 +1788,7 @@ pub fn write_lockfile_with_addons(
     result: &ResolveResult,
     addons: &std::collections::BTreeMap<String, crate::pkg::lockfile::LockedAddon>,
 ) -> Result<(), String> {
+    check_project_state_dirs(&manifest.root_dir)?;
     let lock_path = manifest.root_dir.join(".taida").join("taida.lock");
 
     // Ensure .taida/ directory exists
@@ -1651,6 +1826,9 @@ pub fn write_lockfile_with_addons(
 /// When a versioned import (e.g. `>>> alice/http@b.12`) is encountered and the
 /// unversioned path does not exist, tries the version-qualified directory.
 pub fn resolve_package_import(project_root: &Path, package_id: &str) -> Option<PathBuf> {
+    if !is_plain_package_path(package_id) || !deps_are_trusted(project_root) {
+        return None;
+    }
     // Try canonical org/name path first
     let dep_path = project_root.join(".taida").join("deps").join(package_id);
     if dep_path.exists() {
@@ -1674,6 +1852,12 @@ pub fn resolve_package_import_versioned(
     package_id: &str,
     version: &str,
 ) -> Option<PathBuf> {
+    if !is_plain_package_path(package_id)
+        || !is_plain_version(version)
+        || !deps_are_trusted(project_root)
+    {
+        return None;
+    }
     let deps_dir = project_root.join(".taida").join("deps");
 
     // Try version-qualified path first: org/name@version
@@ -1690,6 +1874,31 @@ pub fn resolve_package_import_versioned(
     }
 
     None
+}
+
+/// Whether `import_path` is a plain package path: `/`-separated segments,
+/// none of them empty, `.` or `..`, and no backslash. Anything else could
+/// name a directory outside `.taida/deps/` once joined onto it, so it never
+/// resolves to an installed package.
+fn is_plain_package_path(import_path: &str) -> bool {
+    !import_path.is_empty()
+        && import_path.split('/').all(|segment| {
+            !segment.is_empty() && segment != "." && segment != ".." && !segment.contains('\\')
+        })
+}
+
+/// Whether a version suffix from `>>> pkg@version` can be appended to a
+/// directory name without introducing path segments.
+fn is_plain_version(version: &str) -> bool {
+    !version.is_empty() && version != "." && version != ".." && !version.contains(['/', '\\'])
+}
+
+/// Installed packages are looked up in `<project_root>/.taida/deps/`,
+/// except when the root is a shared temporary directory such as `/tmp`
+/// (a script directly in it falls back to that directory as its root):
+/// anyone can create `.taida/deps/` there.
+fn deps_are_trusted(project_root: &Path) -> bool {
+    !crate::project_root::is_shared_temp_dir(project_root)
 }
 
 /// Result of resolving a package module import path.
@@ -1712,10 +1921,60 @@ pub struct PackageModuleResolution {
 /// then `.taida/deps/taida-lang/` + submodule `crypto/hash`.
 ///
 /// Returns the package directory and optional submodule path.
+/// The project root of the program being run, built or checked. A
+/// package's own imports resolve against the program's `.taida/deps`
+/// first — `taida ingot install` puts a package's dependencies there too —
+/// and then against the package's own project root.
+static PROGRAM_ROOT: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+
+/// Make `entry` (a source file, or a directory of them) the program whose
+/// `.taida/deps` package imports search first.
+pub fn set_program_root_for(entry: &Path) {
+    let start = if entry.is_dir() {
+        entry.to_path_buf()
+    } else {
+        match entry.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+            _ => PathBuf::from("."),
+        }
+    };
+    let start = start.canonicalize().unwrap_or(start);
+    let root = crate::project_root::find_project_root(&start);
+    if let Ok(mut slot) = PROGRAM_ROOT.write() {
+        *slot = Some(root);
+    }
+}
+
+/// The program's project root when it is not `project_root`.
+fn other_program_root(project_root: &Path) -> Option<PathBuf> {
+    let program_root = PROGRAM_ROOT.read().ok()?.clone()?;
+    let same = program_root == project_root
+        || matches!(
+            (program_root.canonicalize(), project_root.canonicalize()),
+            (Ok(a), Ok(b)) if a == b
+        );
+    (!same).then_some(program_root)
+}
+
 pub fn resolve_package_module(
     project_root: &Path,
     import_path: &str,
 ) -> Option<PackageModuleResolution> {
+    if let Some(program_root) = other_program_root(project_root)
+        && let Some(found) = resolve_package_module_in(&program_root, import_path)
+    {
+        return Some(found);
+    }
+    resolve_package_module_in(project_root, import_path)
+}
+
+fn resolve_package_module_in(
+    project_root: &Path,
+    import_path: &str,
+) -> Option<PackageModuleResolution> {
+    if !is_plain_package_path(import_path) || !deps_are_trusted(project_root) {
+        return None;
+    }
     let deps_dir = project_root.join(".taida").join("deps");
 
     // Longest-prefix matching: try the full path, then progressively shorter prefixes
@@ -1755,6 +2014,26 @@ pub fn resolve_package_module_versioned(
     import_path: &str,
     version: &str,
 ) -> Option<PackageModuleResolution> {
+    if let Some(program_root) = other_program_root(project_root)
+        && let Some(found) =
+            resolve_package_module_versioned_in(&program_root, import_path, version)
+    {
+        return Some(found);
+    }
+    resolve_package_module_versioned_in(project_root, import_path, version)
+}
+
+fn resolve_package_module_versioned_in(
+    project_root: &Path,
+    import_path: &str,
+    version: &str,
+) -> Option<PackageModuleResolution> {
+    if !is_plain_package_path(import_path)
+        || !is_plain_version(version)
+        || !deps_are_trusted(project_root)
+    {
+        return None;
+    }
     let deps_dir = project_root.join(".taida").join("deps");
 
     // Longest-prefix matching with version-qualified directories

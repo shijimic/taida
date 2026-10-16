@@ -47,6 +47,62 @@ use taida_addon::{
 
 const MAX_ADDON_FUNCTIONS: u32 = 4096;
 
+/// An addon function entry point as the host calls it.
+///
+/// `TaidaAddonStatus` is `#[repr(u32)]`, so an addon's `call` returns the
+/// same `u32` on the wire. The host receives it as a plain `u32` and
+/// converts it with [`status_from_raw`]: reading a value outside the enum
+/// directly as `TaidaAddonStatus` would be undefined behaviour, and an
+/// addon (in any language) can return any `u32`.
+pub type RawAddonCall = extern "C" fn(
+    args_ptr: *const taida_addon::TaidaAddonValueV1,
+    args_len: u32,
+    out_value: *mut *mut taida_addon::TaidaAddonValueV1,
+    out_error: *mut *mut taida_addon::TaidaAddonErrorV1,
+) -> u32;
+
+/// The `init` callback as the host calls it (see [`RawAddonCall`]).
+type RawAddonInit = extern "C" fn(host: *const TaidaHostV1) -> u32;
+
+/// The status an addon returned, or `None` for a value that is not a
+/// [`TaidaAddonStatus`].
+pub fn status_from_raw(raw: u32) -> Option<TaidaAddonStatus> {
+    Some(match raw {
+        0 => TaidaAddonStatus::Ok,
+        1 => TaidaAddonStatus::Error,
+        2 => TaidaAddonStatus::AbiMismatch,
+        3 => TaidaAddonStatus::InvalidState,
+        4 => TaidaAddonStatus::UnsupportedValue,
+        5 => TaidaAddonStatus::NullPointer,
+        6 => TaidaAddonStatus::ArityMismatch,
+        _ => return None,
+    })
+}
+
+/// View a descriptor's `call` pointer as [`RawAddonCall`].
+fn host_call_entry(
+    call: extern "C" fn(
+        args_ptr: *const taida_addon::TaidaAddonValueV1,
+        args_len: u32,
+        out_value: *mut *mut taida_addon::TaidaAddonValueV1,
+        out_error: *mut *mut taida_addon::TaidaAddonErrorV1,
+    ) -> TaidaAddonStatus,
+) -> RawAddonCall {
+    // SAFETY: both are `extern "C"` function pointers with identical
+    // parameters; the return types have the same ABI (`TaidaAddonStatus`
+    // is `#[repr(u32)]`), so calling through the `u32` view is sound and
+    // only changes how the returned bits are read.
+    unsafe { core::mem::transmute(call) }
+}
+
+/// Human-readable form of a raw status for diagnostics.
+fn describe_status(raw: u32) -> String {
+    match status_from_raw(raw) {
+        Some(status) => format!("{status:?}"),
+        None => format!("{raw} (not a TaidaAddonStatus value)"),
+    }
+}
+
 /// Distinct, classifiable error variants produced by [`load_addon`].
 ///
 /// Every variant carries the addon path so the diagnostic can be
@@ -96,7 +152,8 @@ pub enum AddonLoadError {
     /// loader does not retry; the addon is considered failed.
     InitFailed {
         path: PathBuf,
-        status: TaidaAddonStatus,
+        /// The status as returned (see [`status_from_raw`]).
+        status: u32,
     },
 }
 
@@ -144,9 +201,9 @@ impl std::fmt::Display for AddonLoadError {
             ),
             Self::InitFailed { path, status } => write!(
                 f,
-                "addon load failed: init callback in '{}' returned status {:?}",
+                "addon load failed: init callback in '{}' returned status {}",
                 path.display(),
-                status
+                describe_status(*status)
             ),
         }
     }
@@ -248,12 +305,7 @@ unsafe impl Sync for LoadedAddon {}
 struct RawFunctionEntry {
     name_ptr: *const core::ffi::c_char,
     arity: u32,
-    call: extern "C" fn(
-        args_ptr: *const taida_addon::TaidaAddonValueV1,
-        args_len: u32,
-        out_value: *mut *mut taida_addon::TaidaAddonValueV1,
-        out_error: *mut *mut taida_addon::TaidaAddonErrorV1,
-    ) -> TaidaAddonStatus,
+    call: RawAddonCall,
 }
 
 // SAFETY: identical reasoning to `LoadedAddon`. The pointers live in
@@ -293,14 +345,7 @@ impl<'a> AddonFunctionRef<'a> {
     /// borrowed input vector. Any other caller is responsible for
     /// respecting the full ABI contract manually (arg-vector layout,
     /// `out_value` / `out_error` ownership, etc.).
-    pub fn raw_call(
-        &self,
-    ) -> extern "C" fn(
-        args_ptr: *const taida_addon::TaidaAddonValueV1,
-        args_len: u32,
-        out_value: *mut *mut taida_addon::TaidaAddonValueV1,
-        out_error: *mut *mut taida_addon::TaidaAddonErrorV1,
-    ) -> TaidaAddonStatus {
+    pub fn raw_call(&self) -> RawAddonCall {
         self.raw.call
     }
 }
@@ -513,7 +558,7 @@ pub fn load_addon<P: AsRef<Path>>(path: P) -> Result<LoadedAddon, AddonLoadError
         functions.push(RawFunctionEntry {
             name_ptr: entry.name,
             arity: entry.arity,
-            call: entry.call,
+            call: host_call_entry(entry.call),
         });
     }
 
@@ -526,10 +571,11 @@ pub fn load_addon<P: AsRef<Path>>(path: P) -> Result<LoadedAddon, AddonLoadError
     // during `init` and read it on every subsequent call.
     let host_table = Box::new(crate::addon::value_bridge::make_host_table());
     if let Some(init_fn) = descriptor.init {
-        // SAFETY: signature matches `descriptor.init`'s declared type
-        // (`extern "C" fn(*const TaidaHostV1) -> TaidaAddonStatus`).
+        // SAFETY: same view as `host_call_entry`: identical parameters, and
+        // the `#[repr(u32)]` status is read as the `u32` it is on the wire.
+        let init_fn: RawAddonInit = unsafe { core::mem::transmute(init_fn) };
         let status = init_fn(&*host_table as *const TaidaHostV1);
-        if status != TaidaAddonStatus::Ok {
+        if status_from_raw(status) != Some(TaidaAddonStatus::Ok) {
             return Err(AddonLoadError::InitFailed {
                 path: owned_path,
                 status,
@@ -651,11 +697,37 @@ mod tests {
     fn init_failed_error_includes_status() {
         let err = AddonLoadError::InitFailed {
             path: PathBuf::from("/tmp/x.so"),
-            status: TaidaAddonStatus::AbiMismatch,
+            status: TaidaAddonStatus::AbiMismatch as u32,
         };
         let msg = err.to_string();
         assert!(msg.contains("init callback"));
         assert!(msg.contains("AbiMismatch"));
+
+        let err = AddonLoadError::InitFailed {
+            path: PathBuf::from("/tmp/x.so"),
+            status: 99,
+        };
+        assert!(
+            err.to_string()
+                .contains("99 (not a TaidaAddonStatus value)")
+        );
+    }
+
+    #[test]
+    fn status_from_raw_maps_only_defined_values() {
+        for status in [
+            TaidaAddonStatus::Ok,
+            TaidaAddonStatus::Error,
+            TaidaAddonStatus::AbiMismatch,
+            TaidaAddonStatus::InvalidState,
+            TaidaAddonStatus::UnsupportedValue,
+            TaidaAddonStatus::NullPointer,
+            TaidaAddonStatus::ArityMismatch,
+        ] {
+            assert_eq!(status_from_raw(status as u32), Some(status));
+        }
+        assert_eq!(status_from_raw(7), None);
+        assert_eq!(status_from_raw(u32::MAX), None);
     }
 
     // ── Loader path tests (no dlopen, in-process descriptor) ────────
@@ -725,7 +797,7 @@ mod tests {
             functions.push(RawFunctionEntry {
                 name_ptr: entry.name,
                 arity: entry.arity,
-                call: entry.call,
+                call: host_call_entry(entry.call),
             });
         }
         Ok((name, functions))

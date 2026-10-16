@@ -86,7 +86,7 @@ pub(crate) fn emit_compile_summary_jsonl(stats: &CompileDiagStats) {
 
 pub(crate) fn reject_removed_build_target_flag() -> ! {
     eprintln!(
-        "[E1700] Flag '--target <target>' was removed in @e.X. Use 'taida build <target> <PATH>' instead."
+        "[E1700] Flag '--target <target>' was removed. Use 'taida build <target> <PATH>' instead."
     );
     eprintln!("        For example: `taida build native src`.");
     std::process::exit(2);
@@ -236,6 +236,7 @@ pub(crate) fn run_build(args: &[String], no_check: bool) {
         None => print_build_usage_and_exit(),
     };
     let input_path = Path::new(&input);
+    taida::pkg::resolver::set_program_root_for(input_path);
     let mut compile_stats = CompileDiagStats::default();
 
     let selector_count = descriptor_flags.selector_count();

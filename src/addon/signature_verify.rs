@@ -12,9 +12,13 @@
 //! |---------------------------|--------------|----------------------------------|
 //! | unset / empty | yes | `BestEffort` (warn if missing) |
 //! | unset / empty | no | `Disabled` |
-//! | `0` / `off` / `false` | any | `Disabled` |
-//! | `1` / `on` / `best-effort`| any | `BestEffort` |
-//! | `required` / `enforce` | any | `Required` (hard fail on gap) |
+//! | `off` / `0` / `false` / `no` | any | `Disabled` |
+//! | `best-effort` | any | `BestEffort` |
+//! | `required` / `enforce` / `1` / `true` / `yes` / `on` | any | `Required` (hard fail on gap) |
+//! | anything else | any | an error: the install stops |
+//!
+//! Values are read case-insensitively, as `install.sh` reads them: only an
+//! explicit `best-effort` or `off` weakens verification.
 //!
 //! # Trust boundary
 //!
@@ -59,37 +63,26 @@ pub enum VerifyPolicy {
 }
 
 impl VerifyPolicy {
-    /// Resolve the policy for a single fetch, given the artefact URL.
-    ///
-    /// - `TAIDA_VERIFY_SIGNATURES=required` → [`VerifyPolicy::Required`]
-    /// for every URL (including `file://` — used by the failing-
-    /// path integration test).
-    /// - `TAIDA_VERIFY_SIGNATURES=0` / `off` / `false` →
-    /// [`VerifyPolicy::Disabled`] unconditionally.
-    /// - `TAIDA_VERIFY_SIGNATURES=1` / `on` / `best-effort` →
-    /// [`VerifyPolicy::BestEffort`] unconditionally.
-    /// - Unset / empty:
-    /// - [`is_official_release_url`] returns `true` → [`BestEffort`]
-    /// - otherwise → [`Disabled`]
-    pub fn resolve(url: &str) -> Self {
-        match std::env::var("TAIDA_VERIFY_SIGNATURES")
-            .ok()
-            .as_deref()
-            .map(str::trim)
-        {
-            Some("required") | Some("REQUIRED") | Some("enforce") | Some("ENFORCE") => {
-                Self::Required
-            }
-            Some("0") | Some("off") | Some("OFF") | Some("false") | Some("FALSE") => Self::Disabled,
-            Some("1") | Some("on") | Some("ON") | Some("true") | Some("TRUE")
-            | Some("best-effort") | Some("BEST-EFFORT") => Self::BestEffort,
-            _ => {
-                if is_official_release_url(url) {
-                    Self::BestEffort
-                } else {
-                    Self::Disabled
-                }
-            }
+    /// Resolve the policy for a single fetch, given the artefact URL
+    /// (see the matrix in the module docs). An unrecognised
+    /// `TAIDA_VERIFY_SIGNATURES` value is an error, never a silent
+    /// downgrade.
+    pub fn resolve(url: &str) -> Result<Self, String> {
+        let raw = std::env::var("TAIDA_VERIFY_SIGNATURES").ok();
+        let value = raw.as_deref().map(str::trim).unwrap_or("");
+        match value.to_ascii_lowercase().as_str() {
+            "" => Ok(if is_official_release_url(url) {
+                Self::BestEffort
+            } else {
+                Self::Disabled
+            }),
+            "off" | "0" | "false" | "no" => Ok(Self::Disabled),
+            "best-effort" => Ok(Self::BestEffort),
+            "required" | "enforce" | "1" | "true" | "yes" | "on" => Ok(Self::Required),
+            _ => Err(format!(
+                "unsupported TAIDA_VERIFY_SIGNATURES='{}'; use required, best-effort, or off",
+                value
+            )),
         }
     }
 }
@@ -457,11 +450,11 @@ mod tests {
             VerifyPolicy::resolve(
                 "https://github.com/taida-lang/terminal/releases/download/@a.7/x.so"
             ),
-            VerifyPolicy::BestEffort
+            Ok(VerifyPolicy::BestEffort)
         );
         assert_eq!(
             VerifyPolicy::resolve("https://example.org/x.so"),
-            VerifyPolicy::Disabled
+            Ok(VerifyPolicy::Disabled)
         );
         drop(guard);
     }
@@ -471,7 +464,7 @@ mod tests {
         let _g = EnvGuard::set("TAIDA_VERIFY_SIGNATURES", "required");
         assert_eq!(
             VerifyPolicy::resolve("https://example.org/x.so"),
-            VerifyPolicy::Required
+            Ok(VerifyPolicy::Required)
         );
         drop(_g);
 
@@ -480,15 +473,30 @@ mod tests {
             VerifyPolicy::resolve(
                 "https://github.com/taida-lang/terminal/releases/download/@a.7/x.so"
             ),
-            VerifyPolicy::Disabled
+            Ok(VerifyPolicy::Disabled)
         );
         drop(_g);
 
         let _g = EnvGuard::set("TAIDA_VERIFY_SIGNATURES", "best-effort");
         assert_eq!(
             VerifyPolicy::resolve("https://example.org/x.so"),
-            VerifyPolicy::BestEffort
+            Ok(VerifyPolicy::BestEffort)
         );
+        drop(_g);
+
+        // Values that read as "yes, verify" select Required, as in
+        // install.sh; an unknown value is an error.
+        for yes in ["1", "true", "TRUE", "yes", "on"] {
+            let _g = EnvGuard::set("TAIDA_VERIFY_SIGNATURES", yes);
+            assert_eq!(
+                VerifyPolicy::resolve("https://example.org/x.so"),
+                Ok(VerifyPolicy::Required),
+                "{yes}"
+            );
+            drop(_g);
+        }
+        let _g = EnvGuard::set("TAIDA_VERIFY_SIGNATURES", "maybe");
+        assert!(VerifyPolicy::resolve("https://example.org/x.so").is_err());
         drop(_g);
     }
 

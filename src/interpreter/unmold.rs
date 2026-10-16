@@ -178,6 +178,21 @@ impl Interpreter {
 
     // ── Unmold Helper ────────────────────────────────────────
 
+    /// The error a rejected Async throws: an Error value or a pack as it is;
+    /// any other payload, such as the Str of `AsyncReject["timeout"]()`, as an
+    /// `AsyncError` whose message is the payload's text, so an
+    /// `|== e: Error` handler can read it.
+    pub(crate) fn async_rejection_error(error: Value) -> Value {
+        match error {
+            Value::Error(_) | Value::BuchiPack(_) => error,
+            other => Value::Error(ErrorValue {
+                error_type: "AsyncError".into(),
+                message: other.to_display_string(),
+                fields: Vec::new(),
+            }),
+        }
+    }
+
     /// Unmold a value: extract the inner value from a Mold wrapper.
     /// For Async values, this is a blocking await (via tokio runtime).
     /// For rejected Async, this returns a Throw signal.
@@ -190,7 +205,9 @@ impl Interpreter {
                     let resolved = self.resolve_async(&a)?;
                     return match resolved.status {
                         AsyncStatus::Fulfilled => Ok(Signal::Value(*resolved.value)),
-                        AsyncStatus::Rejected => Ok(Signal::Throw(*resolved.error)),
+                        AsyncStatus::Rejected => {
+                            Ok(Signal::Throw(Self::async_rejection_error(*resolved.error)))
+                        }
                         AsyncStatus::Pending => {
                             Ok(Signal::Throw(Value::Error(super::value::ErrorValue {
                                 error_type: "AsyncStateError".into(),
@@ -205,7 +222,7 @@ impl Interpreter {
                     AsyncStatus::Fulfilled => Ok(Signal::Value(*a.value)),
                     AsyncStatus::Rejected => {
                         // Rejected async: throw the error so it can be caught by |==
-                        Ok(Signal::Throw(*a.error))
+                        Ok(Signal::Throw(Self::async_rejection_error(*a.error)))
                     }
                     AsyncStatus::Pending => {
                         Ok(Signal::Throw(Value::Error(super::value::ErrorValue {
@@ -526,7 +543,9 @@ impl Interpreter {
                         message: format!("Error in mold option '{}': {}", name, err),
                     })
                 }
-                _other => Ok(None), // Gorilla/TailCall — safe to ignore in mold option context
+                // The gorilla ends the program from here too.
+                Signal::Gorilla => Err(self.gorilla_escape()),
+                Signal::TailCall(_) => Ok(None),
             }
         } else {
             Ok(None)

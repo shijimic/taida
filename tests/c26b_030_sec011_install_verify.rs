@@ -166,7 +166,7 @@ fn c26b030_disabled_policy_ignores_missing_bundle() {
         let artifact = write_artifact(td.path(), "libx.so", b"payload");
         // Non-official URL + unset env -> Disabled by default.
         let url = "https://mirror.example.org/libx.so";
-        assert_eq!(VerifyPolicy::resolve(url), VerifyPolicy::Disabled);
+        assert_eq!(VerifyPolicy::resolve(url), Ok(VerifyPolicy::Disabled));
         let outcome = verify_artifact(&artifact, url, VerifyPolicy::Disabled).unwrap();
         assert_eq!(outcome, VerifyOutcome::Skipped);
     });
@@ -292,7 +292,7 @@ fn c26b030_env_required_applies_to_non_official_urls() {
         // CI to fail closed on any unsigned download.
         assert_eq!(
             VerifyPolicy::resolve("https://mirror.example.org/libx.so"),
-            VerifyPolicy::Required
+            Ok(VerifyPolicy::Required)
         );
     });
 }

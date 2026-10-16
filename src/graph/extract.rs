@@ -7,6 +7,8 @@
 use std::collections::HashMap;
 
 use super::model::*;
+use super::walk::{self, Node};
+use crate::lexer::Span;
 use crate::parser::*;
 
 /// Extractor state.
@@ -14,13 +16,73 @@ pub struct GraphExtractor {
     file: String,
     /// Counter for generating unique anonymous function IDs.
     lambda_counter: usize,
+    /// Set while walking the body of a function nested in another one: what
+    /// it calls is reachable through the enclosing function, but is not a
+    /// call the enclosing function makes itself (the nested function may
+    /// never be entered), so the edges are references.
+    inside_nested_function: bool,
+    /// The names bound at the point being walked: parameters, earlier
+    /// bindings, lambda parameters. A call written with one of them calls
+    /// that local value, not the top-level function of the same name.
+    bindings: walk::Bindings,
+    /// Set while walking a parameter default: what a default calls is only
+    /// evaluated when the argument is left out, so it makes a function
+    /// reachable but is not a call the function makes.
+    inside_default: bool,
+    /// Set while walking the body of a top-level function: a type defined
+    /// there has methods that run only when called.
+    inside_function: bool,
+    /// Set while walking the handler of an error ceiling. A ceiling does not
+    /// cover its own handler, so nothing found by reading the code around a
+    /// call (a function handed to a mold, a method reached by name) is taken
+    /// to be covered there.
+    inside_handler: bool,
 }
+
+/// The functions and methods of a program, by name, for linking a call (or a
+/// reference) to the node of its callee in the error view.
+#[derive(Default)]
+struct ErrorScope {
+    /// Top-level function name → node id. A function defined inside another
+    /// one is found through the bindings of the code that can see it.
+    functions: HashMap<String, String>,
+    /// Method name → node ids of every method with that name.
+    methods: HashMap<String, Vec<String>>,
+    /// (Type name, method name) → node ids of the methods of that type.
+    type_methods: HashMap<(String, String), Vec<String>>,
+}
+
+/// The built-in molds that call the function they are given while they run,
+/// so that a function named or a lambda written in their arguments runs
+/// inside the ceiling of the code around the mold.
+const CALLBACK_MOLDS: &[&str] = &[
+    "Map",
+    "Filter",
+    "Fold",
+    "Foldr",
+    "Reduce",
+    "TakeWhile",
+    "DropWhile",
+    "Find",
+    "FindIndex",
+    "FindIndexLax",
+    "Count",
+    "Sort",
+    "Unique",
+    "ParMap",
+    "AsyncTask",
+];
 
 impl GraphExtractor {
     pub fn new(file: &str) -> Self {
         Self {
             file: file.to_string(),
             lambda_counter: 0,
+            inside_nested_function: false,
+            bindings: walk::Bindings::default(),
+            inside_default: false,
+            inside_function: false,
+            inside_handler: false,
         }
     }
 
@@ -42,12 +104,15 @@ impl GraphExtractor {
             Statement::Assignment(assign) => {
                 let span = &assign.span;
                 let var_id = self.add_variable_node(graph, &assign.target, span.line, span.column);
-                self.extract_dataflow_expr_to(
-                    graph,
-                    &assign.value,
-                    &var_id,
-                    EdgeKind::PipeBackward,
-                );
+                // The whole statement runs in the direction of its arrow:
+                // `expr => name` is a forward pipe, `name <= expr` a
+                // backward one, and a chain's own stages follow suit.
+                let edge_kind = if assign.forward {
+                    EdgeKind::PipeForward
+                } else {
+                    EdgeKind::PipeBackward
+                };
+                self.extract_dataflow_expr_to(graph, &assign.value, &var_id, edge_kind);
             }
 
             Statement::FuncDef(fd) => {
@@ -271,30 +336,7 @@ impl GraphExtractor {
             }
 
             Expr::Pipeline(exprs, span) => {
-                let mut prev_id: Option<String> = None;
-                for (i, e) in exprs.iter().enumerate() {
-                    let cur_id = self.extract_dataflow_expr(graph, e);
-                    if i > 0
-                        && let (Some(prev), Some(cur)) = (&prev_id, &cur_id)
-                    {
-                        graph.add_edge(GraphEdge {
-                            source: prev.clone(),
-                            target: cur.clone(),
-                            kind: EdgeKind::PipeForward,
-                            label: "=>".to_string(),
-                            metadata: HashMap::new(),
-                        });
-                    }
-                    prev_id = cur_id;
-                }
-                // Return the ID of the last in the pipeline
-                if prev_id.is_some() {
-                    prev_id
-                } else {
-                    let id =
-                        Graph::make_id(&self.file, span.line, span.column, &NodeKind::Variable);
-                    Some(id)
-                }
+                self.extract_dataflow_pipeline(graph, exprs, span, EdgeKind::PipeForward)
             }
 
             Expr::BuchiPack(fields, span) => {
@@ -620,7 +662,48 @@ impl GraphExtractor {
         }
     }
 
-    /// Add a PipeBackward edge from an expression to a target node.
+    /// Extract the stages of a pipeline, joined by edges of `edge_kind`.
+    /// Returns the node of the last stage.
+    fn extract_dataflow_pipeline(
+        &mut self,
+        graph: &mut Graph,
+        exprs: &[Expr],
+        span: &Span,
+        edge_kind: EdgeKind,
+    ) -> Option<String> {
+        let mut prev_id: Option<String> = None;
+        for (i, e) in exprs.iter().enumerate() {
+            let cur_id = self.extract_dataflow_expr(graph, e);
+            if i > 0
+                && let (Some(prev), Some(cur)) = (&prev_id, &cur_id)
+            {
+                graph.add_edge(GraphEdge {
+                    source: prev.clone(),
+                    target: cur.clone(),
+                    kind: edge_kind.clone(),
+                    label: Self::pipe_label(&edge_kind).to_string(),
+                    metadata: HashMap::new(),
+                });
+            }
+            prev_id = cur_id;
+        }
+        // Return the ID of the last in the pipeline
+        if prev_id.is_some() {
+            prev_id
+        } else {
+            let id = Graph::make_id(&self.file, span.line, span.column, &NodeKind::Variable);
+            Some(id)
+        }
+    }
+
+    fn pipe_label(edge_kind: &EdgeKind) -> &'static str {
+        match edge_kind {
+            EdgeKind::PipeBackward => "<=",
+            _ => "=>",
+        }
+    }
+
+    /// Add a pipe edge (of `edge_kind`) from an expression to a target node.
     fn extract_dataflow_expr_to(
         &mut self,
         graph: &mut Graph,
@@ -628,12 +711,18 @@ impl GraphExtractor {
         target_id: &str,
         edge_kind: EdgeKind,
     ) {
-        if let Some(source_id) = self.extract_dataflow_expr(graph, expr) {
+        let source_id = match expr {
+            Expr::Pipeline(exprs, span) => {
+                self.extract_dataflow_pipeline(graph, exprs, span, edge_kind.clone())
+            }
+            other => self.extract_dataflow_expr(graph, other),
+        };
+        if let Some(source_id) = source_id {
             graph.add_edge(GraphEdge {
                 source: source_id,
                 target: target_id.to_string(),
+                label: Self::pipe_label(&edge_kind).to_string(),
                 kind: edge_kind,
-                label: "<=".to_string(),
                 metadata: HashMap::new(),
             });
         }
@@ -929,38 +1018,74 @@ impl GraphExtractor {
         let mut graph = Graph::new(GraphView::Error);
         graph.source_files.push(self.file.clone());
 
-        // Collect function names defined in this program (for cross-function propagation)
-        let func_names: std::collections::HashSet<String> = program
-            .statements
-            .iter()
-            .filter_map(|stmt| {
-                if let Statement::FuncDef(fd) = stmt {
-                    Some(fd.name.clone())
-                } else {
-                    None
+        // Every function and method gets its node before any body is
+        // walked, so a call to something defined further down the file (or
+        // nested in another function) still produces its propagation edge.
+        let mut scope = ErrorScope::default();
+        for stmt in &program.statements {
+            walk::for_each_nested_stmt(stmt, &mut |nested| match nested {
+                Statement::FuncDef(fd) => {
+                    let id = self.add_error_function_node(&mut graph, &fd.name, &fd.span);
+                    if std::ptr::eq(nested, stmt) {
+                        scope.functions.entry(fd.name.clone()).or_insert(id);
+                    }
                 }
-            })
-            .collect();
+                Statement::ClassLikeDef(cl) => {
+                    for field in &cl.fields {
+                        if let Some(method) = &field.method_def {
+                            let label = format!("{}.{}", cl.name, method.name);
+                            let id = self.add_error_function_node(&mut graph, &label, &method.span);
+                            scope
+                                .methods
+                                .entry(method.name.clone())
+                                .or_default()
+                                .push(id.clone());
+                            scope
+                                .type_methods
+                                .entry((cl.name.clone(), method.name.clone()))
+                                .or_default()
+                                .push(id);
+                        }
+                    }
+                }
+                _ => {}
+            });
+        }
 
-        // Pass 1: Extract error nodes and edges (existing behavior)
-        self.extract_error_stmts(&mut graph, &program.statements, None, &func_names);
+        self.bindings = walk::Bindings::default();
+        self.extract_error_stmts(&mut graph, &program.statements, None, &scope);
 
         graph
+    }
+
+    fn add_error_function_node(&self, graph: &mut Graph, label: &str, span: &Span) -> String {
+        let id = Graph::make_id(&self.file, span.line, span.column, &NodeKind::Function);
+        graph.add_node(GraphNode {
+            id: id.clone(),
+            kind: NodeKind::Function,
+            label: label.to_string(),
+            location: Location {
+                file: self.file.clone(),
+                line: span.line,
+                column: span.column,
+            },
+            metadata: HashMap::new(),
+        });
+        id
     }
 
     /// Extract error-related nodes and edges from a list of statements.
     ///
     /// `current_ceiling`: the active error ceiling ID (if any) covering this scope.
-    /// `current_func`: the Function node ID of the enclosing function (if any).
-    /// `func_names`: set of all function names defined in the program (for Propagates edges).
+    /// `scope`: the functions and methods defined in the program.
     fn extract_error_stmts(
         &mut self,
         graph: &mut Graph,
         stmts: &[Statement],
         current_ceiling: Option<&str>,
-        func_names: &std::collections::HashSet<String>,
+        scope: &ErrorScope,
     ) {
-        self.extract_error_stmts_inner(graph, stmts, current_ceiling, None, func_names);
+        self.extract_error_stmts_inner(graph, stmts, current_ceiling, None, scope);
     }
 
     fn extract_error_stmts_inner(
@@ -969,9 +1094,11 @@ impl GraphExtractor {
         stmts: &[Statement],
         current_ceiling: Option<&str>,
         current_func: Option<&str>,
-        func_names: &std::collections::HashSet<String>,
+        scope: &ErrorScope,
     ) {
         let mut active_ceiling: Option<String> = current_ceiling.map(|s| s.to_string());
+        // What a list of statements binds is not visible after it.
+        let scope_mark = self.bindings.mark();
 
         for stmt in stmts {
             match stmt {
@@ -996,35 +1123,63 @@ impl GraphExtractor {
                     });
 
                     // Handler body
+                    let mark = self.bindings.mark();
+                    self.bindings.bind(&ec.error_param);
+                    let outer = std::mem::replace(&mut self.inside_handler, true);
                     self.extract_error_stmts_inner(
                         graph,
                         &ec.handler_body,
                         Some(&ceiling_id),
                         current_func,
-                        func_names,
+                        scope,
                     );
+                    self.inside_handler = outer;
+                    self.bindings.release(mark);
 
                     active_ceiling = Some(ceiling_id);
                 }
 
                 Statement::FuncDef(fd) => {
-                    let span = &fd.span;
-                    let fn_id =
-                        Graph::make_id(&self.file, span.line, span.column, &NodeKind::Function);
-                    graph.add_node(GraphNode {
-                        id: fn_id.clone(),
-                        kind: NodeKind::Function,
-                        label: fd.name.clone(),
-                        location: Location {
-                            file: self.file.clone(),
-                            line: span.line,
-                            column: span.column,
-                        },
-                        metadata: HashMap::new(),
-                    });
+                    let fn_id = Graph::make_id(
+                        &self.file,
+                        fd.span.line,
+                        fd.span.column,
+                        &NodeKind::Function,
+                    );
+                    // A nested function's name is bound in its own body (it
+                    // can call itself) and from its definition on. (A
+                    // top-level function is what a call by that name means.)
+                    if current_func.is_some() {
+                        self.bindings.bind_function(&fd.name, fn_id.clone());
+                    }
+                    self.extract_error_function(graph, &fd.params, &fd.body, &fn_id, scope);
+                }
 
-                    // Recurse into function body: ceiling resets to None, current_func becomes this function
-                    self.extract_error_stmts_inner(graph, &fd.body, None, Some(&fn_id), func_names);
+                // A field default runs when the type is instantiated, and a
+                // throw in it is not caught by a ceiling around the
+                // instantiation; a method body is a function of its own,
+                // entered from wherever the method is called.
+                Statement::ClassLikeDef(cl) => {
+                    for field in &cl.fields {
+                        if let Some(default) = &field.default_value {
+                            self.extract_error_expr(graph, default, None, None, scope);
+                        }
+                        if let Some(method) = &field.method_def {
+                            let method_id = Graph::make_id(
+                                &self.file,
+                                method.span.line,
+                                method.span.column,
+                                &NodeKind::Function,
+                            );
+                            self.extract_error_function(
+                                graph,
+                                &method.params,
+                                &method.body,
+                                &method_id,
+                                scope,
+                            );
+                        }
+                    }
                 }
 
                 Statement::Expr(expr) => {
@@ -1033,7 +1188,7 @@ impl GraphExtractor {
                         expr,
                         active_ceiling.as_deref(),
                         current_func,
-                        func_names,
+                        scope,
                     );
                 }
 
@@ -1043,8 +1198,16 @@ impl GraphExtractor {
                         &uf.source,
                         active_ceiling.as_deref(),
                         current_func,
-                        func_names,
+                        scope,
                     );
+                    self.propagate_unmold_of(
+                        graph,
+                        &uf.source,
+                        active_ceiling.as_deref(),
+                        current_func,
+                        scope,
+                    );
+                    self.bindings.bind(&uf.target);
                 }
 
                 Statement::UnmoldBackward(ub) => {
@@ -1053,42 +1216,238 @@ impl GraphExtractor {
                         &ub.source,
                         active_ceiling.as_deref(),
                         current_func,
-                        func_names,
+                        scope,
                     );
+                    self.propagate_unmold_of(
+                        graph,
+                        &ub.source,
+                        active_ceiling.as_deref(),
+                        current_func,
+                        scope,
+                    );
+                    self.bindings.bind(&ub.target);
                 }
 
+                // The value is read before the name is bound.
                 Statement::Assignment(assign) => {
                     self.extract_error_expr(
                         graph,
                         &assign.value,
                         active_ceiling.as_deref(),
                         current_func,
-                        func_names,
+                        scope,
                     );
+                    self.bindings.bind(&assign.target);
                 }
 
-                _ => {}
+                Statement::EnumDef(_) | Statement::Import(_) | Statement::Export(_) => {}
             }
         }
+        self.bindings.release(scope_mark);
+    }
+
+    /// The body of a function or method, entered from wherever it is called
+    /// (its own ceiling, if it declares one, is found in the body). Parameter
+    /// defaults run inside it, when a call leaves the argument out.
+    fn extract_error_function(
+        &mut self,
+        graph: &mut Graph,
+        params: &[Param],
+        body: &[Statement],
+        fn_id: &str,
+        scope: &ErrorScope,
+    ) {
+        let mark = self.bindings.mark();
+        let outer = std::mem::replace(&mut self.inside_handler, false);
+        self.bindings.bind_params(params);
+        for param in params {
+            if let Some(default) = &param.default_value {
+                self.extract_error_expr(graph, default, None, Some(fn_id), scope);
+            }
+        }
+        self.extract_error_stmts_inner(graph, body, None, Some(fn_id), scope);
+        self.inside_handler = outer;
+        self.bindings.release(mark);
+    }
+
+    /// Creating a value of a mold of the program runs its `solidify`
+    /// method, and unmolding it runs its `unmold` method; either may throw.
+    /// The hooks of the mold named there are reached from that place.
+    fn propagate_mold_hook(
+        &self,
+        graph: &mut Graph,
+        mold: &str,
+        hook: &str,
+        current_ceiling: Option<&str>,
+        current_func: Option<&str>,
+        scope: &ErrorScope,
+    ) {
+        if self.inside_handler {
+            return;
+        }
+        if let Some(method_ids) = scope
+            .type_methods
+            .get(&(mold.to_string(), hook.to_string()))
+        {
+            for method_id in method_ids {
+                Self::add_error_propagation(graph, method_id, hook, current_ceiling, current_func);
+            }
+        }
+    }
+
+    /// Unmolding `source` runs the `unmold` method of its mold, when the
+    /// source names the mold (`Strict[n]() >=> v`); a value of a type that is
+    /// not known here is not taken to be covered.
+    fn propagate_unmold_of(
+        &self,
+        graph: &mut Graph,
+        source: &Expr,
+        current_ceiling: Option<&str>,
+        current_func: Option<&str>,
+        scope: &ErrorScope,
+    ) {
+        if let Expr::MoldInst(mold, _, _, _) = source {
+            self.propagate_mold_hook(graph, mold, "unmold", current_ceiling, current_func, scope);
+        }
+    }
+
+    /// The function a name calls at this point: a function defined in the
+    /// code around it, else a top-level function, unless the name is a
+    /// value the code binds itself.
+    fn resolve_function(&self, name: &str, scope: &ErrorScope) -> Option<String> {
+        match self.bindings.lookup(name) {
+            Some(walk::Binding::Function(id)) => Some(id.clone()),
+            Some(walk::Binding::Value) => None,
+            None => scope.functions.get(name).cloned(),
+        }
+    }
+
+    /// A call of the function `name`.
+    fn propagate_call(
+        &self,
+        graph: &mut Graph,
+        name: &str,
+        current_ceiling: Option<&str>,
+        current_func: Option<&str>,
+        scope: &ErrorScope,
+    ) {
+        if let Some(callee_id) = self.resolve_function(name, scope) {
+            Self::add_error_propagation(graph, &callee_id, name, current_ceiling, current_func);
+        }
+    }
+
+    /// A function named where the code around it hands it to something that
+    /// calls it while it runs (an argument of a built-in mold that calls
+    /// back, a stage of a pipeline): it runs inside whatever ceiling that
+    /// code sits under.
+    fn propagate_function_value(
+        &self,
+        graph: &mut Graph,
+        name: &str,
+        current_ceiling: Option<&str>,
+        current_func: Option<&str>,
+        scope: &ErrorScope,
+    ) {
+        if !self.inside_handler {
+            self.propagate_call(graph, name, current_ceiling, current_func, scope);
+        }
+    }
+
+    /// An argument of a call or mold. `calls_back` says the receiver calls
+    /// the function it is given while it runs (see [`CALLBACK_MOLDS`]): then
+    /// a function named there, or a lambda written there, runs inside the
+    /// ceiling of the code around it. Handed to anything else it may be kept
+    /// and called later, so it is not taken to be covered.
+    fn extract_error_arg(
+        &mut self,
+        graph: &mut Graph,
+        arg: &Expr,
+        calls_back: bool,
+        current_ceiling: Option<&str>,
+        current_func: Option<&str>,
+        scope: &ErrorScope,
+    ) {
+        match arg {
+            Expr::Ident(name, _) => {
+                if calls_back {
+                    self.propagate_function_value(
+                        graph,
+                        name,
+                        current_ceiling,
+                        current_func,
+                        scope,
+                    );
+                }
+            }
+            Expr::Lambda(params, body, _) => {
+                let mark = self.bindings.mark();
+                self.bindings.bind_params(params);
+                let ceiling = if calls_back && !self.inside_handler {
+                    current_ceiling
+                } else {
+                    None
+                };
+                self.extract_error_expr(graph, body, ceiling, current_func, scope);
+                self.bindings.release(mark);
+            }
+            other => self.extract_error_expr(graph, other, current_ceiling, current_func, scope),
+        }
+    }
+
+    /// Add the edge that lets a callee's throws be covered from a call site
+    /// (or from a place where the function is passed as a value): a ceiling
+    /// in scope covers the callee, otherwise the callee's throws propagate
+    /// to the enclosing function.
+    fn add_error_propagation(
+        graph: &mut Graph,
+        callee_id: &str,
+        name: &str,
+        current_ceiling: Option<&str>,
+        current_func: Option<&str>,
+    ) {
+        if let Some(ceiling_id) = current_ceiling {
+            graph.add_edge(GraphEdge {
+                source: ceiling_id.to_string(),
+                target: callee_id.to_string(),
+                kind: EdgeKind::Propagates,
+                label: format!("covers {}", name),
+                metadata: HashMap::new(),
+            });
+        } else if let Some(caller_id) = current_func {
+            graph.add_edge(GraphEdge {
+                source: caller_id.to_string(),
+                target: callee_id.to_string(),
+                kind: EdgeKind::Propagates,
+                label: format!("propagates from {}", name),
+                metadata: HashMap::new(),
+            });
+        }
+        // Top-level call without ceiling: callee's uncovered throws
+        // remain uncovered (no edge needed).
     }
 
     /// Extract error-related nodes and edges from an expression.
     ///
     /// `current_ceiling`: the active error ceiling ID (if any) covering this scope.
     /// `current_func`: the Function node ID of the enclosing function (if any).
-    /// `func_names`: set of all function names defined in the program (for Propagates edges).
+    /// `scope`: the functions and methods defined in the program (for Propagates edges).
     ///
     /// Propagates edge semantics:
     /// - `ErrorCeiling -> Function`: the ceiling covers the callee's throws (cross-function coverage)
     /// - `Function(caller) -> Function(callee)`: callee's throws propagate to caller
     /// (allows transitive coverage: if caller is covered by a ceiling, callee is too)
+    ///
+    /// A function named as a value (`Map[xs, risky]()`) is treated like a
+    /// call at that place: it runs inside whatever ceiling the code around it
+    /// sits under. A method call reaches every method of that name, since the
+    /// receiver's type is not known here.
     fn extract_error_expr(
         &mut self,
         graph: &mut Graph,
         expr: &Expr,
         current_ceiling: Option<&str>,
         current_func: Option<&str>,
-        func_names: &std::collections::HashSet<String>,
+        scope: &ErrorScope,
     ) {
         match expr {
             Expr::Throw(inner, span) => {
@@ -1130,7 +1489,7 @@ impl GraphExtractor {
                     });
                 }
                 // If no ceiling, it propagates to gorilla ceiling (uncovered)
-                self.extract_error_expr(graph, inner, current_ceiling, current_func, func_names);
+                self.extract_error_expr(graph, inner, current_ceiling, current_func, scope);
             }
 
             Expr::MethodCall(obj, method, args, span) if method == "throw" => {
@@ -1161,156 +1520,182 @@ impl GraphExtractor {
                         metadata: HashMap::new(),
                     });
                 }
-                self.extract_error_expr(graph, obj, current_ceiling, current_func, func_names);
+                self.extract_error_expr(graph, obj, current_ceiling, current_func, scope);
                 for arg in args {
-                    self.extract_error_expr(graph, arg, current_ceiling, current_func, func_names);
+                    self.extract_error_expr(graph, arg, current_ceiling, current_func, scope);
                 }
             }
 
             Expr::FuncCall(callee, args, _) => {
                 // Generate Propagates edges for cross-function error propagation.
-                if let Expr::Ident(name, _) = callee.as_ref()
-                    && func_names.contains(name)
-                {
-                    let callee_fn_id = graph
-                        .nodes
-                        .iter()
-                        .find(|n| n.kind == NodeKind::Function && n.label == *name)
-                        .map(|n| n.id.clone());
+                if let Expr::Ident(name, _) = callee.as_ref() {
+                    self.propagate_call(graph, name, current_ceiling, current_func, scope);
+                } else {
+                    self.extract_error_expr(graph, callee, current_ceiling, current_func, scope);
+                }
+                for arg in args {
+                    self.extract_error_arg(graph, arg, false, current_ceiling, current_func, scope);
+                }
+            }
 
-                    if let Some(callee_id) = callee_fn_id {
-                        if let Some(ceiling_id) = current_ceiling {
-                            // Call site is under a ceiling: ceiling covers callee's throws
-                            graph.add_edge(GraphEdge {
-                                source: ceiling_id.to_string(),
-                                target: callee_id,
-                                kind: EdgeKind::Propagates,
-                                label: format!("covers {}", name),
-                                metadata: HashMap::new(),
-                            });
-                        } else if let Some(caller_id) = current_func {
-                            // Call site is inside a function but without ceiling:
-                            // callee's throws propagate to caller
-                            graph.add_edge(GraphEdge {
-                                source: caller_id.to_string(),
-                                target: callee_id,
-                                kind: EdgeKind::Propagates,
-                                label: format!("propagates from {}", name),
-                                metadata: HashMap::new(),
-                            });
+            // A function named as a stage of a pipeline is called with the
+            // value that reaches it; the first item is the value it starts from.
+            Expr::Pipeline(items, _) => {
+                for (i, item) in items.iter().enumerate() {
+                    match item {
+                        Expr::Ident(name, _) if i > 0 => self.propagate_function_value(
+                            graph,
+                            name,
+                            current_ceiling,
+                            current_func,
+                            scope,
+                        ),
+                        other => {
+                            self.extract_error_expr(
+                                graph,
+                                other,
+                                current_ceiling,
+                                current_func,
+                                scope,
+                            );
                         }
-                        // Top-level call without ceiling: callee's uncovered throws
-                        // remain uncovered (no edge needed).
                     }
                 }
+            }
 
-                self.extract_error_expr(graph, callee, current_ceiling, current_func, func_names);
+            // Unmolding runs the `unmold` method of the value's mold.
+            Expr::Unmold(inner, _) => {
+                self.propagate_unmold_of(graph, inner, current_ceiling, current_func, scope);
+                self.extract_error_expr(graph, inner, current_ceiling, current_func, scope);
+            }
+
+            // A method is reached by its name, the receiver's type being
+            // unknown here. A name that a built-in type has too may be a
+            // call of that built-in method instead, so it is not taken to
+            // reach a method of the program.
+            Expr::MethodCall(obj, method, args, _) => {
+                if !self.inside_handler
+                    && !crate::types::is_builtin_method_name(method)
+                    && let Some(method_ids) = scope.methods.get(method)
+                {
+                    for method_id in method_ids {
+                        Self::add_error_propagation(
+                            graph,
+                            method_id,
+                            method,
+                            current_ceiling,
+                            current_func,
+                        );
+                    }
+                }
+                self.extract_error_expr(graph, obj, current_ceiling, current_func, scope);
                 for arg in args {
-                    self.extract_error_expr(graph, arg, current_ceiling, current_func, func_names);
+                    self.extract_error_arg(graph, arg, false, current_ceiling, current_func, scope);
                 }
             }
 
-            Expr::MethodCall(obj, _, args, _) => {
-                self.extract_error_expr(graph, obj, current_ceiling, current_func, func_names);
-                for arg in args {
-                    self.extract_error_expr(graph, arg, current_ceiling, current_func, func_names);
-                }
-            }
-
-            Expr::BinaryOp(left, _, right, _) => {
-                self.extract_error_expr(graph, left, current_ceiling, current_func, func_names);
-                self.extract_error_expr(graph, right, current_ceiling, current_func, func_names);
-            }
-
-            Expr::UnaryOp(_, inner, _)
-            | Expr::FieldAccess(inner, _, _)
-            | Expr::Unmold(inner, _) => {
-                self.extract_error_expr(graph, inner, current_ceiling, current_func, func_names);
-            }
-
-            Expr::ListLit(items, _) | Expr::Pipeline(items, _) => {
-                for item in items {
-                    self.extract_error_expr(graph, item, current_ceiling, current_func, func_names);
-                }
-            }
-
-            Expr::BuchiPack(fields, _) | Expr::TypeInst(_, fields, _) => {
-                for field in fields {
-                    self.extract_error_expr(
+            Expr::MoldInst(mold, type_args, fields, _) => {
+                self.propagate_mold_hook(
+                    graph,
+                    mold,
+                    "solidify",
+                    current_ceiling,
+                    current_func,
+                    scope,
+                );
+                let calls_back = CALLBACK_MOLDS.contains(&mold.as_str());
+                for arg in type_args {
+                    self.extract_error_arg(
                         graph,
-                        &field.value,
+                        arg,
+                        calls_back,
                         current_ceiling,
                         current_func,
-                        func_names,
+                        scope,
+                    );
+                }
+                for field in fields {
+                    self.extract_error_arg(
+                        graph,
+                        &field.value,
+                        calls_back,
+                        current_ceiling,
+                        current_func,
+                        scope,
                     );
                 }
             }
 
-            Expr::MoldInst(name, type_args, fields, _) => {
-                for (idx, arg) in type_args.iter().enumerate() {
-                    if let Expr::Lambda(_, body, _) = arg
-                        && (name == "AsyncTask" || (name == "ParMap" && idx == 1))
-                    {
-                        self.extract_error_expr(
-                            graph,
-                            body,
-                            current_ceiling,
-                            current_func,
-                            func_names,
-                        );
-                    } else {
-                        self.extract_error_expr(
-                            graph,
-                            arg,
-                            current_ceiling,
-                            current_func,
-                            func_names,
-                        );
-                    }
-                }
-                for field in fields {
-                    self.extract_error_expr(
-                        graph,
-                        &field.value,
-                        current_ceiling,
-                        current_func,
-                        func_names,
-                    );
-                }
+            // A lambda that is passed to a call runs while the call runs (see
+            // `extract_error_arg`). One that is kept or returned may run
+            // anywhere, so it is not covered by the code around it.
+            Expr::Lambda(params, body, _) => {
+                let mark = self.bindings.mark();
+                self.bindings.bind_params(params);
+                self.extract_error_expr(graph, body, None, current_func, scope);
+                self.bindings.release(mark);
             }
 
-            Expr::Lambda(_, body, _) => {
-                self.extract_error_expr(graph, body, None, current_func, func_names);
+            // A block or arm body is a list of statements: a ceiling declared
+            // inside it covers the rest of that list only.
+            Expr::Block(stmts, _) => {
+                self.extract_error_stmts_inner(graph, stmts, current_ceiling, current_func, scope);
             }
 
             Expr::CondBranch(arms, _) => {
                 for arm in arms {
                     if let Some(cond) = &arm.condition {
-                        self.extract_error_expr(
-                            graph,
-                            cond,
-                            current_ceiling,
-                            current_func,
-                            func_names,
-                        );
+                        self.extract_error_expr(graph, cond, current_ceiling, current_func, scope);
                     }
                     self.extract_error_stmts_inner(
                         graph,
                         &arm.body,
                         current_ceiling,
                         current_func,
-                        func_names,
+                        scope,
                     );
                 }
             }
 
-            _ => {}
+            // Everything else only passes control to its operands, fields
+            // and interpolations.
+            Expr::IntLit(..)
+            | Expr::FloatLit(..)
+            | Expr::StringLit(..)
+            | Expr::TemplateLit(..)
+            | Expr::BoolLit(..)
+            | Expr::Gorilla(..)
+            | Expr::Ident(..)
+            | Expr::Placeholder(..)
+            | Expr::Hole(..)
+            | Expr::BuchiPack(..)
+            | Expr::ListLit(..)
+            | Expr::BinaryOp(..)
+            | Expr::UnaryOp(..)
+            | Expr::FieldAccess(..)
+            | Expr::TypeInst(..)
+            | Expr::EnumVariant(..)
+            | Expr::TypeLiteral(..) => {
+                walk::for_each_child_of_expr(expr, &mut |child| {
+                    if let Node::Expr(inner) = child {
+                        self.extract_error_expr(graph, inner, current_ceiling, current_func, scope);
+                    }
+                });
+            }
         }
     }
 
     // ── Call Graph ──────────────────────────────────────
 
     /// Extract a call graph from a program.
+    ///
+    /// A call or a reference to a function counts wherever it is written:
+    /// operands, arguments, pack and type-instance fields, template
+    /// interpolations, arm bodies, method bodies and the bodies of functions
+    /// nested in other functions. Code that is not inside a top-level
+    /// function (including type definitions and their methods) belongs to
+    /// the entrypoint; a nested function's body belongs to the function it
+    /// is written in.
     pub fn extract_call(&mut self, program: &Program) -> Graph {
         let mut graph = Graph::new(GraphView::Call);
         graph.source_files.push(self.file.clone());
@@ -1344,7 +1729,7 @@ impl GraphExtractor {
             .collect();
 
         // First pass: collect all function definitions
-        let mut func_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut func_ids: HashMap<String, String> = HashMap::new();
         for stmt in &program.statements {
             if let Statement::FuncDef(fd) = stmt {
                 let span = &fd.span;
@@ -1360,7 +1745,7 @@ impl GraphExtractor {
                     },
                     metadata: HashMap::new(),
                 });
-                func_names.insert(fd.name.clone());
+                func_ids.entry(fd.name.clone()).or_insert(fn_id.clone());
 
                 // If this function is exported, add a call edge from entrypoint
                 if exported_symbols.contains(&fd.name) {
@@ -1382,128 +1767,169 @@ impl GraphExtractor {
                     let span = &fd.span;
                     let caller_id =
                         Graph::make_id(&self.file, span.line, span.column, &NodeKind::Function);
-                    let body_len = fd.body.len();
-                    for (i, body_stmt) in fd.body.iter().enumerate() {
-                        let is_last = i == body_len - 1;
-                        self.extract_calls_stmt(
-                            graph.clone(),
-                            &mut graph,
-                            &caller_id,
-                            body_stmt,
-                            &func_names,
-                            is_last,
-                        );
-                    }
+                    self.bindings = walk::Bindings::default();
+                    self.extract_calls_func(&mut graph, &func_ids, &caller_id, fd);
                 }
-
-                Statement::Expr(expr) => {
-                    self.extract_calls_expr(&graph.clone(), &mut graph, &entry_id, expr, false);
-                    // Also track function references in top-level expressions
-                    // (e.g., passing a function as an argument to another function)
-                    self.extract_func_ref_from_expr(
-                        &graph.clone(),
-                        &mut graph,
-                        &entry_id,
-                        expr,
-                        &func_names,
-                    );
+                other => {
+                    self.bindings = walk::Bindings::default();
+                    self.extract_calls_stmt(&mut graph, &func_ids, &entry_id, other, false);
                 }
-
-                Statement::Assignment(assign) => {
-                    self.extract_calls_expr(
-                        &graph.clone(),
-                        &mut graph,
-                        &entry_id,
-                        &assign.value,
-                        false,
-                    );
-                    // If the RHS is a function name reference (variable assigned to a function),
-                    // treat it as a usage of that function from the entrypoint.
-                    self.extract_func_ref_from_expr(
-                        &graph.clone(),
-                        &mut graph,
-                        &entry_id,
-                        &assign.value,
-                        &func_names,
-                    );
-                }
-
-                Statement::UnmoldForward(uf) => {
-                    self.extract_calls_expr(
-                        &graph.clone(),
-                        &mut graph,
-                        &entry_id,
-                        &uf.source,
-                        false,
-                    );
-                }
-
-                _ => {}
             }
         }
 
         graph
     }
 
+    /// Calls made by `fd`'s parameter defaults and body, attributed to
+    /// `caller_id`. The last body statement is in tail position.
+    fn extract_calls_func(
+        &mut self,
+        graph: &mut Graph,
+        func_ids: &HashMap<String, String>,
+        caller_id: &str,
+        fd: &FuncDef,
+    ) {
+        let mark = self.bindings.mark();
+        self.bindings.bind_params(&fd.params);
+        self.extract_calls_defaults(graph, func_ids, caller_id, &fd.params);
+        let outer = std::mem::replace(&mut self.inside_function, true);
+        let body_len = fd.body.len();
+        for (i, body_stmt) in fd.body.iter().enumerate() {
+            let is_last = i + 1 == body_len;
+            self.extract_calls_stmt(graph, func_ids, caller_id, body_stmt, is_last);
+        }
+        self.inside_function = outer;
+        self.bindings.release(mark);
+    }
+
+    /// What the parameter defaults of a function refer to.
+    fn extract_calls_defaults(
+        &mut self,
+        graph: &mut Graph,
+        func_ids: &HashMap<String, String>,
+        caller_id: &str,
+        params: &[Param],
+    ) {
+        let outer = std::mem::replace(&mut self.inside_default, true);
+        for param in params {
+            if let Some(default) = &param.default_value {
+                self.extract_calls_expr(graph, func_ids, caller_id, default, false);
+            }
+        }
+        self.inside_default = outer;
+    }
+
     fn extract_calls_stmt(
         &mut self,
-        graph_snapshot: Graph,
         graph: &mut Graph,
+        func_ids: &HashMap<String, String>,
         caller_id: &str,
         stmt: &Statement,
-        func_names: &std::collections::HashSet<String>,
         is_tail: bool,
     ) {
         match stmt {
             Statement::Expr(expr) => {
-                self.extract_calls_expr(&graph_snapshot, graph, caller_id, expr, is_tail);
-                // Track function references in expression statements within function bodies
-                self.extract_func_ref_from_expr(
-                    &graph_snapshot,
-                    graph,
-                    caller_id,
-                    expr,
-                    func_names,
-                );
+                self.extract_calls_expr(graph, func_ids, caller_id, expr, is_tail);
             }
+            // Bindings are never in tail position (they bind a value, not
+            // return it). The value is read before the name is bound.
             Statement::Assignment(assign) => {
-                // Assignments are never in tail position (they bind a value, not return it)
-                self.extract_calls_expr(&graph_snapshot, graph, caller_id, &assign.value, false);
-                // Track function references assigned to variables within function bodies
-                self.extract_func_ref_from_expr(
-                    &graph_snapshot,
-                    graph,
-                    caller_id,
-                    &assign.value,
-                    func_names,
-                );
+                self.extract_calls_expr(graph, func_ids, caller_id, &assign.value, false);
+                self.bindings.bind(&assign.target);
             }
             Statement::UnmoldForward(uf) => {
-                self.extract_calls_expr(&graph_snapshot, graph, caller_id, &uf.source, false);
+                self.extract_calls_expr(graph, func_ids, caller_id, &uf.source, false);
+                self.bindings.bind(&uf.target);
             }
             Statement::UnmoldBackward(ub) => {
-                self.extract_calls_expr(&graph_snapshot, graph, caller_id, &ub.source, false);
+                self.extract_calls_expr(graph, func_ids, caller_id, &ub.source, false);
+                self.bindings.bind(&ub.target);
             }
             Statement::ErrorCeiling(ec) => {
+                let mark = self.bindings.mark();
+                self.bindings.bind(&ec.error_param);
                 for body_stmt in &ec.handler_body {
-                    self.extract_calls_stmt(
-                        graph_snapshot.clone(),
-                        graph,
-                        caller_id,
-                        body_stmt,
-                        func_names,
-                        false,
-                    );
+                    self.extract_calls_stmt(graph, func_ids, caller_id, body_stmt, false);
                 }
+                self.bindings.release(mark);
             }
-            _ => {}
+            // A nested function is not a node of its own; whatever it calls
+            // is reachable through the function it is written in. Its name is
+            // bound in its own body (it can call itself) and in what follows
+            // its definition.
+            Statement::FuncDef(fd) => {
+                let outer = std::mem::replace(&mut self.inside_nested_function, true);
+                self.bindings.bind(&fd.name);
+                let mark = self.bindings.mark();
+                self.bindings.bind_params(&fd.params);
+                self.extract_calls_defaults(graph, func_ids, caller_id, &fd.params);
+                for body_stmt in &fd.body {
+                    self.extract_calls_stmt(graph, func_ids, caller_id, body_stmt, false);
+                }
+                self.bindings.release(mark);
+                self.inside_nested_function = outer;
+            }
+            // The methods of a type defined inside a function run only when
+            // they are called: like a nested function, they make what they
+            // call reachable, not called.
+            Statement::ClassLikeDef(cl) => {
+                let in_function = self.inside_nested_function || self.inside_function;
+                let outer = std::mem::replace(&mut self.inside_nested_function, in_function);
+                for field in &cl.fields {
+                    if let Some(default) = &field.default_value {
+                        self.extract_calls_expr(graph, func_ids, caller_id, default, false);
+                    }
+                    if let Some(method) = &field.method_def {
+                        let mark = self.bindings.mark();
+                        self.bindings.bind_params(&method.params);
+                        self.extract_calls_defaults(graph, func_ids, caller_id, &method.params);
+                        for body_stmt in &method.body {
+                            self.extract_calls_stmt(graph, func_ids, caller_id, body_stmt, false);
+                        }
+                        self.bindings.release(mark);
+                    }
+                }
+                self.inside_nested_function = outer;
+            }
+            Statement::EnumDef(_) | Statement::Import(_) | Statement::Export(_) => {}
+        }
+    }
+
+    fn add_call_edge(
+        &self,
+        graph: &mut Graph,
+        func_ids: &HashMap<String, String>,
+        caller_id: &str,
+        name: &str,
+        kind: EdgeKind,
+        label: String,
+    ) {
+        if self.bindings.is_bound(name) {
+            return;
+        }
+        // A parameter default is evaluated only when the argument is left
+        // out: it does not make a call the function itself makes.
+        let (kind, label) =
+            if self.inside_default && matches!(kind, EdgeKind::Calls | EdgeKind::TailCalls) {
+                (EdgeKind::References, format!("references {}", name))
+            } else {
+                (kind, label)
+            };
+        if let Some(callee_id) = func_ids.get(name) {
+            graph.add_edge(GraphEdge {
+                source: caller_id.to_string(),
+                target: callee_id.clone(),
+                kind,
+                label,
+                metadata: HashMap::new(),
+            });
         }
     }
 
     fn extract_calls_expr(
         &mut self,
-        graph_snapshot: &Graph,
         graph: &mut Graph,
+        func_ids: &HashMap<String, String>,
         caller_id: &str,
         expr: &Expr,
         is_tail: bool,
@@ -1511,44 +1937,52 @@ impl GraphExtractor {
         match expr {
             Expr::FuncCall(callee, args, _) => {
                 if let Expr::Ident(name, _) = callee.as_ref() {
-                    // Find the function node by label
-                    let callee_id = graph_snapshot
-                        .nodes
-                        .iter()
-                        .find(|n| n.label == *name && matches!(n.kind, NodeKind::Function))
-                        .map(|n| n.id.clone());
-
-                    if let Some(cid) = callee_id {
-                        let edge_kind = if is_tail {
-                            EdgeKind::TailCalls
-                        } else {
-                            EdgeKind::Calls
-                        };
-                        let label_prefix = if is_tail { "tail calls" } else { "calls" };
-                        graph.add_edge(GraphEdge {
-                            source: caller_id.to_string(),
-                            target: cid,
-                            kind: edge_kind,
-                            label: format!("{} {}", label_prefix, name),
-                            metadata: HashMap::new(),
-                        });
-                    }
+                    let (edge_kind, label_prefix) = if self.inside_nested_function {
+                        (EdgeKind::References, "references")
+                    } else if is_tail {
+                        (EdgeKind::TailCalls, "tail calls")
+                    } else {
+                        (EdgeKind::Calls, "calls")
+                    };
+                    self.add_call_edge(
+                        graph,
+                        func_ids,
+                        caller_id,
+                        name,
+                        edge_kind,
+                        format!("{} {}", label_prefix, name),
+                    );
+                } else {
+                    self.extract_calls_expr(graph, func_ids, caller_id, callee, false);
                 }
 
                 // Recurse into arguments
                 for arg in args {
-                    self.extract_calls_expr(graph_snapshot, graph, caller_id, arg, false);
+                    self.extract_calls_expr(graph, func_ids, caller_id, arg, false);
                 }
             }
 
-            Expr::MethodCall(obj, _, args, _) => {
-                self.extract_calls_expr(graph_snapshot, graph, caller_id, obj, false);
-                for arg in args {
-                    self.extract_calls_expr(graph_snapshot, graph, caller_id, arg, false);
-                }
+            // A function named as a value (assigned, passed as an argument)
+            // may be called while the function runs, like a lambda that
+            // calls it: the recursion checks count it as a call that is not
+            // in tail position.
+            Expr::Ident(name, _) => {
+                let (edge_kind, label_prefix) = if self.inside_nested_function {
+                    (EdgeKind::References, "references")
+                } else {
+                    (EdgeKind::Calls, "uses")
+                };
+                self.add_call_edge(
+                    graph,
+                    func_ids,
+                    caller_id,
+                    name,
+                    edge_kind,
+                    format!("{} {}", label_prefix, name),
+                );
             }
 
-            Expr::Lambda(_, body, span) => {
+            Expr::Lambda(params, body, span) => {
                 self.lambda_counter += 1;
                 let lambda_id = format!(
                     "{}:{}:{}:AnonymousFn:{}",
@@ -1574,175 +2008,100 @@ impl GraphExtractor {
                     metadata: HashMap::new(),
                 });
 
+                let mark = self.bindings.mark();
+                self.bindings.bind_params(params);
+                for param in params {
+                    if let Some(default) = &param.default_value {
+                        self.extract_calls_expr(graph, func_ids, &lambda_id, default, false);
+                    }
+                }
                 // Recurse into lambda body
-                self.extract_calls_expr(graph_snapshot, graph, &lambda_id, body, false);
+                self.extract_calls_expr(graph, func_ids, &lambda_id, body, false);
+                self.bindings.release(mark);
             }
 
-            Expr::BinaryOp(left, _, right, _) => {
-                self.extract_calls_expr(graph_snapshot, graph, caller_id, left, false);
-                self.extract_calls_expr(graph_snapshot, graph, caller_id, right, false);
+            Expr::Block(stmts, _) => {
+                let mark = self.bindings.mark();
+                for stmt in stmts {
+                    self.extract_calls_stmt(graph, func_ids, caller_id, stmt, false);
+                }
+                self.bindings.release(mark);
             }
 
-            Expr::CondBranch(arms, _) => {
-                for arm in arms {
-                    if let Some(cond) = &arm.condition {
-                        self.extract_calls_expr(graph_snapshot, graph, caller_id, cond, false);
-                    }
-                    // Propagate tail position into each arm body (last expr only)
-                    for (si, stmt) in arm.body.iter().enumerate() {
-                        if let Statement::Expr(e) = stmt {
-                            let tail = is_tail && si == arm.body.len() - 1;
-                            self.extract_calls_expr(graph_snapshot, graph, caller_id, e, tail);
-                        }
-                    }
-                }
-            }
-
-            Expr::MoldInst(_, type_args, fields, _) => {
-                for arg in type_args {
-                    self.extract_calls_expr(graph_snapshot, graph, caller_id, arg, false);
-                }
-                for field in fields {
-                    self.extract_calls_expr(graph_snapshot, graph, caller_id, &field.value, false);
-                }
-            }
-
-            Expr::Pipeline(stages, _) => {
-                for stage in stages {
-                    self.extract_calls_expr(graph_snapshot, graph, caller_id, stage, false);
-                    // If a pipeline stage is just a function name (Ident), it's being used
-                    // as a function reference: `data => myFunc => result`
-                    if let Expr::Ident(name, _) = stage {
-                        let callee_id = graph_snapshot
-                            .nodes
-                            .iter()
-                            .find(|n| n.label == *name && matches!(n.kind, NodeKind::Function))
-                            .map(|n| n.id.clone());
-                        if let Some(cid) = callee_id {
-                            graph.add_edge(GraphEdge {
-                                source: caller_id.to_string(),
-                                target: cid,
-                                kind: EdgeKind::Calls,
-                                label: format!("pipes to {}", name),
-                                metadata: HashMap::new(),
-                            });
-                        }
-                    }
-                }
-            }
-
-            Expr::ListLit(items, _) => {
-                for item in items {
-                    self.extract_calls_expr(graph_snapshot, graph, caller_id, item, false);
-                }
-            }
-
-            _ => {}
-        }
-    }
-
-    /// Detect function name references in expressions (e.g., assigned to a variable,
-    /// passed as an argument). This helps avoid false positive dead-code warnings
-    /// for functions that are referenced but not directly called.
-    fn extract_func_ref_from_expr(
-        &self,
-        graph_snapshot: &Graph,
-        graph: &mut Graph,
-        caller_id: &str,
-        expr: &Expr,
-        func_names: &std::collections::HashSet<String>,
-    ) {
-        match expr {
-            Expr::Ident(name, _) if func_names.contains(name) => {
-                let callee_id = graph_snapshot
-                    .nodes
-                    .iter()
-                    .find(|n| n.label == *name && matches!(n.kind, NodeKind::Function))
-                    .map(|n| n.id.clone());
-                if let Some(cid) = callee_id {
-                    graph.add_edge(GraphEdge {
-                        source: caller_id.to_string(),
-                        target: cid,
-                        kind: EdgeKind::Calls,
-                        label: format!("references {}", name),
-                        metadata: HashMap::new(),
-                    });
-                }
-            }
-            Expr::Pipeline(stages, _) => {
-                for stage in stages {
-                    self.extract_func_ref_from_expr(
-                        graph_snapshot,
-                        graph,
-                        caller_id,
-                        stage,
-                        func_names,
-                    );
-                }
-            }
-            Expr::FuncCall(callee, args, _) => {
-                self.extract_func_ref_from_expr(
-                    graph_snapshot,
-                    graph,
-                    caller_id,
-                    callee,
-                    func_names,
-                );
-                for arg in args {
-                    self.extract_func_ref_from_expr(
-                        graph_snapshot,
-                        graph,
-                        caller_id,
-                        arg,
-                        func_names,
-                    );
-                }
-            }
-            Expr::CondBranch(arms, _) => {
-                for arm in arms {
-                    if let Some(cond) = &arm.condition {
-                        self.extract_func_ref_from_expr(
-                            graph_snapshot,
-                            graph,
-                            caller_id,
-                            cond,
-                            func_names,
-                        );
-                    }
-                    for stmt in &arm.body {
-                        if let Statement::Expr(e) = stmt {
-                            self.extract_func_ref_from_expr(
-                                graph_snapshot,
+            // A function named as a stage of a pipeline (`data => double =>
+            // result`) is called with the value that reaches it; the first
+            // item is the value the chain starts from.
+            Expr::Pipeline(items, _) => {
+                for (i, item) in items.iter().enumerate() {
+                    match item {
+                        Expr::Ident(name, _) if i > 0 => {
+                            let (edge_kind, label_prefix) = if self.inside_nested_function {
+                                (EdgeKind::References, "references")
+                            } else {
+                                (EdgeKind::Calls, "pipes to")
+                            };
+                            self.add_call_edge(
                                 graph,
+                                func_ids,
                                 caller_id,
-                                e,
-                                func_names,
+                                name,
+                                edge_kind,
+                                format!("{} {}", label_prefix, name),
                             );
                         }
+                        other => self.extract_calls_expr(graph, func_ids, caller_id, other, false),
                     }
                 }
             }
-            Expr::MoldInst(_, type_args, fields, _) => {
-                for arg in type_args {
-                    self.extract_func_ref_from_expr(
-                        graph_snapshot,
-                        graph,
-                        caller_id,
-                        arg,
-                        func_names,
-                    );
-                }
-                for field in fields {
-                    self.extract_func_ref_from_expr(
-                        graph_snapshot,
-                        graph,
-                        caller_id,
-                        &field.value,
-                        func_names,
-                    );
+
+            Expr::CondBranch(arms, _) => {
+                for arm in arms {
+                    if let Some(cond) = &arm.condition {
+                        self.extract_calls_expr(graph, func_ids, caller_id, cond, false);
+                    }
+                    // Propagate tail position into each arm body (last statement only).
+                    // What an arm binds is not visible after it.
+                    let mark = self.bindings.mark();
+                    let body_len = arm.body.len();
+                    for (si, stmt) in arm.body.iter().enumerate() {
+                        let tail = is_tail && si + 1 == body_len;
+                        self.extract_calls_stmt(graph, func_ids, caller_id, stmt, tail);
+                    }
+                    self.bindings.release(mark);
                 }
             }
-            _ => {}
+
+            // Every other form only passes control to its operands, fields
+            // and interpolations, none of which is in tail position.
+            Expr::IntLit(..)
+            | Expr::FloatLit(..)
+            | Expr::StringLit(..)
+            | Expr::TemplateLit(..)
+            | Expr::BoolLit(..)
+            | Expr::Gorilla(..)
+            | Expr::Placeholder(..)
+            | Expr::Hole(..)
+            | Expr::BuchiPack(..)
+            | Expr::ListLit(..)
+            | Expr::BinaryOp(..)
+            | Expr::UnaryOp(..)
+            | Expr::MethodCall(..)
+            | Expr::FieldAccess(..)
+            | Expr::MoldInst(..)
+            | Expr::Unmold(..)
+            | Expr::TypeInst(..)
+            | Expr::EnumVariant(..)
+            | Expr::TypeLiteral(..)
+            | Expr::Throw(..) => {
+                walk::for_each_child_of_expr(expr, &mut |child| match child {
+                    Node::Expr(inner) => {
+                        self.extract_calls_expr(graph, func_ids, caller_id, inner, false);
+                    }
+                    Node::Stmt(stmt) => {
+                        self.extract_calls_stmt(graph, func_ids, caller_id, stmt, false);
+                    }
+                });
+            }
         }
     }
 
@@ -1750,13 +2109,13 @@ impl GraphExtractor {
 
     /// Extract a specific graph view from a program.
     pub fn extract(&mut self, program: &Program, view: GraphView) -> Graph {
-        match view {
+        walk::with_stack_for(program, || match view {
             GraphView::Dataflow => self.extract_dataflow(program),
             GraphView::Module => self.extract_module(program),
             GraphView::TypeHierarchy => self.extract_type_hierarchy(program),
             GraphView::Error => self.extract_error(program),
             GraphView::Call => self.extract_call(program),
-        }
+        })
     }
 }
 
@@ -1898,12 +2257,13 @@ mod tests {
                 .iter()
                 .any(|n| n.label == "double" && n.kind == NodeKind::Function)
         );
-        // double calls add
+        // double calls add (in tail position)
         assert!(
             graph
                 .edges
                 .iter()
-                .any(|e| e.kind == EdgeKind::Calls && e.label.contains("add"))
+                .any(|e| matches!(e.kind, EdgeKind::Calls | EdgeKind::TailCalls)
+                    && e.label.contains("add"))
         );
     }
 
@@ -2202,5 +2562,110 @@ outer input =
             graph.nodes.iter().any(|n| n.label == "><"),
             "Gorilla literal should produce a node labeled '><'"
         );
+    }
+
+    // ── Direction, call positions and forward references ──
+
+    #[test]
+    fn test_dataflow_edge_kinds_follow_the_written_arrow() {
+        let kinds = |source: &str| -> Vec<EdgeKind> {
+            let graph = parse_and_extract(source, GraphView::Dataflow);
+            graph
+                .edges
+                .iter()
+                .filter(|e| matches!(e.kind, EdgeKind::PipeForward | EdgeKind::PipeBackward))
+                .map(|e| e.kind.clone())
+                .collect()
+        };
+        assert_eq!(kinds("42 => answer"), vec![EdgeKind::PipeForward]);
+        assert_eq!(kinds("answer <= 42"), vec![EdgeKind::PipeBackward]);
+        // `a => f(_) => name`: two edges, both forward.
+        assert_eq!(
+            kinds("f x: Int =\n  x\n=> :Int\n1 => f(_) => name"),
+            vec![EdgeKind::PipeForward, EdgeKind::PipeForward]
+        );
+        // The `<=` chain of the same shape is backward all the way.
+        assert_eq!(
+            kinds("f x: Int =\n  x\n=> :Int\nname <= f(_) <= 1"),
+            vec![EdgeKind::PipeBackward, EdgeKind::PipeBackward]
+        );
+    }
+
+    #[test]
+    fn test_call_graph_sees_a_call_in_every_expression_position() {
+        let source = "inc x: Int =\n  x + 1\n=> :Int\n\
+                      a x: Int =\n  !inc(x)\n=> :Bool\n\
+                      b x: Int =\n  @(v <= inc(x))\n=> :Int\n\
+                      c x: Int =\n  `t=${inc(x)}`\n=> :Str\n\
+                      d x: Int =\n  @[inc(x)]\n=> :Int\n\
+                      e x: Int =\n  P(name <= inc(x))\n=> :Int\n\
+                      f x: Int =\n  | x > 0 |>\n    t <= inc(x)\n    t\n  | _ |> 0\n=> :Int\n";
+        let graph = parse_and_extract(source, GraphView::Call);
+        for caller in ["a", "b", "c", "d", "e", "f"] {
+            let caller_id = graph
+                .nodes
+                .iter()
+                .find(|n| n.label == caller && n.kind == NodeKind::Function)
+                .map(|n| n.id.clone())
+                .unwrap();
+            assert!(
+                graph.edges.iter().any(|edge| edge.source == caller_id
+                    && edge.label.contains("inc")
+                    && matches!(edge.kind, EdgeKind::Calls | EdgeKind::TailCalls)),
+                "{caller} should call inc: {:?}",
+                graph.edges
+            );
+        }
+    }
+
+    #[test]
+    fn test_call_graph_function_values_close_a_cycle() {
+        // `Map` calls `b`, which calls `a` back: a cycle, as it would be if
+        // `a` handed `Map` a lambda calling `b`.
+        let source = "a xs: @[Int] =\n  Map[xs, b]() >=> ys\n  ys\n=> :@[Int]\n\
+                      b x: Int =\n  a(@[x])\n=> :@[Int]\n";
+        let graph = parse_and_extract(source, GraphView::Call);
+        assert!(
+            graph
+                .edges
+                .iter()
+                .any(|e| e.kind == EdgeKind::Calls && e.label == "uses b")
+        );
+        match crate::graph::query::find_cycles(&graph) {
+            crate::graph::query::QueryResult::Cycles(cycles) => assert!(!cycles.is_empty()),
+            other => panic!("unexpected result {other}"),
+        }
+    }
+
+    #[test]
+    fn test_call_graph_nested_function_bodies_do_not_close_a_cycle() {
+        // What a nested function calls is reachable through `a`, but `a`
+        // does not call it unless it calls the nested function.
+        let source = "a n: Int =\n  later x: Int =\n    b(x)\n  => :Int\n  n\n=> :Int\n\
+                      b x: Int =\n  a(x) + 1\n=> :Int\n";
+        let graph = parse_and_extract(source, GraphView::Call);
+        assert!(
+            graph
+                .edges
+                .iter()
+                .any(|e| e.kind == EdgeKind::References && e.label.contains("b"))
+        );
+        match crate::graph::query::find_cycles(&graph) {
+            crate::graph::query::QueryResult::Cycles(cycles) => assert!(cycles.is_empty()),
+            other => panic!("unexpected result {other}"),
+        }
+    }
+
+    #[test]
+    fn test_error_view_covers_a_function_defined_after_its_caller() {
+        let source = "safe x: Int =\n  |== e: Error =\n    0\n  => :Int\n  risky(x)\n=> :Int\n\
+                      risky x: Int =\n  Error(type <= \"E\", message <= \"boom\").throw()\n=> :Int\n";
+        let graph = parse_and_extract(source, GraphView::Error);
+        match crate::graph::query::uncovered_throws(&graph) {
+            crate::graph::query::QueryResult::Nodes(nodes) => {
+                assert!(nodes.is_empty(), "{nodes:?}")
+            }
+            other => panic!("unexpected result {other}"),
+        }
     }
 }

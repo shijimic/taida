@@ -282,6 +282,12 @@ pub(crate) struct H2Stream {
     pub send_window: i64,
     /// Stream-level receive window (how much peer can send).
     pub recv_window: i64,
+    /// The header block that opens the request has been decoded. A later
+    /// HEADERS frame on the stream carries the request trailers.
+    pub headers_done: bool,
+    /// END_STREAM has been received: the request is complete and no more
+    /// DATA or HEADERS may arrive on the stream.
+    pub end_stream_received: bool,
 }
 
 impl H2Stream {
@@ -292,6 +298,8 @@ impl H2Stream {
             request_body: Vec::new(),
             send_window: initial_window_size as i64,
             recv_window: DEFAULT_INITIAL_WINDOW_SIZE as i64,
+            headers_done: false,
+            end_stream_received: false,
         }
     }
 }
@@ -318,6 +326,10 @@ pub(crate) struct HpackDecoder {
     dynamic_table: VecDeque<HpackEntry>,
     max_table_size: usize,
     current_table_size: usize,
+    /// The SETTINGS_HEADER_TABLE_SIZE this endpoint advertised. A dynamic
+    /// table size update above it is a decoding error (RFC 7541 §6.3);
+    /// accepting it let a peer grow the table without bound.
+    settings_limit: usize,
 }
 
 impl HpackDecoder {
@@ -326,6 +338,7 @@ impl HpackDecoder {
             dynamic_table: VecDeque::new(),
             max_table_size: max_size as usize,
             current_table_size: 0,
+            settings_limit: max_size as usize,
         }
     }
 
@@ -352,6 +365,12 @@ impl HpackDecoder {
                 // Dynamic table size update (Section 6.3)
                 let (new_size, consumed) = decode_integer(&data[pos..], 5)?;
                 pos += consumed;
+                if new_size > self.settings_limit {
+                    return Err(H2Error::Compression(format!(
+                        "HPACK: dynamic table size update {} exceeds the advertised limit {}",
+                        new_size, self.settings_limit
+                    )));
+                }
                 self.update_max_size(new_size);
             } else if byte & 0x10 != 0 {
                 // Literal header field never indexed (Section 6.2.3)
@@ -1089,6 +1108,10 @@ pub(crate) struct H2Connection {
     pub continuation_stream_id: u32,
     /// Flags from the original HEADERS frame that started a CONTINUATION sequence.
     pub continuation_flags: u8,
+    /// Requests that completed while a response was waiting for the peer to
+    /// open its flow-control window. They are dispatched in order once that
+    /// response is done.
+    pub pending_requests: VecDeque<CompletedRequest>,
 }
 
 /// HTTP/2 settings (RFC 9113 Section 6.5.1).
@@ -1133,6 +1156,7 @@ impl H2Connection {
             continuation_buf: Vec::new(),
             continuation_stream_id: 0,
             continuation_flags: 0,
+            pending_requests: VecDeque::new(),
         }
     }
 }
@@ -1563,8 +1587,12 @@ pub(crate) fn apply_peer_settings(
         match id {
             SETTINGS_HEADER_TABLE_SIZE => {
                 conn.peer_settings.header_table_size = value;
-                // Update encoder's dynamic table size
-                conn.encoder.update_max_size(value as usize);
+                // The encoder never refers back to its dynamic table (it only
+                // mirrors insertions), so keeping at most the default size is
+                // invisible to the peer. Following the peer's value (up to
+                // 2^32-1) let the table of one connection grow without bound.
+                conn.encoder
+                    .update_max_size((value as usize).min(DEFAULT_HEADER_TABLE_SIZE as usize));
             }
             SETTINGS_ENABLE_PUSH => {
                 if value > 1 {
@@ -1622,6 +1650,44 @@ pub(crate) fn apply_peer_settings(
 
 /// A completed HTTP/2 request: (stream_id, headers, body).
 pub(crate) type CompletedRequest = (u32, Vec<(String, String)>, Vec<u8>);
+
+/// Complete a request whose body is followed by a trailer section
+/// (RFC 9113 §8.1). The trailer HEADERS must end the stream and must not
+/// contain pseudo-header fields; otherwise the request is malformed and the
+/// stream is reset. The trailer fields themselves are not passed on (the
+/// HTTP/1.1 path drops chunked trailers the same way).
+fn finish_request_trailers(
+    conn: &mut H2Connection,
+    stream_id: u32,
+    trailers: &[(String, String)],
+    end_stream: bool,
+) -> Result<Option<CompletedRequest>, H2Error> {
+    if !end_stream {
+        return Err(H2Error::Stream(
+            stream_id,
+            ERROR_PROTOCOL_ERROR,
+            format!("trailer HEADERS without END_STREAM on stream {}", stream_id),
+        ));
+    }
+    if trailers.iter().any(|(name, _)| name.starts_with(':')) {
+        return Err(H2Error::Stream(
+            stream_id,
+            ERROR_PROTOCOL_ERROR,
+            format!("pseudo-header field in trailers on stream {}", stream_id),
+        ));
+    }
+    let stream = conn.streams.get_mut(&stream_id).ok_or_else(|| {
+        H2Error::Connection(
+            ERROR_INTERNAL_ERROR,
+            format!("stream {} not found for trailers", stream_id),
+        )
+    })?;
+    stream.end_stream_received = true;
+    stream.state = StreamState::HalfClosedRemote;
+    let headers = std::mem::take(&mut stream.request_headers);
+    let body = std::mem::take(&mut stream.request_body);
+    Ok(Some((stream_id, headers, body)))
+}
 
 /// Process one frame from the client and update connection/stream state.
 /// Returns a completed request (stream_id, headers, body) if one is ready.
@@ -1695,30 +1761,39 @@ pub(crate) fn process_frame(
                 ));
             }
 
-            // New stream — validate stream ID ordering
-            if stream_id <= conn.last_peer_stream_id {
-                return Err(H2Error::Connection(
-                    ERROR_PROTOCOL_ERROR,
-                    format!(
-                        "stream id {} <= last peer stream id {}",
-                        stream_id, conn.last_peer_stream_id
-                    ),
-                ));
-            }
-            conn.last_peer_stream_id = stream_id;
-
-            // Check max concurrent streams
-            let active_count = conn
+            // A HEADERS frame on a stream that is still receiving its body
+            // carries the request trailers (RFC 9113 §8.1).
+            let is_trailers = conn
                 .streams
-                .values()
-                .filter(|s| s.state != StreamState::Closed)
-                .count() as u32;
-            if active_count >= conn.local_settings.max_concurrent_streams {
-                return Err(H2Error::Stream(
-                    stream_id,
-                    ERROR_PROTOCOL_ERROR,
-                    "max concurrent streams exceeded".into(),
-                ));
+                .get(&stream_id)
+                .is_some_and(|s| s.headers_done && !s.end_stream_received);
+
+            if !is_trailers {
+                // New stream — validate stream ID ordering
+                if stream_id <= conn.last_peer_stream_id {
+                    return Err(H2Error::Connection(
+                        ERROR_PROTOCOL_ERROR,
+                        format!(
+                            "stream id {} <= last peer stream id {}",
+                            stream_id, conn.last_peer_stream_id
+                        ),
+                    ));
+                }
+                conn.last_peer_stream_id = stream_id;
+
+                // Check max concurrent streams
+                let active_count = conn
+                    .streams
+                    .values()
+                    .filter(|s| s.state != StreamState::Closed)
+                    .count() as u32;
+                if active_count >= conn.local_settings.max_concurrent_streams {
+                    return Err(H2Error::Stream(
+                        stream_id,
+                        ERROR_PROTOCOL_ERROR,
+                        "max concurrent streams exceeded".into(),
+                    ));
+                }
             }
 
             // Strip padding if PADDED flag is set
@@ -1771,8 +1846,10 @@ pub(crate) fn process_frame(
                 conn.continuation_flags = header.flags;
 
                 // Create the stream entry now so DATA-after-CONTINUATION works.
-                let stream = H2Stream::new(conn.peer_settings.initial_window_size);
-                conn.streams.insert(stream_id, stream);
+                if !is_trailers {
+                    let stream = H2Stream::new(conn.peer_settings.initial_window_size);
+                    conn.streams.insert(stream_id, stream);
+                }
                 return Ok(None);
             }
 
@@ -1787,11 +1864,17 @@ pub(crate) fn process_frame(
 
             let end_stream = header.flags & FLAG_END_STREAM != 0;
 
+            if is_trailers {
+                return finish_request_trailers(conn, stream_id, &headers, end_stream);
+            }
+
             let mut stream = H2Stream::new(conn.peer_settings.initial_window_size);
             stream.request_headers = headers;
+            stream.headers_done = true;
 
             if end_stream {
                 // Request is complete (no body)
+                stream.end_stream_received = true;
                 stream.state = StreamState::HalfClosedRemote;
                 let headers = std::mem::take(&mut stream.request_headers);
                 let body = std::mem::take(&mut stream.request_body);
@@ -1860,6 +1943,22 @@ pub(crate) fn process_frame(
                 ));
             }
 
+            // The frame counts against the connection window even when the
+            // stream then fails (RFC 9113 §6.9), so both ends keep the same
+            // view of that window.
+            conn.conn_recv_window -= data_len;
+
+            // DATA after END_STREAM (half-closed remote) is a stream error of
+            // type STREAM_CLOSED (RFC 9113 §6.1); accepting it would complete
+            // the same request a second time.
+            if stream.end_stream_received {
+                return Err(H2Error::Stream(
+                    stream_id,
+                    ERROR_STREAM_CLOSED,
+                    format!("DATA after END_STREAM on stream {}", stream_id),
+                ));
+            }
+
             // Stream-level check (RST_STREAM on violation)
             if data_len > stream.recv_window {
                 return Err(H2Error::Stream(
@@ -1872,7 +1971,6 @@ pub(crate) fn process_frame(
                 ));
             }
 
-            conn.conn_recv_window -= data_len;
             stream.recv_window -= data_len;
 
             // Bound eager body accumulation. The flow-control window is
@@ -1897,6 +1995,7 @@ pub(crate) fn process_frame(
 
             let end_stream = header.flags & FLAG_END_STREAM != 0;
             if end_stream {
+                stream.end_stream_received = true;
                 let headers = std::mem::take(&mut stream.request_headers);
                 let body = std::mem::take(&mut stream.request_body);
                 return Ok(Some((stream_id, headers, body)));
@@ -2003,10 +2102,10 @@ pub(crate) fn process_frame(
                     format!("RST_STREAM must be 4 bytes, got {}", header.length),
                 ));
             }
-            // Mark stream as closed
-            if let Some(stream) = conn.streams.get_mut(&header.stream_id) {
-                stream.state = StreamState::Closed;
-            }
+            // Drop the stream right away. Keeping reset streams around let a
+            // peer that opens and resets streams in a loop grow the table
+            // without bound, and every new HEADERS scanned all of it.
+            conn.streams.remove(&header.stream_id);
             Ok(None)
         }
 
@@ -2095,9 +2194,14 @@ pub(crate) fn process_frame(
                     format!("stream {} not found after CONTINUATION", stream_id),
                 )
             })?;
+            if stream.headers_done {
+                return finish_request_trailers(conn, stream_id, &headers, end_stream);
+            }
             stream.request_headers = headers;
+            stream.headers_done = true;
 
             if end_stream {
+                stream.end_stream_received = true;
                 stream.state = StreamState::HalfClosedRemote;
                 let headers = std::mem::take(&mut stream.request_headers);
                 let body = std::mem::take(&mut stream.request_body);
@@ -2551,6 +2655,141 @@ mod tests {
         assert_eq!(stream_id, 1);
         assert_eq!(decoded_headers, headers);
         assert!(body.is_empty());
+    }
+
+    #[test]
+    fn test_rst_stream_releases_the_stream() {
+        // A peer that opens and resets streams in a loop must not grow the
+        // stream table (each new HEADERS used to scan every reset stream).
+        let mut conn = H2Connection::new();
+        let mut encoder = HpackEncoder::new(4096);
+        let headers = vec![
+            (":method".to_string(), "GET".to_string()),
+            (":path".to_string(), "/".to_string()),
+            (":scheme".to_string(), "https".to_string()),
+            (":authority".to_string(), "localhost".to_string()),
+        ];
+        for i in 0..1000u32 {
+            let stream_id = 1 + 2 * i;
+            let encoded = encoder.encode(&headers);
+            let header = FrameHeader {
+                length: encoded.len() as u32,
+                frame_type: FRAME_HEADERS,
+                flags: FLAG_END_HEADERS,
+                stream_id,
+            };
+            assert!(
+                process_frame(&mut conn, &header, &encoded)
+                    .unwrap()
+                    .is_none()
+            );
+            let rst = FrameHeader {
+                length: 4,
+                frame_type: FRAME_RST_STREAM,
+                flags: 0,
+                stream_id,
+            };
+            assert!(
+                process_frame(&mut conn, &rst, &[0, 0, 0, 8])
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert!(conn.streams.is_empty());
+    }
+
+    #[test]
+    fn test_hpack_table_size_update_above_the_advertised_limit_is_rejected() {
+        let mut decoder = HpackDecoder::new(4096);
+        // Dynamic table size update to 4096 (within the limit) is accepted.
+        assert!(decoder.decode(&[0x3f, 0xe1, 0x1f]).unwrap().is_empty());
+        // 4097 exceeds the SETTINGS_HEADER_TABLE_SIZE we advertised.
+        assert!(matches!(
+            decoder.decode(&[0x3f, 0xe2, 0x1f]),
+            Err(H2Error::Compression(_))
+        ));
+    }
+
+    #[test]
+    fn test_encoder_table_stays_bounded_whatever_the_peer_allows() {
+        let mut conn = H2Connection::new();
+        apply_peer_settings(&mut conn, &[(SETTINGS_HEADER_TABLE_SIZE, u32::MAX)]).unwrap();
+        for i in 0..2000 {
+            conn.encoder
+                .encode(&[("x-request-path".to_string(), format!("/item/{}", i))]);
+        }
+        assert!(conn.encoder.current_table_size <= DEFAULT_HEADER_TABLE_SIZE as usize);
+    }
+
+    #[test]
+    fn test_request_trailers_complete_the_request() {
+        let mut conn = H2Connection::new();
+        let mut encoder = HpackEncoder::new(4096);
+        let headers = vec![
+            (":method".to_string(), "POST".to_string()),
+            (":path".to_string(), "/".to_string()),
+            (":scheme".to_string(), "https".to_string()),
+            (":authority".to_string(), "localhost".to_string()),
+        ];
+        let encoded = encoder.encode(&headers);
+        let open = FrameHeader {
+            length: encoded.len() as u32,
+            frame_type: FRAME_HEADERS,
+            flags: FLAG_END_HEADERS,
+            stream_id: 1,
+        };
+        assert!(process_frame(&mut conn, &open, &encoded).unwrap().is_none());
+        let data = FrameHeader {
+            length: 5,
+            frame_type: FRAME_DATA,
+            flags: 0,
+            stream_id: 1,
+        };
+        assert!(process_frame(&mut conn, &data, b"hello").unwrap().is_none());
+
+        // Trailers without END_STREAM are malformed: stream error.
+        let trailers = encoder.encode(&[("x-digest".to_string(), "abc".to_string())]);
+        let no_end = FrameHeader {
+            length: trailers.len() as u32,
+            frame_type: FRAME_HEADERS,
+            flags: FLAG_END_HEADERS,
+            stream_id: 1,
+        };
+        assert!(matches!(
+            process_frame(&mut conn, &no_end, &trailers),
+            Err(H2Error::Stream(1, ERROR_PROTOCOL_ERROR, _))
+        ));
+
+        // Same again on a fresh stream, now ending the stream.
+        let mut conn = H2Connection::new();
+        let mut encoder = HpackEncoder::new(4096);
+        let encoded = encoder.encode(&headers);
+        assert!(process_frame(&mut conn, &open, &encoded).unwrap().is_none());
+        assert!(process_frame(&mut conn, &data, b"hello").unwrap().is_none());
+        let trailers = encoder.encode(&[("x-digest".to_string(), "abc".to_string())]);
+        let end = FrameHeader {
+            length: trailers.len() as u32,
+            frame_type: FRAME_HEADERS,
+            flags: FLAG_END_HEADERS | FLAG_END_STREAM,
+            stream_id: 1,
+        };
+        let (stream_id, request_headers, body) =
+            process_frame(&mut conn, &end, &trailers).unwrap().unwrap();
+        assert_eq!(stream_id, 1);
+        assert_eq!(request_headers, headers);
+        assert_eq!(body, b"hello");
+
+        // DATA after END_STREAM is a stream error, not a second request.
+        let late = FrameHeader {
+            length: 1,
+            frame_type: FRAME_DATA,
+            flags: FLAG_END_STREAM,
+            stream_id: 1,
+        };
+        assert!(matches!(
+            process_frame(&mut conn, &late, b"x"),
+            Err(H2Error::Stream(1, ERROR_STREAM_CLOSED, _))
+        ));
     }
 
     #[test]

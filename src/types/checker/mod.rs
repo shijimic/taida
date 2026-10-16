@@ -75,6 +75,10 @@ const BUILD_DESCRIPTOR_NAMES: [&str; 5] = [
     "BuildHook",
 ];
 
+/// Recorded among the program's defined names when an import has no symbol
+/// list (not a valid identifier, so it names nothing else).
+const OPEN_IMPORT_MARK: &str = "*";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CageBranch {
     Js,
@@ -109,6 +113,29 @@ struct CageRunnerType {
     branch: CageBranch,
     output: Type,
     async_boundary: bool,
+}
+
+/// The key and value types of the entries of a HashMap built by `.set`
+/// calls; `None` where the checker is not certain of one.
+type HashMapEntryTypes = Vec<(Option<Type>, Option<Type>)>;
+
+/// The argument types one mold instantiation has inferred: the node ids of
+/// its arguments, and for each inference made, the node id, the expected
+/// type it was inferred against (if any) and the result. The arguments are
+/// all inferred in the mold's own scope, so a repeat gives the same type.
+#[derive(Default)]
+pub(super) struct MoldArgCache {
+    pub(super) arg_ids: Vec<usize>,
+    pub(super) entries: Vec<(usize, Option<Type>, Type)>,
+}
+
+impl MoldArgCache {
+    pub(super) fn get(&self, id: usize, expected: Option<&Type>) -> Option<Type> {
+        self.entries
+            .iter()
+            .find(|(node, exp, _)| *node == id && exp.as_ref() == expected)
+            .map(|(_, _, ty)| ty.clone())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -295,6 +322,9 @@ pub struct TypeChecker {
     seen_func_defs: HashSet<String>,
     /// Concrete type-like names declared anywhere in the current program.
     declared_concrete_type_names: HashSet<String>,
+    /// Every name the program defines anywhere (functions at any depth,
+    /// types, bindings, imports), for telling a name defined nowhere.
+    program_defined_names: HashSet<String>,
     /// Custom mold field definitions (name -> raw AST fields).
     /// Used for `[]` / `()` binding validation.
     mold_field_defs: HashMap<String, Vec<FieldDef>>,
@@ -318,8 +348,33 @@ pub struct TypeChecker {
     setof_arg_spans: Vec<Span>,
     /// Source file path — used for resolving import paths to validate export symbols.
     source_file: Option<std::path::PathBuf>,
+    /// Modules whose checking is in progress, outermost first: the program's
+    /// own file, then each module being checked to type its exported values.
+    /// Guards the recursion against import cycles.
+    import_chain: Vec<std::path::PathBuf>,
+    /// Types of imported values (non-function exports), by local name.
+    imported_value_types: HashMap<String, Type>,
+    /// Where each imported local name comes from: (module path, exported
+    /// name). Two imports binding one name to different symbols clash.
+    imported_name_sources: HashMap<String, (String, String)>,
     /// Compile target for backend-aware diagnostics.
     compile_target: CompileTarget,
+    /// While the top-level forward-reference pass runs: what it needs to
+    /// follow a call through the bodies of functions defined so far.
+    pub(super) forward_ref_ctx: Option<check::ForwardRefCtx>,
+    /// Generic functions whose body ends in a value of one fixed primitive
+    /// type although they declare a type parameter as the return type:
+    /// name -> (type parameter, the body's type).
+    pub(super) generic_fixed_returns: HashMap<String, (String, Type)>,
+    /// Types and enums the program declares at its top level, and the scope
+    /// depth of that level: a binding of the same name there collides.
+    pub(super) top_level_type_names: HashSet<String>,
+    /// For each mold instantiation being inferred, innermost last: the
+    /// types its arguments were inferred to, which the rest of that mold's
+    /// checks reuse instead of inferring them again (nested molds would
+    /// otherwise cost a multiple of the inner mold at every level).
+    pub(super) mold_arg_cache_stack: Vec<MoldArgCache>,
+    pub(super) top_level_depth: usize,
     /// Local names that resolve to taida-lang/net's `httpServe`.
     net_http_serve_symbols: HashSet<String>,
     /// Local enum names that resolve to taida-lang/net's `HttpProtocol`.
@@ -337,6 +392,28 @@ pub struct TypeChecker {
     /// Scope-aligned compile-time string constants. `None` marks a local
     /// shadow that is known not to be a compile-time string constant.
     string_const_scope_stack: Vec<HashMap<String, Option<String>>>,
+    /// Per-scope names bound to a value whose runtime kind may differ from
+    /// the type the checker gave it (see [`TypeChecker::mark_dynamic`]).
+    dynamic_scope_stack: Vec<HashSet<String>>,
+    /// Per-scope names bound directly to a pack literal (`p <= @(...)`), whose
+    /// value has no methods beyond those every pack has.
+    pack_literal_scope_stack: Vec<HashSet<String>>,
+    /// Per-scope names bound to a `hashMap()` built by `.set` calls, with
+    /// the key and value type of each entry (`None` where not certain).
+    hashmap_entry_scope_stack: Vec<HashMap<String, HashMapEntryTypes>>,
+    /// Imports whose types were registered before the local inheritances
+    /// (one of them extends an imported type), by the import's position.
+    early_registered_imports: HashSet<usize>,
+    /// Per-scope names of error handlers' parameters: a caught error has
+    /// `kind` and `code`, which every backend adds where it catches.
+    caught_error_scope_stack: Vec<HashSet<String>>,
+    /// Node ids of expressions whose runtime kind may differ from their
+    /// checked type: the checker accepts them, but the value can be of
+    /// another kind (a `getOrDefault` default of another type, an Int
+    /// accepted where a Float is expected). Their types are withheld from
+    /// `typed_expr_table`, so the backends decide the representation at
+    /// runtime instead of trusting the checked type.
+    dynamic_exprs: HashSet<usize>,
     /// Optional host capability manifest injected by a build adapter or test
     /// fixture. When present, every statically resolvable HostCapability pair
     /// must be declared here.
@@ -473,6 +550,7 @@ impl TypeChecker {
             invalid_func_defs: HashSet::new(),
             seen_func_defs: HashSet::new(),
             declared_concrete_type_names: HashSet::new(),
+            program_defined_names: HashSet::new(),
             mold_field_defs: HashMap::new(),
             mold_header_specs: HashMap::new(),
             declared_header_arities: HashMap::new(),
@@ -480,7 +558,15 @@ impl TypeChecker {
             in_comparison_error_walk: false,
             setof_arg_spans: Vec::new(),
             source_file: None,
+            import_chain: Vec::new(),
+            imported_value_types: HashMap::new(),
+            imported_name_sources: HashMap::new(),
             compile_target: CompileTarget::Neutral,
+            forward_ref_ctx: None,
+            generic_fixed_returns: HashMap::new(),
+            top_level_type_names: HashSet::new(),
+            mold_arg_cache_stack: Vec::new(),
+            top_level_depth: 1,
             net_http_serve_symbols: HashSet::new(),
             net_http_protocol_type_names: HashSet::new(),
             worker_effect_symbols: HashSet::new(),
@@ -488,6 +574,12 @@ impl TypeChecker {
             worker_addon_bindings: HashMap::new(),
             branch_scope_stack: vec![HashMap::new()],
             string_const_scope_stack: vec![HashMap::new()],
+            dynamic_scope_stack: vec![HashSet::new()],
+            pack_literal_scope_stack: vec![HashSet::new()],
+            hashmap_entry_scope_stack: vec![HashMap::new()],
+            early_registered_imports: HashSet::new(),
+            caught_error_scope_stack: vec![HashSet::new()],
+            dynamic_exprs: HashSet::new(),
             host_capability_manifest: None,
             current_func_type_params: Vec::new(),
             hinted_func_stack: Vec::new(),
@@ -542,6 +634,9 @@ impl TypeChecker {
 
     pub fn set_source_file(&mut self, path: &std::path::Path) {
         self.source_file = Some(path.to_path_buf());
+        if self.import_chain.is_empty() {
+            self.import_chain.push(path.to_path_buf());
+        }
     }
 
     pub fn set_compile_target(&mut self, target: CompileTarget) {
@@ -560,6 +655,73 @@ impl TypeChecker {
                 .map(|(name, kind)| (name.into(), kind.into()))
                 .collect(),
         );
+    }
+
+    fn collect_defined_names(statements: &[Statement], names: &mut HashSet<String>) {
+        for stmt in statements {
+            match stmt {
+                Statement::FuncDef(fd) => {
+                    names.insert(fd.name.clone());
+                    Self::collect_defined_names(&fd.body, names);
+                }
+                Statement::ClassLikeDef(def) => {
+                    names.insert(def.name.clone());
+                    for field in &def.fields {
+                        if let Some(method) = &field.method_def {
+                            Self::collect_defined_names(&method.body, names);
+                        }
+                    }
+                }
+                Statement::EnumDef(def) => {
+                    names.insert(def.name.clone());
+                }
+                Statement::Assignment(assign) => {
+                    names.insert(assign.target.clone());
+                }
+                Statement::UnmoldForward(u) => {
+                    names.insert(u.target.clone());
+                }
+                Statement::UnmoldBackward(u) => {
+                    names.insert(u.target.clone());
+                }
+                Statement::Import(import) => {
+                    if import.symbols.is_empty() {
+                        names.insert(OPEN_IMPORT_MARK.to_string());
+                    }
+                    for symbol in &import.symbols {
+                        names.insert(symbol.alias.clone().unwrap_or_else(|| symbol.name.clone()));
+                    }
+                }
+                Statement::ErrorCeiling(ceiling) => {
+                    Self::collect_defined_names(&ceiling.handler_body, names);
+                }
+                Statement::Expr(_) | Statement::Export(_) => {}
+            }
+        }
+    }
+
+    /// Whether something the program or the prelude defines answers to a
+    /// call of `name`: a function, a binding, a type, an import.
+    pub(super) fn names_callable(&self, name: &str) -> bool {
+        self.program_defined_names.contains(name)
+            // An import without a symbol list brings in names the checker
+            // does not enumerate.
+            || self.program_defined_names.contains(OPEN_IMPORT_MARK)
+            || BUILD_DESCRIPTOR_NAMES.contains(&name)
+            // The os package's functions resolve without an import.
+            || crate::pkg::catalog::find("os").is_some_and(|spec| spec.exports.contains(&name))
+            || self.func_types.contains_key(name)
+            || self.generic_func_defs.contains_key(name)
+            || self.func_defs.contains_key(name)
+            || self.crypto_funcs.contains_key(name)
+            || self.worker_addon_symbols.contains(name)
+            || self.imported_name_sources.contains_key(name)
+            || self.imported_value_types.contains_key(name)
+            || self.lookup_var(name).is_some()
+            || self.registry.get_type_fields(name).is_some()
+            || self.registry.is_enum_type(name)
+            || self.registry.is_error_type(name)
+            || self.declared_concrete_type_names.contains(name)
     }
 
     /// Check if a type contains Unknown anywhere in its structure.
@@ -664,7 +826,12 @@ impl TypeChecker {
 
     fn contains_unresolved_type_var(&self, ty: &Type) -> bool {
         match ty {
-            Type::Named(name) => self.registry.get_type_fields(name).is_none(),
+            // An Enum is a declared type, not a type variable, though it has
+            // no fields.
+            Type::Named(name) => {
+                self.registry.get_type_fields(name).is_none()
+                    && !self.registry.enum_defs.contains_key(name)
+            }
             Type::List(inner) => self.contains_unresolved_type_var(inner),
             Type::Generic(_, args) => args.iter().any(|a| self.contains_unresolved_type_var(a)),
             Type::BuchiPack(fields) => fields
@@ -768,6 +935,10 @@ impl TypeChecker {
         self.scope_stack.push(HashMap::new());
         self.branch_scope_stack.push(HashMap::new());
         self.string_const_scope_stack.push(HashMap::new());
+        self.dynamic_scope_stack.push(HashSet::new());
+        self.pack_literal_scope_stack.push(HashSet::new());
+        self.hashmap_entry_scope_stack.push(HashMap::new());
+        self.caught_error_scope_stack.push(HashSet::new());
     }
 
     /// Pop a scope (e.g., leaving a function body).
@@ -775,6 +946,247 @@ impl TypeChecker {
         self.scope_stack.pop();
         self.branch_scope_stack.pop();
         self.string_const_scope_stack.pop();
+        self.dynamic_scope_stack.pop();
+        self.pack_literal_scope_stack.pop();
+        self.hashmap_entry_scope_stack.pop();
+        self.caught_error_scope_stack.pop();
+    }
+
+    /// Record that `expr`'s runtime value may be of another kind than the
+    /// type the checker gives it, so its type stays out of
+    /// `typed_expr_table`.
+    pub(super) fn mark_dynamic(&mut self, node_id: usize) {
+        self.dynamic_exprs.insert(node_id);
+    }
+
+    /// Record that the binding `name` in the innermost scope holds such a
+    /// value; every later read of it is withheld from the table too.
+    pub(super) fn mark_var_dynamic(&mut self, name: &str) {
+        if let Some(scope) = self.dynamic_scope_stack.last_mut() {
+            scope.insert(name.to_string());
+        }
+    }
+
+    /// Whether values of `actual` are represented at runtime differently
+    /// from what `declared` promises: an Int where a Float is declared
+    /// (possibly as a list element). Subtyping between packs does not change
+    /// the representation.
+    pub(super) fn type_is_representation_distinct(&self, actual: &Type, declared: &Type) -> bool {
+        fn scalar(ty: &Type) -> Option<u8> {
+            match ty {
+                Type::Int => Some(0),
+                Type::Float => Some(1),
+                Type::Bool => Some(2),
+                Type::Str => Some(3),
+                _ => None,
+            }
+        }
+        match (actual, declared) {
+            (Type::List(a), Type::List(d)) => self.type_is_representation_distinct(a, d),
+            _ => matches!((scalar(actual), scalar(declared)), (Some(a), Some(d)) if a != d),
+        }
+    }
+
+    /// The entry types of the HashMap `expr` builds: `hashMap()` or
+    /// `hashMap(entries)` followed by `.set(key, value)` calls, or a name
+    /// bound to such a chain.
+    pub(super) fn hashmap_set_chain_entries(&mut self, expr: &Expr) -> Option<HashMapEntryTypes> {
+        match expr {
+            Expr::FuncCall(callee, args, _)
+                if args.len() <= 1
+                    && matches!(callee.as_ref(), Expr::Ident(n, _) if n == "hashMap")
+                    && !self.func_types.contains_key("hashMap")
+                    && self.lookup_var("hashMap").is_none() =>
+            {
+                match args.first() {
+                    None => Some(Vec::new()),
+                    Some(src) => self.hashmap_source_entries(src),
+                }
+            }
+            Expr::MethodCall(obj, method, args, _) if method == "set" && args.len() == 2 => {
+                let mut entries = self.hashmap_set_chain_entries(obj)?;
+                let key = self.certain_type(&args[0]);
+                let value = self.certain_type(&args[1]);
+                entries.push((key, value));
+                Some(entries)
+            }
+            Expr::Ident(name, _) => {
+                // The innermost scope that binds `name` decides.
+                for (idx, scope) in self.scope_stack.iter().enumerate().rev() {
+                    if scope.contains_key(name) {
+                        return self
+                            .hashmap_entry_scope_stack
+                            .get(idx)
+                            .and_then(|names| names.get(name).cloned());
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// The entry types `hashMap(src)` takes from `src`: the key and value
+    /// fields of a list's `@(key, value)` packs (a pack without them gives
+    /// its first two fields, a list of lists its elements), or each field
+    /// of a pack under a Str key. A type not known for certain is `None`.
+    fn hashmap_source_entries(&mut self, src: &Expr) -> Option<HashMapEntryTypes> {
+        let known = |ty: Type| (!matches!(ty, Type::Unknown | Type::Any)).then_some(ty);
+        match self.certain_type(src)? {
+            Type::List(elem) => match *elem {
+                Type::BuchiPack(fields) => {
+                    let named = |name: &str| {
+                        fields
+                            .iter()
+                            .find(|(n, _)| n == name)
+                            .map(|(_, ty)| ty.clone())
+                    };
+                    let (key, value) = match (named("key"), named("value")) {
+                        (Some(key), Some(value)) => (key, value),
+                        _ if fields.len() >= 2 => (fields[0].1.clone(), fields[1].1.clone()),
+                        _ => return Some(Vec::new()),
+                    };
+                    Some(vec![(known(key), known(value))])
+                }
+                Type::List(inner) => Some(vec![(known((*inner).clone()), known(*inner))]),
+                _ => None,
+            },
+            Type::BuchiPack(fields) => Some(
+                fields
+                    .into_iter()
+                    .filter(|(name, _)| !name.starts_with("__"))
+                    .map(|(_, ty)| (Some(Type::Str), known(ty)))
+                    .collect(),
+            ),
+            _ => None,
+        }
+    }
+
+    /// An entry of the HashMap `expr` builds whose key or value is certainly
+    /// of another type than the HashMap type `expected` declares: the entry's
+    /// type and which of the two it is.
+    pub(super) fn hashmap_entry_mismatch(
+        &mut self,
+        expr: &Expr,
+        expected: &Type,
+    ) -> Option<(Type, &'static str)> {
+        let Type::Generic(name, args) = expected else {
+            return None;
+        };
+        if name != "HashMap" || args.len() != 2 {
+            return None;
+        }
+        let entries = self.hashmap_set_chain_entries(expr)?;
+        let fits = |checker: &Self, actual: &Type, declared: &Type| {
+            matches!(declared, Type::Unknown | Type::Any)
+                || Self::contains_unknown(declared)
+                || (actual.is_numeric() && declared.is_numeric())
+                || checker.registry.is_subtype_of(actual, declared)
+        };
+        for (key, value) in entries {
+            if let Some(key) = key
+                && !fits(self, &key, &args[0])
+            {
+                return Some((key, "key"));
+            }
+            if let Some(value) = value
+                && !fits(self, &value, &args[1])
+            {
+                return Some((value, "value"));
+            }
+        }
+        None
+    }
+
+    /// The one type every value of the HashMap `expr` builds certainly has.
+    pub(super) fn hashmap_uniform_value_type(&mut self, expr: &Expr) -> Option<Type> {
+        let entries = self.hashmap_set_chain_entries(expr)?;
+        let mut uniform: Option<Type> = None;
+        for (_, value) in entries {
+            let value = value?;
+            match &uniform {
+                None => uniform = Some(value),
+                Some(seen) if *seen == value => {}
+                Some(_) => return None,
+            }
+        }
+        uniform
+    }
+
+    /// The type of `kind` / `code` read from a caught error (an error
+    /// handler's parameter) whose type does not declare the field: `Str` /
+    /// `Int`, as the catch sites add them. When an error type of the program
+    /// declares the field with another type, the caught error may be one of
+    /// those, and the type is not certain.
+    pub(super) fn caught_error_field_type(&self, obj: &Expr, field: &str) -> Option<Type> {
+        let added = match field {
+            "kind" => Type::Str,
+            "code" => Type::Int,
+            _ => return None,
+        };
+        let Expr::Ident(name, _) = obj else {
+            return None;
+        };
+        // The innermost scope that binds `name` decides.
+        let caught = self
+            .scope_stack
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, scope)| scope.contains_key(name))
+            .is_some_and(|(idx, _)| {
+                self.caught_error_scope_stack
+                    .get(idx)
+                    .is_some_and(|names| names.contains(name))
+            });
+        if !caught {
+            return None;
+        }
+        let redeclared = self.registry.type_defs.iter().any(|(type_name, fields)| {
+            self.registry.is_error_type(type_name)
+                && fields.iter().any(|(n, t)| n == field && *t != added)
+        });
+        Some(if redeclared { Type::Unknown } else { added })
+    }
+
+    /// Whether `expr` is a pack literal, or a name bound directly to one.
+    pub(super) fn is_pack_literal_value(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::BuchiPack(..) => true,
+            Expr::Ident(name, _) => {
+                // The innermost scope that binds `name` decides.
+                for (idx, scope) in self.scope_stack.iter().enumerate().rev() {
+                    if scope.contains_key(name) {
+                        return self
+                            .pack_literal_scope_stack
+                            .get(idx)
+                            .is_some_and(|names| names.contains(name));
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `expr`'s runtime kind may differ from its checked type.
+    pub(super) fn is_dynamic_value(&self, expr: &Expr) -> bool {
+        if self.dynamic_exprs.contains(&expr.node_id()) {
+            return true;
+        }
+        let Expr::Ident(name, _) = expr else {
+            return false;
+        };
+        // The innermost scope that binds `name` decides.
+        for (idx, scope) in self.scope_stack.iter().enumerate().rev() {
+            if scope.contains_key(name) {
+                return self
+                    .dynamic_scope_stack
+                    .get(idx)
+                    .is_some_and(|dynamic| dynamic.contains(name));
+            }
+        }
+        false
     }
 
     fn define_branch_info(&mut self, name: &str, info: BranchInfo) {
@@ -828,6 +1240,18 @@ impl TypeChecker {
         if let Some(scope) = self.scope_stack.last_mut() {
             scope.insert(name.to_string(), ty);
         }
+        if let Some(scope) = self.dynamic_scope_stack.last_mut() {
+            scope.remove(name);
+        }
+        if let Some(scope) = self.pack_literal_scope_stack.last_mut() {
+            scope.remove(name);
+        }
+        if let Some(scope) = self.hashmap_entry_scope_stack.last_mut() {
+            scope.remove(name);
+        }
+        if let Some(scope) = self.caught_error_scope_stack.last_mut() {
+            scope.remove(name);
+        }
         self.define_branch_info(name, BranchInfo::None);
         self.define_string_const(name, None);
     }
@@ -850,6 +1274,18 @@ impl TypeChecker {
                 return false;
             }
             scope.insert(name.to_string(), ty);
+        }
+        if let Some(scope) = self.dynamic_scope_stack.last_mut() {
+            scope.remove(name);
+        }
+        if let Some(scope) = self.pack_literal_scope_stack.last_mut() {
+            scope.remove(name);
+        }
+        if let Some(scope) = self.hashmap_entry_scope_stack.last_mut() {
+            scope.remove(name);
+        }
+        if let Some(scope) = self.caught_error_scope_stack.last_mut() {
+            scope.remove(name);
         }
         self.define_branch_info(name, BranchInfo::None);
         self.define_string_const(name, None);
@@ -949,20 +1385,25 @@ impl TypeChecker {
             .collect()
     }
 
-    /// Check an entire program. Collects type definitions first,
-    /// then checks all statements.
-    pub fn check_program(&mut self, program: &Program) {
+    /// The checking itself: [`TypeChecker::check_program`] calls it on a
+    /// thread with enough stack for the program's depth.
+    fn check_program_body(&mut self, program: &Program) {
+        self.program_defined_names.clear();
+        Self::collect_defined_names(&program.statements, &mut self.program_defined_names);
         self.seen_func_defs.clear();
         self.func_def_scope_depths.clear();
         self.declared_concrete_type_names.clear();
         self.worker_effect_symbols.clear();
         self.worker_addon_symbols.clear();
         self.worker_addon_bindings.clear();
+        self.early_registered_imports.clear();
         // Phase-2 review Low-2: AST node ids restart at 1 per parse — a
         // reused checker must not leak per-program node-id-keyed state
         // into the next program.
         self.empty_literal_hints.clear();
         self.schema_passing_generic_funcs.clear();
+        self.setof_arg_spans.clear();
+        self.dynamic_exprs.clear();
         for stmt in &program.statements {
             match stmt {
                 Statement::EnumDef(ed) => {
@@ -1142,6 +1583,25 @@ impl TypeChecker {
             }
         }
 
+        // A local type extending an imported type needs the import's types
+        // first (they are otherwise registered when the second pass reaches
+        // the import).
+        for stmt in &program.statements {
+            let Statement::Import(imp) = stmt else {
+                continue;
+            };
+            let provides_parent = imp.symbols.iter().any(|symbol| {
+                let local = symbol.alias.as_deref().unwrap_or(symbol.name.as_str());
+                program.statements.iter().any(|other| {
+                    matches!(other, Statement::ClassLikeDef(cl)
+                        if cl.is_inheritance() && cl.parent() == Some(local))
+                })
+            });
+            if provides_parent && self.early_registered_imports.insert(imp.span.start) {
+                self.register_imported_types(imp);
+            }
+        }
+
         // Register inheritances only after their mold-like parents have field metadata available.
         let mut pending_inheritances: Vec<&Statement> = program
             .statements
@@ -1183,6 +1643,16 @@ impl TypeChecker {
         }
 
         // Second pass: type-check statements
+        self.top_level_depth = self.scope_stack.len();
+        self.top_level_type_names = program
+            .statements
+            .iter()
+            .filter_map(|stmt| match stmt {
+                Statement::ClassLikeDef(cl) => Some(cl.name.clone()),
+                Statement::EnumDef(ed) => Some(ed.name.clone()),
+                _ => None,
+            })
+            .collect();
         for stmt in &program.statements {
             self.check_statement(stmt);
         }
@@ -1356,6 +1826,30 @@ impl TypeChecker {
 
     const MAX_BIDI_TYPE_HINT_DEPTH: usize = 32;
 
+    /// Whether a call to `name` resolves to a binding made in a scope inside
+    /// the one that defines the function `name` — a parameter or a local
+    /// that hides it. Imported functions and top-level functions live in the
+    /// global scope; a local function lives in the scope of its enclosing
+    /// body. A binding in the defining scope is the function itself.
+    pub(super) fn call_name_rebound(&self, name: &str) -> bool {
+        let defining_scope = self.func_def_scope_depths.get(name).copied().unwrap_or(0);
+        self.scope_stack
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, scope)| scope.contains_key(name))
+            .is_some_and(|(idx, _)| idx > defining_scope)
+    }
+
+    /// A function defined inside another function's body, referenced where
+    /// that body's scope is gone: the name exists only inside the body.
+    pub(super) fn local_function_out_of_scope(&self, name: &str) -> bool {
+        self.func_def_scope_depths
+            .get(name)
+            .is_some_and(|&depth| depth > 0)
+            && self.lookup_var(name).is_none()
+    }
+
     fn visible_binding_shadows_function(&self, name: &str) -> bool {
         let Some(function_scope_depth) = self.func_def_scope_depths.get(name).copied() else {
             return self.lookup_var(name).is_some();
@@ -1407,10 +1901,12 @@ mod arity;
 mod cage;
 mod check;
 mod checker_methods;
+mod depth;
 mod descriptor;
 mod imports;
 mod infer;
 pub(crate) mod method_spec;
+pub use method_spec::{BuiltinMethodInfo, builtin_methods_of, is_builtin_method_name};
 mod mold_header;
 mod resolve;
 mod validate;

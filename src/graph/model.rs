@@ -161,6 +161,10 @@ pub enum EdgeKind {
     Calls,
     TailCalls,
     CallsLambda,
+    /// A function named as a value (assigned, passed to a mold or method,
+    /// stored in a pack). It keeps the function reachable, but is not a
+    /// call, so it takes no part in recursion checks.
+    References,
 }
 
 impl std::fmt::Display for EdgeKind {
@@ -185,6 +189,7 @@ impl std::fmt::Display for EdgeKind {
             EdgeKind::Calls => write!(f, "Calls"),
             EdgeKind::TailCalls => write!(f, "TailCalls"),
             EdgeKind::CallsLambda => write!(f, "CallsLambda"),
+            EdgeKind::References => write!(f, "References"),
         }
     }
 }

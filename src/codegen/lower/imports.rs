@@ -27,6 +27,17 @@ impl Lowering {
     /// for package paths we follow `resolve_package_module` chains so
     /// `>>> org/pkg => @(Color)` and submodule imports both succeed.
     pub(super) fn absorb_cross_module_enum_defs(&mut self, import: &crate::parser::ImportStmt) {
+        self.absorb_cross_module_enum_defs_at(import, 0);
+    }
+
+    fn absorb_cross_module_enum_defs_at(
+        &mut self,
+        import: &crate::parser::ImportStmt,
+        depth: usize,
+    ) {
+        if depth > 16 {
+            return;
+        }
         let td_path = if import.path.starts_with("./")
             || import.path.starts_with("../")
             || import.path.starts_with('/')
@@ -111,7 +122,7 @@ impl Lowering {
             Ok(s) => s,
             Err(_) => return,
         };
-        let (program, _parse_errors) = crate::parser::parse(&source);
+        let (program, _parse_errors) = crate::parser::parse_detached(&source);
 
         let requested: std::collections::HashMap<&str, &str> = import
             .symbols
@@ -143,6 +154,48 @@ impl Lowering {
                     .entry(local_name.to_string())
                     .or_insert(variants);
             }
+        }
+
+        // Re-exports: an enum the module imports from another module and
+        // exports again is absorbed from that module, relative to the file
+        // that imports it, under the name this import gives it.
+        let defined: std::collections::HashSet<&str> = program
+            .statements
+            .iter()
+            .filter_map(|stmt| match stmt {
+                crate::parser::Statement::EnumDef(ed) => Some(ed.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        for stmt in &program.statements {
+            let crate::parser::Statement::Import(upstream) = stmt else {
+                continue;
+            };
+            let symbols: Vec<crate::parser::ImportSymbol> = upstream
+                .symbols
+                .iter()
+                .filter_map(|sym| {
+                    let local = sym.alias.as_deref().unwrap_or(sym.name.as_str());
+                    let importer_name = requested.get(local)?;
+                    (!defined.contains(local)).then(|| crate::parser::ImportSymbol {
+                        name: sym.name.clone(),
+                        alias: Some(importer_name.to_string()),
+                    })
+                })
+                .collect();
+            if symbols.is_empty() {
+                continue;
+            }
+            let forwarded = crate::parser::ImportStmt {
+                path: upstream.path.clone(),
+                version: upstream.version.clone(),
+                symbols,
+                span: upstream.span.clone(),
+            };
+            let saved_dir = self.source_dir.clone();
+            self.source_dir = td_path.parent().map(|d| d.to_path_buf());
+            self.absorb_cross_module_enum_defs_at(&forwarded, depth + 1);
+            self.source_dir = saved_dir;
         }
     }
 
@@ -207,6 +260,18 @@ impl Lowering {
                     message: format!("addon manifest load failed for '{}': {}", import_path, e),
                 }
             })?;
+        // Same check as the interpreter's addon registry: the manifest
+        // must declare the package id it is imported under.
+        if manifest.package != import_path {
+            return Err(LowerError {
+                message: format!(
+                    "addon import failed: package id mismatch in '{}' (import resolver expected '{}', manifest declares '{}')",
+                    manifest_path.display(),
+                    import_path,
+                    manifest.package
+                ),
+            });
+        }
 
         // Resolve cdylib absolute path at build time. The path is
         // embedded in .rodata and consumed by `taida_addon_call` at
@@ -683,6 +748,73 @@ impl Lowering {
         }
     }
 
+    /// The addon function (as the program names it) whose return value
+    /// `expr` is, when nothing gives that value a type: a call of an addon
+    /// function the checker could not type, or a name bound to one without
+    /// an annotation.
+    pub(super) fn untyped_addon_value(&self, func: &IrFunction, expr: &Expr) -> Option<String> {
+        let name = match expr {
+            Expr::FuncCall(callee, _, _) => match callee.as_ref() {
+                Expr::Ident(name, _)
+                    if !Self::is_local_binding(func, name)
+                        && self.inner_func_symbol(name).is_none()
+                        && self.addon_func_refs.contains_key(name) =>
+                {
+                    name.clone()
+                }
+                _ => return None,
+            },
+            Expr::MoldInst(name, _, _, _) if self.addon_func_refs.contains_key(name) => {
+                name.clone()
+            }
+            Expr::Ident(name, _) => return self.untyped_addon_vars.get(name).cloned(),
+            _ => return None,
+        };
+        match self.typed_expr_table.lookup(expr) {
+            Some(ty) if !matches!(ty, crate::types::Type::Unknown | crate::types::Type::Any) => {
+                None
+            }
+            _ => Some(name),
+        }
+    }
+
+    /// `[E1414]` when `expr` is an addon function's return value without a
+    /// type, used where its kind decides the result (display, arithmetic,
+    /// an element of a list or pack): native code cannot tell an Int from a
+    /// Float or a Bool there.
+    pub(super) fn reject_untyped_addon_value(
+        &self,
+        func: &IrFunction,
+        expr: &Expr,
+    ) -> Result<(), LowerError> {
+        self.reject_untyped_addon_value_at(func, expr, expr.span())
+    }
+
+    /// [`Self::reject_untyped_addon_value`] reporting the source position
+    /// `at` (the template literal, for an interpolation).
+    pub(super) fn reject_untyped_addon_value_at(
+        &self,
+        func: &IrFunction,
+        expr: &Expr,
+        at: &crate::lexer::Span,
+    ) -> Result<(), LowerError> {
+        if self.lowering_facade_func {
+            return Ok(());
+        }
+        match self.untyped_addon_value(func, expr) {
+            Some(name) => Err(LowerError {
+                message: format!(
+                    "[E1414] The value addon function '{}' returns has no declared type, \
+                     so native code cannot tell an Int from a Float or a Bool where it is \
+                     used at line {}, column {}. Annotate the binding \
+                     (`x: Float <= {}(...)`), or pass the value where a type is declared.",
+                    name, at.line, at.column, name
+                ),
+            }),
+            None => Ok(()),
+        }
+    }
+
     /// Emit the IR for a single addon function call.
     ///
     /// Used by both the regular `FuncCall` lowering path and the
@@ -734,24 +866,28 @@ impl Lowering {
         // Lower argument expressions first so any inner error surfaces
         // before we allocate stack slots / const strings.
         //
-        // Tag inference is best-effort: Str / Bool / Float / Int cover
-        // every scalar the v1 ABI can marshal. Everything else falls
-        // through to TAIDA_TAG_INT (0) and is treated as a raw i64
-        // payload by the C dispatcher. (Float used to fall through too,
-        // leaking the f64 bit pattern across the ABI as a bogus Int.)
+        // Each argument carries its runtime kind tag (TAIDA_TAG_*, from
+        // the checker's type when it has one). The dispatcher converts
+        // by that tag, reading List / Pack / Bytes and other heap
+        // objects from their headers when the tag does not pin a scalar
+        // kind (UNKNOWN), so no argument is passed as its address.
         let mut arg_vars: Vec<IrVar> = Vec::with_capacity(args.len());
         let mut arg_tags: Vec<i64> = Vec::with_capacity(args.len());
         for arg in args {
             let v = self.lower_expr(func, arg)?;
-            let tag: i64 = if self.expr_is_string_full(arg) {
-                3 // TAIDA_TAG_STR
-            } else if self.expr_is_bool(arg) {
-                2 // TAIDA_TAG_BOOL
-            } else if self.expr_returns_float(arg) {
-                1 // TAIDA_TAG_FLOAT
-            } else {
-                0 // TAIDA_TAG_INT
-            };
+            let mut tag = self.expr_type_tag(arg);
+            if tag < 0 {
+                // Unknown to the tag table: keep the scalar kinds the
+                // syntactic helpers can still prove (a scalar has no header
+                // for the dispatcher to read).
+                if self.expr_is_string_full(arg) {
+                    tag = 3; // TAIDA_TAG_STR
+                } else if self.expr_is_bool(arg) {
+                    tag = 2; // TAIDA_TAG_BOOL
+                } else if self.expr_returns_float(arg) {
+                    tag = 1; // TAIDA_TAG_FLOAT
+                }
+            }
             arg_vars.push(v);
             arg_tags.push(tag);
         }
@@ -914,7 +1050,89 @@ impl Lowering {
             .unwrap_or_else(|| Self::fallback_module_key(module_path))
     }
 
+    /// Parameters of the function `symbol_name` defined in the module an
+    /// import names, read from its source.
+    pub(super) fn imported_function_params(
+        &self,
+        module_path: &str,
+        symbol_name: &str,
+        version: Option<&str>,
+    ) -> Option<Vec<crate::parser::Param>> {
+        let path = self.resolve_import_path(module_path, version)?;
+        Self::function_params_in_module(&path, symbol_name, 0)
+    }
+
+    /// Parameters of `symbol_name` defined in the module at `path`, following
+    /// a re-export (`>>> ./a.td => @(f)` then `<<< @(f)`) to the module that
+    /// defines it.
+    fn function_params_in_module(
+        path: &std::path::Path,
+        symbol_name: &str,
+        depth: usize,
+    ) -> Option<Vec<crate::parser::Param>> {
+        if depth > 16 {
+            return None;
+        }
+        let source = std::fs::read_to_string(path).ok()?;
+        let (program, _) = crate::parser::parse_detached(&source);
+        let mut reexported_from = None;
+        for stmt in program.statements {
+            match stmt {
+                Statement::FuncDef(fd) if fd.name == symbol_name => return Some(fd.params),
+                Statement::Import(imp) if imp.path.starts_with('.') => {
+                    for sym in &imp.symbols {
+                        let local = sym.alias.as_deref().unwrap_or(sym.name.as_str());
+                        if local == symbol_name {
+                            reexported_from = Some((imp.path.clone(), sym.name.clone()));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let (rel, name) = reexported_from?;
+        let next = path.parent()?.join(rel);
+        Self::function_params_in_module(&next, &name, depth + 1)
+    }
+
+    /// Symbol of the local function `name` compiled as a closure that is
+    /// visible at this point, if any.
+    pub(super) fn local_closure_symbol(&self, name: &str) -> Option<String> {
+        self.visible_local_function(&self.local_closure_scopes, name)
+    }
+
+    /// IR symbol of the local function `name` visible at this point, if any.
+    pub(super) fn inner_func_symbol(&self, name: &str) -> Option<String> {
+        self.visible_local_function(&self.inner_func_scopes, name)
+    }
+
+    /// In the body that defines it, a local function is visible from its
+    /// definition on; before that its name means what it means outside. The
+    /// bodies of the local functions (deeper scopes) see all of them.
+    fn visible_local_function(
+        &self,
+        scopes: &[std::collections::HashMap<String, String>],
+        name: &str,
+    ) -> Option<String> {
+        let innermost = scopes.len().checked_sub(1);
+        scopes.iter().enumerate().rev().find_map(|(i, scope)| {
+            let ahead = Some(i) == innermost
+                && self
+                    .inner_funcs_ahead
+                    .get(i)
+                    .is_some_and(|names| names.contains(name));
+            if ahead {
+                None
+            } else {
+                scope.get(name).cloned()
+            }
+        })
+    }
+
     pub(super) fn resolve_user_func_symbol(&self, name: &str) -> String {
+        if let Some(symbol) = self.inner_func_symbol(name) {
+            return symbol;
+        }
         if let Some(link_name) = self.imported_func_links.get(name) {
             link_name.clone()
         } else if self.exported_symbols.contains(name) {
@@ -996,7 +1214,7 @@ impl Lowering {
             Ok(s) => s,
             Err(_) => return Ok(ImportedSymbolKind::Function),
         };
-        let (program, _) = crate::parser::parse(&source);
+        let (program, _) = crate::parser::parse_detached(&source);
 
         // Non-facade: fall back to entry module's <<< check (RCB-201)
         let export_list = Self::collect_module_export_list(&program.statements);
@@ -1063,7 +1281,22 @@ impl Lowering {
             Ok(s) => s,
             Err(_) => return,
         };
-        let (program, _) = crate::parser::parse(&source);
+        let (program, _) = crate::parser::parse_detached(&source);
+
+        // The importer names the declaration the module makes, so its
+        // instances carry that declaration's tag (`emit_type_name_tag`).
+        if program.statements.iter().any(|stmt| {
+            matches!(stmt, Statement::ClassLikeDef(def)
+            if def.name == symbol_name
+                && matches!(
+                    def.kind,
+                    crate::parser::ClassLikeKind::BuchiPack
+                        | crate::parser::ClassLikeKind::Inheritance { .. }
+                ))
+        }) {
+            let key = format!("{}:{}", Lowering::module_key_for_path(&path), symbol_name);
+            self.type_decl_keys.insert(register_name.to_string(), key);
+        }
 
         for stmt in &program.statements {
             match stmt {
@@ -1162,6 +1395,27 @@ impl Lowering {
                         self.type_method_defs
                             .insert(register_name.to_string(), all_methods);
                     }
+                    // The imported type's parent chain, as its module declares
+                    // it, for `TypeExtends` (decided while lowering).
+                    self.type_parents
+                        .insert(register_name.to_string(), inh_parent.to_string());
+                    let mut ancestor = inh_parent.to_string();
+                    for _ in 0..64 {
+                        let Some(next) = program.statements.iter().find_map(|stmt| match stmt {
+                            Statement::ClassLikeDef(def)
+                                if def.is_inheritance() && def.name == ancestor =>
+                            {
+                                def.parent().map(str::to_string)
+                            }
+                            _ => None,
+                        }) else {
+                            break;
+                        };
+                        self.type_parents
+                            .entry(ancestor.clone())
+                            .or_insert_with(|| next.clone());
+                        ancestor = next;
+                    }
 
                     // 全フィールドの型タグを登録（親チェーン含む）
                     for field_def in inh_def.fields.iter().filter(|f| !f.is_method) {
@@ -1258,19 +1512,63 @@ impl Lowering {
     pub(super) fn bind_imported_values(&mut self, func: &mut IrFunction) {
         for (alias_name, orig_name, module_key) in std::mem::take(&mut self.imported_value_symbols)
         {
-            let imported_hash = simple_hash(&format!("{}:{}", module_key, orig_name)) as i64;
-            let result = func.alloc_var();
-            func.push(IrInst::GlobalGet(result, imported_hash));
-            func.push(IrInst::DefVar(alias_name.clone(), result));
+            self.bind_imported_value(func, alias_name, &orig_name, &module_key);
+        }
+    }
 
-            let local_hash = self.global_var_hash(&alias_name);
-            func.push(IrInst::GlobalSet(local_hash, result));
-            if alias_name != orig_name {
-                let orig_hash = self.global_var_hash(&orig_name);
-                func.push(IrInst::GlobalSet(orig_hash, result));
-            }
+    fn bind_imported_value(
+        &mut self,
+        func: &mut IrFunction,
+        alias_name: String,
+        orig_name: &str,
+        module_key: &str,
+    ) {
+        let imported_hash = simple_hash(&format!("{}:{}", module_key, orig_name)) as i64;
+        let result = func.alloc_var();
+        func.push(IrInst::GlobalGet(result, imported_hash));
+        func.push(IrInst::DefVar(alias_name.clone(), result));
 
-            self.current_heap_vars.push(alias_name);
+        // Functions of this module read the value through its local
+        // name only; another import may own the exported name here.
+        let local_hash = self.global_var_hash(&alias_name);
+        func.push(IrInst::GlobalSet(local_hash, result));
+
+        self.current_heap_vars.push(alias_name);
+    }
+
+    /// The key of an import statement in `import_sites` (the statement's
+    /// address: every pass walks the same program).
+    pub(super) fn import_site_key(import: &crate::parser::ImportStmt) -> usize {
+        import as *const crate::parser::ImportStmt as usize
+    }
+
+    /// Move the inits and value bindings an import added since `site` was
+    /// taken into `import_sites`, so they are made where the import stands.
+    pub(super) fn record_import_site(&mut self, site: (usize, usize, usize)) {
+        let (key, inits_before, values_before) = site;
+        let inits = self.module_inits_needed.split_off(inits_before);
+        let values = self.imported_value_symbols.split_off(values_before);
+        if !inits.is_empty() || !values.is_empty() {
+            self.import_sites.insert(key, (inits, values));
+        }
+    }
+
+    /// Run the modules an import statement needs and bind its values, at
+    /// the statement (a module already run is not run again).
+    pub(super) fn emit_import_site(
+        &mut self,
+        func: &mut IrFunction,
+        import: &crate::parser::ImportStmt,
+    ) {
+        let Some((inits, values)) = self.import_sites.remove(&Self::import_site_key(import)) else {
+            return;
+        };
+        for init_symbol in inits {
+            let dummy = func.alloc_var();
+            func.push(IrInst::CallUser(dummy, init_symbol, vec![]));
+        }
+        for (alias_name, orig_name, module_key) in values {
+            self.bind_imported_value(func, alias_name, orig_name.as_str(), module_key.as_str());
         }
     }
 
@@ -1288,15 +1586,21 @@ impl Lowering {
             .as_ref()
             .expect("module_key must be set for library modules")
             .clone();
+        // `_taida_init_<key>` runs the module's top level once, however many
+        // importers reach it (a diamond of imports initialises the shared
+        // module a single time, as the interpreter does); the statements
+        // themselves live in `_taida_init_<key>_body`.
         let func_name = self.init_symbol();
-        let mut init_fn = IrFunction::new(func_name);
+        let body_name = format!("{func_name}_body");
+        let mut init_fn = IrFunction::new(body_name.clone());
         self.current_heap_vars.clear();
 
+        self.emit_type_tag_globals(&mut init_fn);
         self.emit_imported_module_inits(&mut init_fn);
         self.bind_imported_values(&mut init_fn);
 
         let facade_bindings = std::mem::take(&mut self.addon_facade_pack_bindings);
-        for (name, expr) in &facade_bindings {
+        for (name, expr) in &self.facade_bindings_in_dependency_order(&facade_bindings) {
             let val = self.lower_expr(&mut init_fn, expr)?;
             init_fn.push(IrInst::DefVar(name.clone(), val));
             let hash = self.global_var_hash(name);
@@ -1307,9 +1611,22 @@ impl Lowering {
         for stmt in &program.statements {
             match stmt {
                 Statement::Assignment(assign) => {
-                    let val = self.lower_expr(&mut init_fn, &assign.value)?;
+                    // A lambda bound at the top level may call itself by name.
+                    if matches!(assign.value, Expr::Lambda(..)) {
+                        self.lambda_binding_name = Some(assign.target.clone());
+                    }
+                    let val = self.lower_expr(&mut init_fn, &assign.value);
+                    self.lambda_binding_name = None;
+                    let val = val?;
+                    // Later top-level values (and lambdas capturing this one)
+                    // read it by name.
+                    init_fn.push(IrInst::DefVar(assign.target.clone(), val));
                     let hash = simple_hash(&format!("{}:{}", module_key, assign.target)) as i64;
                     init_fn.push(IrInst::GlobalSet(hash, val));
+                }
+                // Importing a module runs its top-level expression statements.
+                Statement::Expr(expr) => {
+                    self.lower_expr(&mut init_fn, expr)?;
                 }
                 // Unmold bindings are module-level values too: without
                 // these arms an exported `... >=> name` left the module
@@ -1331,6 +1648,7 @@ impl Lowering {
                         ));
                         result
                     };
+                    init_fn.push(IrInst::DefVar(uf.target.clone(), val));
                     let hash = simple_hash(&format!("{}:{}", module_key, uf.target)) as i64;
                     init_fn.push(IrInst::GlobalSet(hash, val));
                 }
@@ -1349,6 +1667,7 @@ impl Lowering {
                         ));
                         result
                     };
+                    init_fn.push(IrInst::DefVar(ub.target.clone(), val));
                     let hash = simple_hash(&format!("{}:{}", module_key, ub.target)) as i64;
                     init_fn.push(IrInst::GlobalSet(hash, val));
                 }
@@ -1357,10 +1676,8 @@ impl Lowering {
                     // RCB-101 fix: Register inheritance parent for cross-module
                     // error type filtering.
                     let inh_parent = inh_def.parent().expect("inheritance kind has parent");
-                    let child_str_var = init_fn.alloc_var();
-                    init_fn.push(IrInst::ConstStr(child_str_var, inh_def.name.clone()));
-                    let parent_str_var = init_fn.alloc_var();
-                    init_fn.push(IrInst::ConstStr(parent_str_var, inh_parent.to_string()));
+                    let child_str_var = self.emit_type_name_tag(&mut init_fn, &inh_def.name);
+                    let parent_str_var = self.emit_type_name_tag(&mut init_fn, inh_parent);
                     let reg_dummy = init_fn.alloc_var();
                     init_fn.push(IrInst::Call(
                         reg_dummy,
@@ -1368,6 +1685,8 @@ impl Lowering {
                         vec![child_str_var, parent_str_var],
                     ));
                 }
+                // The module's own imports run where they stand too.
+                Statement::Import(import_stmt) => self.emit_import_site(&mut init_fn, import_stmt),
                 _ => {}
             }
         }
@@ -1376,6 +1695,43 @@ impl Lowering {
         init_fn.push(IrInst::ConstInt(zero, 0));
         init_fn.push(IrInst::Return(zero));
         module.functions.push(init_fn);
+
+        let mut entry = IrFunction::new(func_name);
+        let flag_hash = simple_hash(&format!("__taida_module_initialized:{module_key}")) as i64;
+        let flag = entry.alloc_var();
+        entry.push(IrInst::GlobalGet(flag, flag_hash));
+        let zero = entry.alloc_var();
+        entry.push(IrInst::ConstInt(zero, 0));
+        let first = entry.alloc_var();
+        entry.push(IrInst::Call(
+            first,
+            "taida_int_eq".to_string(),
+            vec![flag, zero],
+        ));
+        let one = entry.alloc_var();
+        let ran = entry.alloc_var();
+        let branch = entry.alloc_var();
+        entry.push(IrInst::CondBranch(
+            branch,
+            vec![
+                crate::codegen::ir::CondArm {
+                    condition: Some(first),
+                    body: vec![
+                        IrInst::ConstInt(one, 1),
+                        IrInst::GlobalSet(flag_hash, one),
+                        IrInst::CallUser(ran, body_name, vec![]),
+                    ],
+                    result: zero,
+                },
+                crate::codegen::ir::CondArm {
+                    condition: None,
+                    body: vec![],
+                    result: zero,
+                },
+            ],
+        ));
+        entry.push(IrInst::Return(zero));
+        module.functions.push(entry);
         Ok(())
     }
 }

@@ -9,7 +9,7 @@
 //!   pinned in `.dev/RC2_DESIGN.md` Section E ("Package layout").
 //!
 //! - **RC2-1c** (import smoke): a Taida program that does
-//!   `>>> taida-lang/terminal@a.1 => @(...)` must
+//!   `>>> taida-lang/terminal => @(...)` must
 //!   - return a deterministic "package not found" diagnostic when the
 //!     addon is **not installed** under `.taida/deps/`
 //!   - be rejected at compile time on every non-Native backend

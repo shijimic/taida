@@ -43,10 +43,11 @@ set -euo pipefail
 # Each entry is `path:line` relative to the repo root, sorted ascending.
 # Update only with explicit review.
 PANIC_BASELINE=(
-  # F62B-038 #10: the synthetic-node-id allocator + transitive schema
-  # closure added above body_expr() shifted the pinned line (779 -> 798);
-  # the panic! site itself is unchanged.
-  "src/parser/ast.rs:798"
+  # The synthetic-node-id allocator, the transitive schema closure, the
+  # detached / template-interpolation parse helpers and the arrow direction
+  # recorded on an assignment, all added above body_expr(), shifted the
+  # pinned line (779 -> 849); the panic! site itself is unchanged.
+  "src/parser/ast.rs:849"
 )
 PANIC_BASELINE_COUNT=${#PANIC_BASELINE[@]}
 

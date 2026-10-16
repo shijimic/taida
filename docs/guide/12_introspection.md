@@ -47,7 +47,7 @@ input => Trim[_]() => Upper[_]() => result
 
 `>>>` / `<<<` を追跡して、ファイル間の依存関係を可視化します。
 
-```taida
+```taida fragment
 >>> ./utils.td => @(helper, format)
 >>> ./types.td => @(Staff, Config)
 <<< @(main)
@@ -184,7 +184,7 @@ taida way verify --check dead-code ./src/main.td
 
 関連するシンボルを明示します。AI がコードを変更する際に、影響範囲を把握するために使います。
 
-```taida
+```taida fragment
 ///@ AI-Related: validateStaff, saveStaff, Staff
 createStaff name: Str rank: Str =
   validated <= validateStaff(name, rank)

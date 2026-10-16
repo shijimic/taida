@@ -1137,9 +1137,12 @@ static int abi_is_list_value(int64_t value) {
 }
 
 static int64_t abi_host_error(const char *message) {
+    /* The message may be a bare C literal; copy it into a Taida Str (with
+       the hidden header) so `e.message` reads as text, not as a
+       pointer-valued integer. */
     return taida_make_error(
         WSTR("HostCapabilityError"),
-        (int64_t)(intptr_t)(message ? message : "host capability error"));
+        (int64_t)(intptr_t)abi_copy_cstr(message ? message : "host capability error"));
 }
 
 int64_t taida_abi_host_capability(int64_t name, int64_t kind) {

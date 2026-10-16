@@ -182,7 +182,7 @@ data => Filter[_, _ x = x > 0]() => Map[_, _ x = x * 2]() => result
 
 ### エラー天井
 
-```taida
+```taida fragment
 |== error: Error =
   "Error: " + error.message
 => :Str
@@ -193,7 +193,7 @@ riskyOperation()
 
 ### モジュール
 
-```taida
+```taida fragment
 >>> ./utils.td => @(helper, format)
 
 result <= helper(data)

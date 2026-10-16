@@ -338,7 +338,7 @@ fn f64b012_set_element_type_checked() {
         r#"s: Set[Str] <= setOf(@["a", "b"])
 stdout(s.size())
 m: HashMap[Str, Int] <= hashMap()
-stdout(m.length())
+stdout(m.size())
 e <= setOf(@[])
 stdout(e.size())"#,
     )

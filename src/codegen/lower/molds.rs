@@ -5,7 +5,7 @@
 // placement table). All methods keep their
 // original signatures, bodies, and privacy; only the enclosing file changes.
 
-use super::{LowerError, Lowering, simple_hash};
+use super::{HIDDEN, LowerError, Lowering, simple_hash};
 use crate::codegen::ir::*;
 use crate::parser::*;
 
@@ -110,7 +110,176 @@ impl Lowering {
 
     /// 型インスタンス化: `TypeName(field <= value, ...)`
     /// Adds __type field (like interpreter) so jsonEncode can include it.
+    /// Link symbol of the constructor the module `module_key` exports for
+    /// its type `type_name`.
+    pub(super) fn type_ctor_symbol(module_key: &str, type_name: &str) -> String {
+        Self::export_func_symbol_for_key(module_key, &format!("{}__new", type_name))
+    }
+
+    /// Whether building a value of the (non-mold) type `type_name` reads
+    /// names of the module that defines it: the type has methods, or a
+    /// field default that is not a literal.
+    pub(super) fn type_needs_ctor(&self, type_name: &str) -> bool {
+        if self.mold_defs.contains_key(type_name) {
+            return false;
+        }
+        let Some(fields) = self.type_field_defs.get(type_name) else {
+            return false;
+        };
+        self.type_method_defs
+            .get(type_name)
+            .is_some_and(|methods| !methods.is_empty())
+            || fields.iter().any(|field| {
+                field.default_value.as_ref().is_some_and(|default| {
+                    !matches!(
+                        default,
+                        Expr::IntLit(..)
+                            | Expr::FloatLit(..)
+                            | Expr::StringLit(..)
+                            | Expr::BoolLit(..)
+                    )
+                })
+            })
+    }
+
+    /// The constructor this module exports for its type `type_name`: it
+    /// takes a pack of the fields the caller gave and builds the value the
+    /// way `TypeName(...)` does here, so field defaults and methods read
+    /// this module's names wherever the value is made.
+    pub(super) fn lower_type_ctor(&mut self, type_name: &str) -> Result<IrFunction, LowerError> {
+        use crate::codegen::ir::CondArm as IrCondArm;
+
+        let symbol = self.export_func_symbol(&format!("{}__new", type_name));
+        let mut ctor = IrFunction::new_with_params(symbol.clone(), vec!["__data".to_string()]);
+        let data_var: IrVar = 0; // the only parameter
+        let span =
+            crate::lexer::Span::new(0, 0, 0, 0).with_node_id(crate::parser::SYNTHETIC_NODE_ID_BASE);
+        let field_defs = self
+            .type_field_defs
+            .get(type_name)
+            .cloned()
+            .unwrap_or_default();
+
+        let prev_heap = std::mem::take(&mut self.current_heap_vars);
+        let prev_func_name = self.current_func_name.replace(symbol.clone());
+        let built = (|| -> Result<IrVar, LowerError> {
+            // Field defaults read this module's top-level values through
+            // the global table, like a function body.
+            let no_params = std::collections::HashSet::new();
+            let mut restored = std::collections::HashSet::new();
+            for field_def in field_defs.iter().filter(|f| !f.is_method) {
+                let Some(default) = &field_def.default_value else {
+                    continue;
+                };
+                for name in self.collect_free_vars(default, &no_params) {
+                    if !self.top_level_vars.contains(&name) || !restored.insert(name.clone()) {
+                        continue;
+                    }
+                    self.globals_referenced.insert(name.clone());
+                    let hash = self.global_var_hash(&name);
+                    let value = ctor.alloc_var();
+                    ctor.push(IrInst::GlobalGet(value, hash));
+                    ctor.push(IrInst::DefVar(name, value));
+                }
+            }
+            let mut fields = Vec::new();
+            let mut visiting = std::collections::HashSet::new();
+            for (i, field_def) in field_defs.iter().filter(|f| !f.is_method).enumerate() {
+                let hash_var = ctor.alloc_var();
+                ctor.push(IrInst::ConstInt(
+                    hash_var,
+                    simple_hash(&field_def.name) as i64,
+                ));
+                let given = ctor.alloc_var();
+                ctor.push(IrInst::Call(
+                    given,
+                    "taida_pack_has_hash".to_string(),
+                    vec![data_var, hash_var],
+                ));
+                // The given value, or the field's default (evaluated here).
+                let saved = std::mem::take(&mut ctor.body);
+                let value = ctor.alloc_var();
+                ctor.push(IrInst::Call(
+                    value,
+                    "taida_pack_get".to_string(),
+                    vec![data_var, hash_var],
+                ));
+                let given_insts = std::mem::replace(&mut ctor.body, saved);
+                let saved = std::mem::take(&mut ctor.body);
+                let default =
+                    self.lower_default_for_field_def(&mut ctor, field_def, &mut visiting)?;
+                let default_insts = std::mem::replace(&mut ctor.body, saved);
+                let chosen = ctor.alloc_var();
+                ctor.push(IrInst::CondBranch(
+                    chosen,
+                    vec![
+                        IrCondArm {
+                            condition: Some(given),
+                            body: given_insts,
+                            result: value,
+                        },
+                        IrCondArm {
+                            condition: None,
+                            body: default_insts,
+                            result: default,
+                        },
+                    ],
+                ));
+                let local = format!("{HIDDEN}ctor_field_{i}");
+                ctor.push(IrInst::DefVar(local.clone(), chosen));
+                fields.push(BuchiField {
+                    name: field_def.name.clone(),
+                    value: Expr::Ident(local, span.clone()),
+                    span: span.clone(),
+                });
+            }
+            self.lower_type_inst_here(&mut ctor, type_name, &fields)
+        })();
+        self.current_func_name = prev_func_name;
+        self.current_heap_vars = prev_heap;
+        let pack = built?;
+        ctor.push(IrInst::Return(pack));
+        Ok(ctor)
+    }
+
     pub(super) fn lower_type_inst(
+        &mut self,
+        func: &mut IrFunction,
+        type_name: &str,
+        fields: &[BuchiField],
+    ) -> Result<IrVar, LowerError> {
+        // A type built by the module that defines it: pass the given fields.
+        if let Some(ctor) = self.imported_type_ctors.get(type_name).cloned() {
+            let declared = self
+                .type_field_defs
+                .get(type_name)
+                .cloned()
+                .unwrap_or_default();
+            let mut given = Vec::with_capacity(fields.len());
+            for field in fields {
+                let v = self.lower_expr(func, &field.value)?;
+                let annotation = declared
+                    .iter()
+                    .find(|f| f.name == field.name)
+                    .and_then(|f| f.type_annotation.as_ref());
+                let v = self.coerce_to_declared(func, annotation, &field.value, v);
+                given.push((field.name.clone(), v));
+            }
+            let data = func.alloc_var();
+            func.push(IrInst::PackNew(data, given.len()));
+            for (i, (name, value)) in given.iter().enumerate() {
+                self.emit_pack_field_hash(func, data, i, name);
+                func.push(IrInst::PackSet(data, i, *value));
+            }
+            let result = func.alloc_var();
+            func.push(IrInst::CallUser(result, ctor, vec![data]));
+            return Ok(result);
+        }
+        self.lower_type_inst_here(func, type_name, fields)
+    }
+
+    /// `TypeName(...)` built in this module.
+    fn lower_type_inst_here(
         &mut self,
         func: &mut IrFunction,
         type_name: &str,
@@ -125,15 +294,28 @@ impl Lowering {
         let mut materialized_value_tags: Vec<i64> = Vec::new();
 
         if let Some(type_fields) = self.type_field_defs.get(type_name).cloned() {
+            // The given fields are evaluated in the order they are written,
+            // as the interpreter does; the omitted ones take their defaults
+            // afterwards, in declaration order. The value keeps the
+            // declaration order.
+            let mut provided: Vec<(String, IrVar, i64)> = Vec::with_capacity(fields.len());
+            for field in fields {
+                let annotation = type_fields
+                    .iter()
+                    .find(|f| !f.is_method && f.name == field.name)
+                    .and_then(|f| f.type_annotation.as_ref());
+                let v = self.lower_expr(func, &field.value)?;
+                let v = self.coerce_to_declared(func, annotation, &field.value, v);
+                provided.push((field.name.clone(), v, self.expr_type_tag(&field.value)));
+            }
             let mut consumed = std::collections::HashSet::new();
             let mut visiting = std::collections::HashSet::new();
             for field_def in type_fields.iter().filter(|f| !f.is_method) {
-                let value_var = if let Some(provided) =
-                    fields.iter().rev().find(|f| f.name == field_def.name)
+                let value_var = if let Some((_, v, tag)) =
+                    provided.iter().rev().find(|(n, _, _)| *n == field_def.name)
                 {
-                    let v = self.lower_expr(func, &provided.value)?;
-                    materialized_value_tags.push(self.expr_type_tag(&provided.value));
-                    v
+                    materialized_value_tags.push(*tag);
+                    *v
                 } else {
                     materialized_value_tags.push(0);
                     self.lower_default_for_field_def(func, field_def, &mut visiting)?
@@ -142,11 +324,10 @@ impl Lowering {
                 consumed.insert(field_def.name.clone());
             }
             // Keep undeclared fields for structural flexibility (interpreter parity).
-            for field in fields {
-                if !consumed.contains(&field.name) {
-                    let val = self.lower_expr(func, &field.value)?;
-                    materialized_value_tags.push(self.expr_type_tag(&field.value));
-                    materialized_fields.push((field.name.clone(), val));
+            for (name, v, tag) in &provided {
+                if !consumed.contains(name) {
+                    materialized_value_tags.push(*tag);
+                    materialized_fields.push((name.clone(), *v));
                 }
             }
         } else {
@@ -157,62 +338,18 @@ impl Lowering {
             }
         }
 
-        // Generate method closures that capture the data fields.
-        // Each method becomes a closure with the data fields as its environment.
         let method_defs = self
             .type_method_defs
             .get(type_name)
             .cloned()
             .unwrap_or_default();
-        let data_field_names: Vec<String> =
-            materialized_fields.iter().map(|(n, _)| n.clone()).collect();
-
-        // Register data field values as named variables so MakeClosure can capture them.
-        // Use unique temporary names to avoid conflicts with existing variables.
-        let capture_prefix = format!("__typeinst_{}_{}_", type_name, self.lambda_counter);
-        let capture_names: Vec<String> = data_field_names
-            .iter()
-            .map(|n| format!("{}{}", capture_prefix, n))
-            .collect();
-        for ((_field_name, field_val), cap_name) in
-            materialized_fields.iter().zip(capture_names.iter())
-        {
-            func.push(IrInst::DefVar(cap_name.clone(), *field_val));
-        }
-
-        let mut method_closures: Vec<(String, IrVar)> = Vec::new();
-        for (method_name, method_func_def) in &method_defs {
-            let extra_capture_names =
-                self.type_method_extra_captures(method_func_def, &data_field_names);
-            let mut env_capture_names = capture_names.clone();
-            let mut env_restore_names = data_field_names.clone();
-            for extra_name in extra_capture_names {
-                let cap_name = format!("{}__free_{}", capture_prefix, extra_name);
-                let cap_val = if self.current_func_name.is_none() && !self.is_library_module {
-                    let var = func.alloc_var();
-                    func.push(IrInst::UseVar(var, extra_name.clone()));
-                    var
-                } else {
-                    self.globals_referenced.insert(extra_name.clone());
-                    let hash = self.global_var_hash(&extra_name);
-                    let var = func.alloc_var();
-                    func.push(IrInst::GlobalGet(var, hash));
-                    var
-                };
-                func.push(IrInst::DefVar(cap_name.clone(), cap_val));
-                env_capture_names.push(cap_name);
-                env_restore_names.push(extra_name);
-            }
-            let closure_var = self.lower_type_method_closure(
-                func,
-                type_name,
-                method_name,
-                method_func_def,
-                &env_capture_names,
-                &env_restore_names,
-            )?;
-            method_closures.push((method_name.clone(), closure_var));
-        }
+        let method_closures = self.lower_method_closures(
+            func,
+            type_name,
+            "typeinst",
+            &method_defs,
+            &materialized_fields,
+        )?;
 
         // Create pack with slots for data fields + method closures + __type.
         let total_fields = materialized_fields.len() + method_closures.len() + 1;
@@ -277,15 +414,92 @@ impl Lowering {
         // Set __type field at the last slot.
         let type_slot = materialized_fields.len() + method_closures.len();
         self.emit_pack_field_hash(func, pack_var, type_slot, "__type");
-        let type_str_var = func.alloc_var();
-        func.push(IrInst::ConstStr(type_str_var, type_name.to_string()));
+        let type_str_var = self.emit_type_name_tag(func, type_name);
         func.push(IrInst::PackSet(pack_var, type_slot, type_str_var));
         func.push(IrInst::PackSetTag(pack_var, type_slot, 3)); // TAIDA_TAG_STR
 
         Ok(pack_var)
     }
 
-    fn type_method_extra_captures(
+    /// Closures for a type's methods (`method_defs`), each capturing the
+    /// instance's data fields `data` (restored under their own names inside
+    /// the method body) and any top-level / imported value the body reads.
+    /// The methods are registered as the type's, so a value's display and
+    /// jsonEncode leave them out.
+    pub(super) fn lower_method_closures(
+        &mut self,
+        func: &mut IrFunction,
+        type_name: &str,
+        site: &str,
+        method_defs: &[(String, FuncDef)],
+        data: &[(String, IrVar)],
+    ) -> Result<Vec<(String, IrVar)>, LowerError> {
+        if method_defs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let data_field_names: Vec<String> = data.iter().map(|(n, _)| n.clone()).collect();
+
+        // Register data field values as named variables so MakeClosure can capture them.
+        // Use unique temporary names to avoid conflicts with existing variables.
+        let capture_prefix = format!("{HIDDEN}{site}_{}_{}_", type_name, self.lambda_counter);
+        let capture_names: Vec<String> = data_field_names
+            .iter()
+            .map(|n| format!("{}{}", capture_prefix, n))
+            .collect();
+        for ((_field_name, field_val), cap_name) in data.iter().zip(capture_names.iter()) {
+            func.push(IrInst::DefVar(cap_name.clone(), *field_val));
+        }
+
+        // The type's methods are left out of the value's display.
+        let type_var = func.alloc_var();
+        func.push(IrInst::ConstStr(type_var, type_name.to_string()));
+        let names: Vec<&str> = method_defs.iter().map(|(n, _)| n.as_str()).collect();
+        let names_var = func.alloc_var();
+        func.push(IrInst::ConstStr(names_var, names.join(",")));
+        let dummy = func.alloc_var();
+        func.push(IrInst::Call(
+            dummy,
+            "taida_register_type_methods".to_string(),
+            vec![type_var, names_var],
+        ));
+
+        let mut method_closures: Vec<(String, IrVar)> = Vec::new();
+        for (method_name, method_func_def) in method_defs {
+            let extra_capture_names =
+                self.type_method_extra_captures(method_func_def, &data_field_names);
+            let mut env_capture_names = capture_names.clone();
+            let mut env_restore_names = data_field_names.clone();
+            for extra_name in extra_capture_names {
+                let cap_name = format!("{}__free_{}", capture_prefix, extra_name);
+                let cap_val = if self.current_func_name.is_none() && !self.is_library_module {
+                    let var = func.alloc_var();
+                    func.push(IrInst::UseVar(var, extra_name.clone()));
+                    var
+                } else {
+                    self.globals_referenced.insert(extra_name.clone());
+                    let hash = self.global_var_hash(&extra_name);
+                    let var = func.alloc_var();
+                    func.push(IrInst::GlobalGet(var, hash));
+                    var
+                };
+                func.push(IrInst::DefVar(cap_name.clone(), cap_val));
+                env_capture_names.push(cap_name);
+                env_restore_names.push(extra_name);
+            }
+            let closure_var = self.lower_type_method_closure(
+                func,
+                type_name,
+                method_name,
+                method_func_def,
+                &env_capture_names,
+                &env_restore_names,
+            )?;
+            method_closures.push((method_name.clone(), closure_var));
+        }
+        Ok(method_closures)
+    }
+
+    pub(super) fn type_method_extra_captures(
         &self,
         method_func_def: &FuncDef,
         data_field_names: &[String],
@@ -357,6 +571,7 @@ impl Lowering {
         // Lower method body (same pattern as lower_func_def).
         let prev_heap = std::mem::take(&mut self.current_heap_vars);
         let prev_func_name = self.current_func_name.take();
+        self.local_body_depth += 1;
 
         let mut last_var = None;
         let body_refs: Vec<&Statement> = method_func_def.body.iter().collect();
@@ -378,11 +593,17 @@ impl Lowering {
                     }
                     _ => {
                         self.lower_statement(&mut method_fn, stmt)?;
+                        // A tail binding yields the bound value.
+                        if is_last && let Some(bound_var) = Self::tail_binding_var(&method_fn, stmt)
+                        {
+                            last_var = Some(bound_var);
+                        }
                     }
                 }
             }
         }
 
+        self.local_body_depth -= 1;
         self.current_func_name = prev_func_name;
         let _heap_vars = std::mem::replace(&mut self.current_heap_vars, prev_heap);
 
@@ -506,7 +727,13 @@ impl Lowering {
         visiting: &mut std::collections::HashSet<String>,
     ) -> Result<IrVar, LowerError> {
         if let Some(default_expr) = &field_def.default_value {
-            return self.lower_expr(func, default_expr);
+            let value = self.lower_expr(func, default_expr)?;
+            return Ok(self.coerce_to_declared(
+                func,
+                field_def.type_annotation.as_ref(),
+                default_expr,
+                value,
+            ));
         }
         if let Some(type_expr) = &field_def.type_annotation {
             return self.lower_default_for_type_expr(func, type_expr, visiting);
@@ -514,6 +741,18 @@ impl Lowering {
         let zero = func.alloc_var();
         func.push(IrInst::ConstInt(zero, 0));
         Ok(zero)
+    }
+
+    /// The empty value of a built-in collection type.
+    fn lower_empty_collection(func: &mut IrFunction, name: &str) -> IrVar {
+        let result = func.alloc_var();
+        let runtime_fn = if name == "HashMap" {
+            "taida_hashmap_new"
+        } else {
+            "taida_set_new"
+        };
+        func.push(IrInst::Call(result, runtime_fn.to_string(), vec![]));
+        result
     }
 
     pub(super) fn lower_default_for_type_expr(
@@ -544,13 +783,13 @@ impl Lowering {
                     func.push(IrInst::ConstBool(v, false));
                     Ok(v)
                 }
+                "HashMap" | "Set" => Ok(Self::lower_empty_collection(func, name)),
                 _ => {
                     if visiting.contains(name) {
                         let pack_var = func.alloc_var();
                         func.push(IrInst::PackNew(pack_var, 1));
                         self.emit_pack_field_hash(func, pack_var, 0, "__type");
-                        let type_var = func.alloc_var();
-                        func.push(IrInst::ConstStr(type_var, name.clone()));
+                        let type_var = self.emit_type_name_tag(func, name);
                         func.push(IrInst::PackSet(pack_var, 0, type_var));
                         func.push(IrInst::PackSetTag(pack_var, 0, 3)); // TAIDA_TAG_STR
                         return Ok(pack_var);
@@ -583,8 +822,7 @@ impl Lowering {
                             materialized_fields.len(),
                             "__type",
                         );
-                        let type_var = func.alloc_var();
-                        func.push(IrInst::ConstStr(type_var, name.clone()));
+                        let type_var = self.emit_type_name_tag(func, name);
                         func.push(IrInst::PackSet(
                             pack_var,
                             materialized_fields.len(),
@@ -612,13 +850,31 @@ impl Lowering {
                 }
                 let pack_var = func.alloc_var();
                 func.push(IrInst::PackNew(pack_var, materialized_fields.len()));
+                let tags: Vec<i64> = fields
+                    .iter()
+                    .filter(|f| !f.is_method)
+                    .map(|f| {
+                        f.type_annotation
+                            .as_ref()
+                            .map_or(0, |ty| self.type_expr_to_tag(ty))
+                    })
+                    .collect();
                 for (i, (field_name, field_val)) in materialized_fields.iter().enumerate() {
                     self.emit_pack_field_hash(func, pack_var, i, field_name);
                     func.push(IrInst::PackSet(pack_var, i, *field_val));
+                    // Type tag from the field's annotation, as for a named
+                    // type's default above.
+                    let tag = tags[i];
+                    if tag != 0 {
+                        func.push(IrInst::PackSetTag(pack_var, i, tag));
+                    }
+                    self.emit_retain_if_heap_tag(func, *field_val, tag);
                 }
                 Ok(pack_var)
             }
-            TypeExpr::Generic(name, args) if name == "Lax" => {
+            // `Optional` is the removed predecessor of `Lax`; its values
+            // behave as `Lax`.
+            TypeExpr::Generic(name, args) if name == "Lax" || name == "Optional" => {
                 let inner = if let Some(inner_ty) = args.first() {
                     self.lower_default_for_type_expr(func, inner_ty, visiting)?
                 } else {
@@ -635,11 +891,20 @@ impl Lowering {
                 func.push(IrInst::PackSet(pack_var, 0, has_value));
                 func.push(IrInst::PackSetTag(pack_var, 0, 2)); // TAIDA_TAG_BOOL
 
+                // Both slots hold the inner type's default, tagged with its
+                // kind so it shows as that kind (`""`, not an address).
+                let inner_tag = args.first().map_or(0, |ty| self.type_expr_to_tag(ty));
                 self.emit_pack_field_hash(func, pack_var, 1, "__value");
                 func.push(IrInst::PackSet(pack_var, 1, inner));
 
                 self.emit_pack_field_hash(func, pack_var, 2, "__default");
                 func.push(IrInst::PackSet(pack_var, 2, inner));
+                if inner_tag > 0 {
+                    func.push(IrInst::PackSetTag(pack_var, 1, inner_tag));
+                    func.push(IrInst::PackSetTag(pack_var, 2, inner_tag));
+                    self.emit_retain_if_heap_tag(func, inner, inner_tag);
+                    self.emit_retain_if_heap_tag(func, inner, inner_tag);
+                }
 
                 self.emit_pack_field_hash(func, pack_var, 3, "__type");
                 let lax_type = func.alloc_var();
@@ -647,6 +912,61 @@ impl Lowering {
                 func.push(IrInst::PackSet(pack_var, 3, lax_type));
                 func.push(IrInst::PackSetTag(pack_var, 3, 3)); // TAIDA_TAG_STR
                 Ok(pack_var)
+            }
+            TypeExpr::Generic(name, _) if name == "HashMap" || name == "Set" => {
+                Ok(Self::lower_empty_collection(func, name))
+            }
+            // `Result[T, P]`: a success holding T's default.
+            TypeExpr::Generic(name, args) if name == "Result" => {
+                let inner = match args.first() {
+                    Some(inner_ty) => self.lower_default_for_type_expr(func, inner_ty, visiting)?,
+                    None => {
+                        let zero = func.alloc_var();
+                        func.push(IrInst::ConstInt(zero, 0));
+                        zero
+                    }
+                };
+                let none = func.alloc_var();
+                func.push(IrInst::ConstInt(none, 0));
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_result_create".to_string(),
+                    vec![inner, none, none],
+                ));
+                if let Some(inner_ty) = args.first() {
+                    let tag = self.type_expr_to_tag(inner_ty);
+                    if tag != 0 && tag != -1 {
+                        func.push(IrInst::PackSetTag(result, 0, tag));
+                    }
+                }
+                Ok(result)
+            }
+            // `Gorillax[T]` has no fallback value: its default is the empty
+            // Gorillax holding T's default.
+            TypeExpr::Generic(name, args) if name == "Gorillax" => {
+                let none = func.alloc_var();
+                func.push(IrInst::ConstInt(none, 0));
+                let gorillax = func.alloc_var();
+                func.push(IrInst::Call(
+                    gorillax,
+                    "taida_gorillax_err".to_string(),
+                    vec![none],
+                ));
+                if let Some(inner_ty) = args.first() {
+                    let inner = self.lower_default_for_type_expr(func, inner_ty, visiting)?;
+                    func.push(IrInst::PackSet(gorillax, 1, inner));
+                    let tag = self.type_expr_to_tag(inner_ty);
+                    if tag != 0 && tag != -1 {
+                        func.push(IrInst::PackSetTag(gorillax, 1, tag));
+                    }
+                }
+                Ok(gorillax)
+            }
+            // A user-defined generic type (`Box[Int]`) defaults like its
+            // plain name.
+            TypeExpr::Generic(name, _) if self.type_field_defs.contains_key(name) => {
+                self.lower_default_for_type_expr(func, &TypeExpr::Named(name.clone()), visiting)
             }
             TypeExpr::Generic(_, _) => {
                 let zero = func.alloc_var();
@@ -709,7 +1029,7 @@ impl Lowering {
         // (`native_runtime/core.c:921`) updates a thread-local tag slot
         // that the caller reads via `taida_get_return_tag` immediately
         // after `CallIndirect`.
-        let tag = crate::codegen::tag_prop::type_expr_to_tag(ret);
+        let tag = self.type_expr_to_tag(ret);
         if tag >= 0 {
             let tag_var = lambda_fn.alloc_var();
             lambda_fn.push(IrInst::ConstInt(tag_var, tag));

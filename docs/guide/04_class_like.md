@@ -192,7 +192,7 @@ declare-only な関数フィールドは、構造化データ型・モールド�
 
 declare-only 関数フィールドのデフォルト値は、**defaultFn の自動生成** によって埋められます。defaultFn は宣言したシグネチャに合わせて引数を受け取り、戻り型のデフォルト値を返す関数です。
 
-```taida
+```taida fragment
 // Str => :Str の defaultFn は引数を受け取り "" を返す
 hello <= Greeter(name <= "Hi")
 hello.greet("anyone")   // "" (defaultFn で自動充足)

@@ -53,6 +53,8 @@ BuildUnit name: Str  target: Str  entry: Symbol  handler: Str  assets: @[RouteAs
 **Example**:
 
 ```taida
+>>> taida-lang/build => @(BuildUnit)
+
 >>> ./server.td => @(serverMain)
 
 serverX <= BuildUnit(
@@ -90,7 +92,7 @@ BuildPlan name: Str  units: @[BuildUnit]  assets: @[AssetBundle]  before: @[Buil
 
 **Example**:
 
-```taida
+```taida fragment
 plan <= BuildPlan(
   name <= "web-release",
   units <= @[serverX, frontendA]
@@ -131,6 +133,8 @@ AssetBundle name: Str  root: Str  files: @[Str]  output: Str  before: @[BuildHoo
 **Example**:
 
 ```taida
+>>> taida-lang/build => @(AssetBundle)
+
 frontendAssets <= AssetBundle(
   name <= "frontend-assets",
   root <= "./nextjs-app/out",
@@ -200,6 +204,8 @@ BuildHook name: Str  command: Str  cwd: Str  env: @[@(name: Str, value: Str)]
 **Example**:
 
 ```taida
+>>> taida-lang/build => @(BuildHook)
+
 buildFrontend <= BuildHook(
   name <= "build-frontend",
   command <= "npm run build",

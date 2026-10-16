@@ -224,6 +224,43 @@ pub(crate) fn builtin_recv_of(obj_type: &Type) -> Option<BuiltinRecv> {
     })
 }
 
+/// A builtin method of a receiver type, as editor tooling lists it.
+#[derive(Clone, Debug)]
+pub struct BuiltinMethodInfo {
+    pub name: &'static str,
+    pub min_args: usize,
+    pub max_args: usize,
+    /// The return type on the argless path; `Unknown` when it depends on the
+    /// arguments.
+    pub returns: Type,
+}
+
+/// The builtin methods the checker accepts on a value of type `ty`, in the
+/// table's order; empty for a type the table does not model (user-defined
+/// types, packs). Completion lists methods from here, so it offers exactly
+/// what the checker will accept.
+pub fn builtin_methods_of(ty: &Type) -> Vec<BuiltinMethodInfo> {
+    let Some(recv) = builtin_recv_of(ty) else {
+        return Vec::new();
+    };
+    BUILTIN_METHOD_SPECS
+        .iter()
+        .filter(|spec| spec.recv == recv)
+        .map(|spec| BuiltinMethodInfo {
+            name: spec.name,
+            min_args: spec.min_args,
+            max_args: spec.max_args,
+            returns: render_return_kind(spec.ret, ty),
+        })
+        .collect()
+}
+
+/// Whether some builtin type has a method called `name`. A call by that name
+/// may reach a builtin, so it does not identify a method of the program.
+pub fn is_builtin_method_name(name: &str) -> bool {
+    BUILTIN_METHOD_SPECS.iter().any(|spec| spec.name == name)
+}
+
 /// Look up `(min_args, max_args, return_kind)` for a builtin method by
 /// receiver kind and name. The single table read shared by the
 /// checker's arity and return-type paths.

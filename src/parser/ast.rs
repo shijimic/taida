@@ -317,6 +317,13 @@ pub struct Assignment {
     pub value: Expr,
     pub doc_comments: Vec<String>,
     pub span: Span,
+    /// The arrow that bound the target: `true` for `expr => name`, `false`
+    /// for `name <= expr`. A pipeline value is stored the same way for both
+    /// (`data => f(_) => name` and `name <= f(_) <= data` are both
+    /// `Pipeline([data, f(_)])`), so tooling that reports the direction of a
+    /// statement (the single-direction check, the graph views) reads it from
+    /// here.
+    pub forward: bool,
 }
 
 impl Assignment {
@@ -620,6 +627,50 @@ impl NodeIdAllocator {
 /// First node id of the compiler-synthesised expression id space.
 /// See [`NodeIdAllocator::synthetic`].
 pub const SYNTHETIC_NODE_ID_BASE: usize = usize::MAX / 2;
+
+/// Parse a source whose expressions are lowered next to another program:
+/// an addon facade, or a module the lowering reads type definitions from.
+/// Every node gets a synthetic id, so the lowering never resolves one of
+/// them to a type the checker recorded for the program being compiled.
+pub fn parse_detached(source: &str) -> (Program, Vec<crate::parser::ParseError>) {
+    let (mut program, errors) = crate::parser::parse(source);
+    let mut allocator = NodeIdAllocator::synthetic();
+    for stmt in &mut program.statements {
+        reassign_statement_expr_node_ids(stmt, &mut allocator);
+    }
+    (program, errors)
+}
+
+/// First node id of the range reserved for template interpolation bodies.
+/// See [`parse_template_interpolation`].
+const TEMPLATE_NODE_ID_BASE: usize = 1 << 62;
+
+/// Parse the body of the `index`-th `${...}` interpolation of the template
+/// literal whose node id is `template_node_id`.
+///
+/// Template literals keep their interpolations as source text, so the
+/// checker and the backends each re-parse them. The body's expressions are
+/// numbered from a base derived from `(template_node_id, index)`, above
+/// every parser-assigned id and below the synthetic range: a backend that
+/// re-parses the same interpolation gets the same ids, and so finds the
+/// types the checker recorded for it, without aliasing any other node.
+pub fn parse_template_interpolation(
+    body: &str,
+    template_node_id: usize,
+    index: usize,
+) -> (Program, Vec<crate::parser::ParseError>) {
+    let (mut program, errors) = crate::parser::parse(body);
+    let base = if template_node_id < (1 << 32) && index < (1 << 10) {
+        TEMPLATE_NODE_ID_BASE + (template_node_id << 24) + (index << 14)
+    } else {
+        SYNTHETIC_NODE_ID_BASE
+    };
+    let mut allocator = NodeIdAllocator::starting_at(base);
+    for stmt in &mut program.statements {
+        reassign_statement_expr_node_ids(stmt, &mut allocator);
+    }
+    (program, errors)
+}
 
 impl Default for NodeIdAllocator {
     fn default() -> Self {

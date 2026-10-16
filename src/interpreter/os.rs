@@ -195,14 +195,25 @@ fn make_result_failure(err: &std::io::Error) -> Value {
 
 /// Create an os Result failure value with explicit kind/message (non-OS errors).
 fn make_result_failure_with_kind(kind: &str, message: impl Into<String>) -> Value {
+    make_result_failure_with_code(kind, message, -1)
+}
+
+/// An os Result failure for an argument the function rejects before
+/// touching the OS (`EINVAL`, as the compiled backends report it).
+fn make_invalid_argument_failure(message: impl Into<String>) -> Value {
+    const EINVAL: i64 = 22;
+    make_async_fulfilled(make_result_failure_with_code("invalid", message, EINVAL))
+}
+
+fn make_result_failure_with_code(kind: &str, message: impl Into<String>, code: i64) -> Value {
     let message = message.into();
     let inner = Value::pack(vec![
         ("ok".into(), Value::Bool(false)),
-        ("code".into(), Value::Int(-1)),
+        ("code".into(), Value::Int(code)),
         ("message".into(), Value::str(message.clone())),
         ("kind".into(), Value::str(kind.to_string())),
     ]);
-    let error_val = make_io_error_with_kind(kind, &message, -1);
+    let error_val = make_io_error_with_kind(kind, &message, code);
     Value::pack(vec![
         ("__value".into(), inner),
         ("throw".into(), error_val),
@@ -519,6 +530,80 @@ fn parse_http_response_text(response_text: &str) -> Option<Value> {
     ))
 }
 
+/// Whether the response head (status line + header lines, without the blank
+/// line) declares `Transfer-Encoding` with `chunked` as the final coding. The
+/// codings of every `Transfer-Encoding` line form one list; empty list
+/// elements are ignored.
+fn response_head_is_chunked(head: &[u8]) -> bool {
+    let mut has_te = false;
+    let mut final_chunked = false;
+    for line in head.split(|&b| b == b'\n').skip(1) {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        let Some(colon) = line.iter().position(|&b| b == b':') else {
+            continue;
+        };
+        if !line[..colon]
+            .trim_ascii()
+            .eq_ignore_ascii_case(b"transfer-encoding")
+        {
+            continue;
+        }
+        has_te = true;
+        for token in line[colon + 1..].split(|&b| b == b',') {
+            let token = token.trim_ascii();
+            if !token.is_empty() {
+                final_chunked = token.eq_ignore_ascii_case(b"chunked");
+            }
+        }
+    }
+    has_te && final_chunked
+}
+
+/// Decode a `Transfer-Encoding: chunked` response body. Lines end with CRLF
+/// or LF; a chunk-size line is 1 to 16 hex digits with optional ASCII
+/// whitespace around them and an ignored `;` extension. Everything after the last chunk
+/// (trailers) is ignored. Returns `None` when the framing is malformed or the
+/// body ends early. The native runtime (`taida_os_http_decode_chunked`)
+/// applies the same rules.
+fn decode_chunked_response_body(data: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(data.len());
+    let mut pos = 0usize;
+    loop {
+        let line_len = data[pos..].iter().position(|&b| b == b'\n')?;
+        let line = &data[pos..pos + line_len];
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        let size_part = match line.iter().position(|&b| b == b';') {
+            Some(semi) => &line[..semi],
+            None => line,
+        };
+        let size_part = size_part.trim_ascii();
+        if size_part.is_empty()
+            || size_part.len() > 16
+            || !size_part.iter().all(|b| b.is_ascii_hexdigit())
+        {
+            return None;
+        }
+        let size = u64::from_str_radix(std::str::from_utf8(size_part).ok()?, 16).ok()?;
+        pos += line_len + 1;
+        if size == 0 {
+            return Some(out);
+        }
+        let size = usize::try_from(size).ok()?;
+        if size > data.len() - pos {
+            return None;
+        }
+        out.extend_from_slice(&data[pos..pos + size]);
+        pos += size;
+        if data[pos..].starts_with(b"\r\n") {
+            pos += 2;
+        } else if data[pos..].starts_with(b"\n") {
+            pos += 1;
+        } else {
+            return None;
+        }
+    }
+}
+
 async fn http_request_async_via_curl(
     method: &str,
     url: &str,
@@ -635,6 +720,19 @@ async fn http_request_async(
         .is_err()
     {
         return make_http_failure();
+    }
+
+    // A chunked body is decoded here, on the raw bytes. The HTTPS path gets
+    // its body already decoded by curl, which also keeps the
+    // `transfer-encoding` header in the reported headers.
+    if let Some(head_len) = response_buf.windows(4).position(|w| w == b"\r\n\r\n")
+        && response_head_is_chunked(&response_buf[..head_len])
+    {
+        let Some(body) = decode_chunked_response_body(&response_buf[head_len + 4..]) else {
+            return make_http_lax_failure_with_kind("invalid");
+        };
+        response_buf.truncate(head_len + 4);
+        response_buf.extend_from_slice(&body);
     }
 
     let response_str = String::from_utf8_lossy(&response_buf);
@@ -1358,7 +1456,7 @@ impl Interpreter {
                     Ok(output) => {
                         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                        let code = output.status.code().unwrap_or(-1) as i64;
+                        let code = extract_exit_code(output.status);
                         let inner = process_inner(stdout, stderr, code);
 
                         if code == 0 {
@@ -1395,7 +1493,7 @@ impl Interpreter {
                     Ok(output) => {
                         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                        let code = output.status.code().unwrap_or(-1) as i64;
+                        let code = extract_exit_code(output.status);
 
                         if code == 0 {
                             let inner = process_inner(stdout, stderr, code);
@@ -1610,6 +1708,12 @@ impl Interpreter {
                 let host = self.eval_os_str_arg(args, 0, "tcpConnect", "host")?;
                 let port = self.eval_os_port_arg(args, 1, "tcpConnect", "port")?;
                 let timeout_ms = self.eval_os_timeout_arg(args, 2, "tcpConnect")?;
+                let port = match port {
+                    Ok(port) => port,
+                    Err(message) => {
+                        return Ok(Some(Signal::Value(make_invalid_argument_failure(message))));
+                    }
+                };
 
                 let rt = self.tokio_runtime.clone();
                 let socket_handles = self.socket_handles.clone();
@@ -1670,6 +1774,12 @@ impl Interpreter {
             "tcpListen" => {
                 let port = self.eval_os_port_arg(args, 0, "tcpListen", "port")?;
                 let timeout_ms = self.eval_os_timeout_arg(args, 1, "tcpListen")?;
+                let port = match port {
+                    Ok(port) => port,
+                    Err(message) => {
+                        return Ok(Some(Signal::Value(make_invalid_argument_failure(message))));
+                    }
+                };
 
                 let rt = self.tokio_runtime.clone();
                 let listener_handles = self.listener_handles.clone();
@@ -2116,13 +2226,16 @@ impl Interpreter {
                 let size = match args.get(1) {
                     Some(arg) => match self.eval_expr(arg)? {
                         Signal::Value(Value::Int(n)) if n >= 0 => n as usize,
-                        Signal::Value(Value::Int(n)) => {
-                            return Err(RuntimeError {
-                                message: format!(
-                                    "socketRecvExact: size must be a non-negative Int, got {}",
-                                    n
+                        Signal::Value(Value::Int(_)) => {
+                            // A negative size is a failed read (an `invalid`
+                            // IoError in the Lax), not a runtime error.
+                            return Ok(Some(Signal::Value(make_async_fulfilled(
+                                make_socket_lax_failure(
+                                    Value::bytes(Vec::new()),
+                                    "SocketRecvExact error",
+                                    "invalid",
                                 ),
-                            });
+                            ))));
                         }
                         Signal::Value(v) => {
                             return Err(RuntimeError {
@@ -2212,6 +2325,12 @@ impl Interpreter {
                 let host = self.eval_os_str_arg(args, 0, "udpBind", "host")?;
                 let port = self.eval_os_port_arg(args, 1, "udpBind", "port")?;
                 let timeout_ms = self.eval_os_timeout_arg(args, 2, "udpBind")?;
+                let port = match port {
+                    Ok(port) => port,
+                    Err(message) => {
+                        return Ok(Some(Signal::Value(make_invalid_argument_failure(message))));
+                    }
+                };
 
                 let rt = self.tokio_runtime.clone();
                 let udp_socket_handles = self.udp_socket_handles.clone();
@@ -2275,6 +2394,12 @@ impl Interpreter {
                 let port = self.eval_os_port_arg(args, 2, "udpSendTo", "port")?;
                 let data = self.eval_os_bytes_arg(args, 3, "udpSendTo", "data")?;
                 let timeout_ms = self.eval_os_timeout_arg(args, 4, "udpSendTo")?;
+                let port = match port {
+                    Ok(port) => port,
+                    Err(message) => {
+                        return Ok(Some(Signal::Value(make_invalid_argument_failure(message))));
+                    }
+                };
                 let udp_handle = self
                     .udp_socket_handles
                     .lock()
@@ -2872,14 +2997,38 @@ impl Interpreter {
                     func_name, field_name, v
                 ),
             }),
-            other => Err(RuntimeError {
+            other => Err(self.argument_signal_error(func_name, field_name, other)),
+        }
+    }
+
+    /// The error for an argument whose evaluation ended in a signal instead
+    /// of a value. A throw stays catchable — the nearest error ceiling
+    /// recovers it from `pending_throw`, as for a throw in a callback —
+    /// and the gorilla still ends the program.
+    fn argument_signal_error(
+        &mut self,
+        func_name: &str,
+        arg_name: &str,
+        signal: Signal,
+    ) -> RuntimeError {
+        match signal {
+            Signal::Throw(err) => {
+                let message = format!(
+                    "{}: error while evaluating '{}': {}",
+                    func_name, arg_name, err
+                );
+                self.pending_throw = Some(err);
+                RuntimeError { message }
+            }
+            Signal::Gorilla => self.gorilla_escape(),
+            other => RuntimeError {
                 message: format!(
                     "{}: unexpected signal evaluating '{}': {}",
                     func_name,
-                    field_name,
+                    arg_name,
                     signal_name(&other)
                 ),
-            }),
+            },
         }
     }
 
@@ -2899,51 +3048,36 @@ impl Interpreter {
             Signal::Value(v) => Err(RuntimeError {
                 message: format!("{}: {} must be a string, got {}", func_name, arg_name, v),
             }),
-            other => Err(RuntimeError {
-                message: format!(
-                    "{}: unexpected signal evaluating '{}': {}",
-                    func_name,
-                    arg_name,
-                    signal_name(&other)
-                ),
-            }),
+            other => Err(self.argument_signal_error(func_name, arg_name, other)),
         }
     }
 
     /// Helper: evaluate a socket port argument for os functions.
-    /// ports used to be truncated with `as u16`, so `-1`
-    /// bound as 65535 and out-of-range values silently connected /
-    /// listened on an unintended port. Values outside `0..=65535` now
-    /// fail with an explicit error, mirroring `eval_os_timeout_arg`.
+    /// Ports used to be truncated with `as u16`, so `-1` bound as 65535
+    /// and out-of-range values silently connected / listened on an
+    /// unintended port. A value outside `0..=65535` is returned as
+    /// `Err(message)`; the function then resolves to a failed `Result`,
+    /// like any other socket failure.
     fn eval_os_port_arg(
         &mut self,
         args: &[Expr],
         index: usize,
         func_name: &str,
         arg_name: &str,
-    ) -> Result<u16, RuntimeError> {
+    ) -> Result<Result<u16, String>, RuntimeError> {
         let arg = args.get(index).ok_or_else(|| RuntimeError {
             message: format!("{}: missing argument '{}'", func_name, arg_name),
         })?;
         match self.eval_expr(arg)? {
-            Signal::Value(Value::Int(n)) if (0..=65535).contains(&n) => Ok(n as u16),
-            Signal::Value(Value::Int(n)) => Err(RuntimeError {
-                message: format!(
-                    "{}: {} must be within 0..=65535, got {}",
-                    func_name, arg_name, n
-                ),
-            }),
+            Signal::Value(Value::Int(n)) if (0..=65535).contains(&n) => Ok(Ok(n as u16)),
+            Signal::Value(Value::Int(_)) => Ok(Err(format!(
+                "{}: {} must be within 0..=65535",
+                func_name, arg_name
+            ))),
             Signal::Value(v) => Err(RuntimeError {
                 message: format!("{}: {} must be an Int, got {}", func_name, arg_name, v),
             }),
-            other => Err(RuntimeError {
-                message: format!(
-                    "{}: unexpected signal evaluating '{}': {}",
-                    func_name,
-                    arg_name,
-                    signal_name(&other)
-                ),
-            }),
+            other => Err(self.argument_signal_error(func_name, arg_name, other)),
         }
     }
 
@@ -2965,14 +3099,7 @@ impl Interpreter {
             Signal::Value(v) => Err(RuntimeError {
                 message: format!("{}: {} must be Bytes, got {}", func_name, arg_name, v),
             }),
-            other => Err(RuntimeError {
-                message: format!(
-                    "{}: unexpected signal evaluating '{}': {}",
-                    func_name,
-                    arg_name,
-                    signal_name(&other)
-                ),
-            }),
+            other => Err(self.argument_signal_error(func_name, arg_name, other)),
         }
     }
 
@@ -2994,14 +3121,7 @@ impl Interpreter {
             Signal::Value(v) => Err(RuntimeError {
                 message: format!("{}: {} must be an Int, got {}", func_name, arg_name, v),
             }),
-            other => Err(RuntimeError {
-                message: format!(
-                    "{}: unexpected signal evaluating '{}': {}",
-                    func_name,
-                    arg_name,
-                    signal_name(&other)
-                ),
-            }),
+            other => Err(self.argument_signal_error(func_name, arg_name, other)),
         }
     }
 
@@ -3027,13 +3147,7 @@ impl Interpreter {
             Signal::Value(v) => Err(RuntimeError {
                 message: format!("{}: timeoutMs must be an Int, got {}", func_name, v),
             }),
-            other => Err(RuntimeError {
-                message: format!(
-                    "{}: unexpected signal evaluating 'timeoutMs': {}",
-                    func_name,
-                    signal_name(&other)
-                ),
-            }),
+            other => Err(self.argument_signal_error(func_name, "timeoutMs", other)),
         }
     }
 }

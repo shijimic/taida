@@ -37,15 +37,20 @@ fn cc_available() -> bool {
 }
 
 fn unique_tmp(prefix: &str, ext: &str) -> std::path::PathBuf {
+    // The tests of this file run in parallel in one process; the counter
+    // keeps two names made in the same clock tick apart.
+    static NEXT_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock")
         .as_nanos();
     std::env::temp_dir().join(format!(
-        "{}_{}_{}.{}",
+        "{}_{}_{}_{}.{}",
         prefix,
         std::process::id(),
         nanos,
+        id,
         ext
     ))
 }

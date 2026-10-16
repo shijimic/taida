@@ -17,6 +17,8 @@ taida --no-check
 
 - 引数なしで REPL を起動します。
 - `--no-check` を付けると REPL 内の型チェックをスキップします。
+- 型検査は 1 つのセッションを通して働きます。前の入力で束縛した変数や定義した関数・型は、次の入力の型検査から見えます。型エラーは表示されますが、入力は続けて評価されます。
+- 入力が途中で終わっている間(閉じていない括弧やテンプレート文字列、`=` で始めた関数定義の本体、`=> :Type` を待っている定義)は、続きを次の行から読みます。演算子の後で行を分けることはできないので、`x <= 1 +` のような入力は待たずに構文エラーを表示します。空行を入力すると、その時点の入力として評価(または構文エラーを表示)します(テンプレート文字列の中の空行は文字列の一部です)。ブロックの本体を持つラムダの次に、字下げのない行を入力すると、その行は新しい入力として評価します。失敗した入力が束縛したはずの名前は、次の入力の型検査から見えなくなります。
 
 ### ファイル実行
 
@@ -46,7 +48,14 @@ taida --no-check <FILE>
 `.taida/` ディレクトリはプロジェクトルートマーカーには **含まれません**。
 `packages.tdm` / `taida.toml` / `.git` のいずれも持たないディレクトリは
 「プロジェクトルートではない」と扱われ、CLI はファイル単独実行モードとして
-フォールバックします。`.taida/` はビルドキャッシュ (`build/`, `deps/`,
+フォールバックします。
+
+共有の一時ディレクトリに直接置かれたマーカーは採用しません。共有の一時
+ディレクトリとは、システムの一時ディレクトリ (`TMPDIR`) そのものと、
+`/tmp` や `/var/tmp` のように誰でも書き込めてスティッキービットの付いた
+ディレクトリです。そこには他のユーザーもファイルを置けるため、その下にある
+スクリプトのプロジェクトを表しません。同じ理由で、共有の一時ディレクトリの
+`.taida/deps/` は依存の探索に使いません。`.taida/` はビルドキャッシュ (`build/`, `deps/`,
 `taida.lock`) の格納先として使われますが、ルート判定の trigger には
 なりません。`packages.tdm` を持たない単発スクリプト実行でプロジェクト
 ルート扱いが必要な場合は、明示的に空の `packages.tdm` を置いてください
@@ -62,7 +71,7 @@ taida --no-check <FILE>
 | `taida` / `taida <FILE>` | REPL / インタプリタ実行 |
 | `build` | Native / WASM 成果物の生成 |
 | `way` | 品質ハブ。check / lint / verify / todo を集約 |
-| `graph` | 構造グラフの抽出 / summary / query |
+| `graph` | 構造グラフの抽出 / summary |
 | `doc` | ドキュメントコメントから Markdown を生成 |
 | `ingot` | パッケージ・依存ハブ。deps / install / update / publish / cache を集約 |
 | `init` | プロジェクト雛形の生成 |
@@ -180,9 +189,9 @@ WASM SIMD (`simd128`) 有効化ポリシー:
 | プロファイル | `-msimd128` | 生成 wasm が要求する feature | 推奨ランタイム |
 |---|---|---|---|
 | `wasm-min` | なし | simd128 を要求しない | simd128 非対応ランタイムでも実行可 |
-| `wasm-wasi` | あり | `simd128` を要求 | wasmtime 42+ |
+| `wasm-wasi` | あり | `simd128` を要求 | wasmtime 33+ |
 | `wasm-edge` | あり | `simd128` を要求 | Cloudflare Workers などのエッジランタイム |
-| `wasm-full` | あり | `simd128` を要求 | wasmtime 42+ |
+| `wasm-full` | あり | `simd128` を要求 | wasmtime 33+ |
 
 ---
 
@@ -199,7 +208,7 @@ taida way todo [--format text|json|jsonl|sarif] [--strict] [--quiet] [PATH]
 `taida way <PATH>` は品質ハブをまとめて実行する全工程ゲートです。`taida way` のように PATH を省略した場合は hub help を表示します。full gate は以下を直列に実行し、ERROR の検知が1件でもあれば終了コード `1` で終了します。
 
 1. `taida way check <PATH>`: parse + type
-2. `taida way lint <PATH>`: 命名規則 (`E1801`〜`E1809`)
+2. `taida way lint <PATH>`: 命名規則 (`E1801`〜`E1809`) と doc-comment の `@Since` の書式 (`E1810`)
 3. `taida way verify <PATH>`: 構造検証
 
 共通オプション:
@@ -209,6 +218,20 @@ taida way todo [--format text|json|jsonl|sarif] [--strict] [--quiet] [PATH]
 | `--format <text\|json\|jsonl\|sarif>` | 出力形式 |
 | `--strict` | WARNING も終了コード `1` として扱う |
 | `--quiet` / `-q` | 診断出力を抑制し、終了コードだけを返す |
+
+終了コード:
+
+| 終了コード | 意味 |
+|---|---|
+| `0` | ERROR の検知なし(`--strict` では WARNING もなし) |
+| `1` | ERROR の検知あり。読み込みや構文解析ができなかったファイルも ERROR として数えます |
+| `2` | 使い方の誤り(値のないオプション、未知のオプション、2 つ目の `<PATH>` など)。`way lint` は、ファイルを読み込めない・構文解析できないために検査を完了できなかった場合も `2` を返します |
+
+`--format json` / `--format jsonl` / `--format sarif` では、どのサブコマンドも、読み込みや構文解析ができなかったファイルを、その形式の診断(`parse` / `io`)として出力します。`taida way <PATH>` の `--format json` は、実行した工程の文書をまとめた 1 つの JSON 文書(`{"schema": "taida.way.v1", "stages": {"check": ..., "lint": ..., "verify": ...}}`)を、`--format sarif` は各工程の run を含む 1 つの SARIF 文書を出力します。全工程ゲートは ERROR を出した工程で終了するので、`stages` にはそこまでに実行した工程だけが入ります。`--format jsonl` は工程ごとの行の並びです。
+
+`<PATH>` にディレクトリを渡すと、その下の `.td` ファイルを再帰的に検査します。ディレクトリ内を指すシンボリックリンク(ローカル依存を入れたリンクなど)はたどらず、リンク先はそれ自身の場所で検査します。ディレクトリの外を指すリンクは、循環しても各ディレクトリを 1 度だけたどります。読めないディレクトリは入力エラーとして報告します。
+
+`taida way todo` は `TODO` モールドと `Stub` モールドを、分岐の腕の中やテンプレートの補間の中も含めて探します。`TODO` は id と task つきで一覧し(JSON の `total` / `todos` / `byId` / `byFile`)、`Stub` は場所だけを別に一覧します(JSON の `stubs`)。`taida build --release` は、同じ走査で `TODO` / `Stub` が見つかるとビルドを拒否します。`jsonl` と `sarif` は `TODO` と `Stub` を 1 件ずつ出力します (`jsonl` では `mold` が `TODO` か `Stub` かを示します)。読み込みや構文解析に失敗したファイルは、`json` では `errors`、`jsonl` / `sarif` では ERROR の項目として出力し、終了コード `1` で終了します。JSON の `total` は `TODO` の件数で、`jsonl` の summary の `total` は `TODO`・`Stub`・エラーの合計です。
 
 `--no-check` は `taida way` 配下では拒否されます。品質ハブの責務と矛盾するためです。
 
@@ -221,6 +244,8 @@ taida way todo [--format text|json|jsonl|sarif] [--strict] [--quiet] [PATH]
 | `dead-code` | warning | 到達不能関数の検出 |
 | `type-consistency` | error | 型階層の循環検出 |
 | `mutual-recursion` | error | 相互再帰構造の検証 |
+| `mutual-recursion-native` | error | Native / WASM で末尾のみの相互再帰サイクルに含まれない相互再帰の拒否 (`E0700`) |
+| `direct-non-tail-recursion` | error | 末尾位置にない直接再帰の拒否 (`E0701`) |
 | `unchecked-division` | warning | 除算の安全性チェック |
 | `direction-constraint` | error | 単一方向制約 |
 | `unchecked-lax` | warning | Lax の未検査利用検出 |
@@ -245,6 +270,12 @@ taida graph summary [--format text|json|sarif] <PATH>
 
 `graph summary` は旧 `inspect` の構造サマリ部分だけを提供します。verify の結果は含めません。必要に応じて `taida way verify --format sarif` と併用してください。
 
+`<PATH>` は 1 つだけ受け付けます。
+
+`--recursive` の出力では、`entry` 以外のモジュールの `file` を、エントリのあるディレクトリからの相対パス(`./lib.td`)で示します(そのディレクトリの外にあるモジュールは絶対パスです)。たどれなかった(存在しない、読み込めない、構文解析できない)ローカル import は、そのモジュールの `unresolved_imports` に一覧します。
+
+`functions` の `calls` は、関数の本体のどの位置から呼ばれた関数も含み(引数・演算子の中・ぶちパックや型のフィールド値・テンプレートの補間・分岐の腕・入れ子の関数の本体)、関数値として使っただけの関数も含みます。型のメソッドは `Type.method` の名前で `functions` に並びます。
+
 ---
 
 ## `taida init`
@@ -261,6 +292,7 @@ taida init [--target rust-addon] [DIR]
 - `DIR` を省略した場合はカレントディレクトリに初期化します。
 - 通常モードでは `packages.tdm`、`main.td`（存在しない場合のみ）、`.taida/` を作成します。
 - `--target rust-addon` を指定すると `Cargo.toml`、`src/lib.rs`、`native/addon.toml`、`taida/<name>.td`、`README.md` を含むプロジェクトを作成します。
+- 既存のファイルは上書きしません。`--target rust-addon` では、`Cargo.toml`、`src/lib.rs`、`native/addon.toml`、`taida/<name>.td`、`.github/workflows/release.yml` のどれかが既にあると、何も書かずに停止します。`.gitignore` と `README.md` は存在しない場合のみ作成します。
 
 ---
 
@@ -301,9 +333,10 @@ taida ingot cache [clean] [--addons|--store|--store-pkg <org>/<name>|--all] [--y
 挙動:
 - 解決できた依存をインストールし、`.taida/taida.lock` を生成または更新します。
 - 通常の `install` でも既存 lockfile と解決結果の triple mismatch は `[E32K2_LOCKFILE_INTEGRITY_MISMATCH]` で拒否します。依存更新は `taida ingot update`、旧 lockfile 変換は `taida ingot migrate-lockfile` を使います。
-- アドオン依存は `native/addon.toml` の `[library.prebuild]` に従い、SHA-256 検証付きで prebuild を取得します。
+- アドオン依存は `native/addon.toml` の `[library.prebuild]` に従い、SHA-256 検証付きで prebuild を取得します。取得した prebuild はこのプロジェクトの `.taida/deps/<pkg>/native/` に置き、`~/.taida/store/` のパッケージやパス依存の元のディレクトリには書き込みません。
+- `.taida/` または `.taida/deps/` がシンボリックリンクの場合、install はリンク先に書き込まずに停止します。
 - third-party addon prebuild は、GitHub Release の `published_at` が既定の cooling-off window を満たすまで拒否されます。既定は `taida-lang/*` が `0d`、それ以外が `3d` です。
-- release age は CLI override、`packages.tdm` の `[security] min_release_age = "3d"`、グローバル `~/.taida/config.toml` の `[security] min_release_age`、環境変数 `TAIDA_MIN_RELEASE_AGE`、組み込み既定の順に解決します。`--allow-fresh` を使った実行は `.taida/install-audit.log` に記録します。
+- release age は CLI override、`packages.tdm` の `[security] min_release_age = "3d"`、グローバル `~/.taida/config.toml` の `[security] min_release_age`、環境変数 `TAIDA_MIN_RELEASE_AGE`、組み込み既定の順に解決します。採用される設定の値が不正な場合は、既定値に戻さずに install を停止します (`TAIDA_MIN_RELEASE_AGE` と同じ扱いです)。`--allow-fresh` を使った実行は `.taida/install-audit.log` に記録します。
 - addon lock entry は target、SHA-256、release `published_at`、publisher login を記録します。publisher 変更や `published_at` の後退は hard fail です。
 - アドオンキャッシュは `~/.taida/addon-cache/` に置かれます。
 
@@ -332,12 +365,14 @@ taida ingot cache [clean] [--addons|--store|--store-pkg <org>/<name>|--all] [--y
 
 1. `packages.tdm` のアイデンティティ (`<<<@version owner/name`) を検証
 2. `packages.tdm` のファサードと entry モジュールの公開 API が一致することを検証
-3. 前回のリリースタグと HEAD の公開 API 差分から次バージョンを決定
+3. 前回のリリースタグと HEAD の公開 API 差分から次バージョンを決定 (公開 API は後述)
 4. `git tag <version>` + `git push origin <tag>`
 
 CLI はローカルビルド、`addon.lock.toml` の生成、`native/addon.toml` / `packages.tdm` の書き換え、GitHub リリースの作成、リリースアセットのアップロードのいずれも行いません。リリース作成はアドオン側 CI の責務です。
 
 facade 検証では、`packages.tdm` の `<<<@version owner/name @(symbols)` と entry module の `<<< @(symbols)` を双方向に比較します。entry module が export していない symbol を facade に書いた場合、または entry module が export している symbol を facade に書き忘れた場合、publish は tag を作成する前に拒否されます。
+
+公開 API は、利用者が import できる名前です。`packages.tdm` のファサードに書いたシンボル (ファサードにシンボルがない場合は entry module の export) と、アドオンパッケージでは `native/addon.toml` の `[functions]` とファサード `taida/<stem>.td` の export がこれに当たります。アドオンパッケージでない場合は、`taida/` 直下の各 `.td` の export も含めます。`taida/` の下のサブディレクトリはパッケージの内部として扱います。
 
 自動バージョン繰り上げ:
 
@@ -381,7 +416,9 @@ taida ingot cache clean --all [--yes]
 taida doc generate [-o OUTPUT] <PATH>
 ```
 
-ドキュメントコメントから Markdown を生成します。`<PATH>` にはファイルまたはディレクトリを指定できます。
+ドキュメントコメントから Markdown を生成します。`<PATH>` にはファイルまたはディレクトリを指定できます。型(ぶちパック・モールド・継承)、Enum、関数を出力し、型のメソッドは型の下に節として出力します。
+
+読み込めない、または構文解析できないファイルがあると、そのファイルを飛ばして残りを出力したうえで、終了コード `1` で終了します。
 
 ---
 
@@ -393,6 +430,10 @@ taida lsp
 
 Tokio ランタイム上で LSP サーバーを起動します（stdio トランスポート）。
 
+- 診断は `taida way check` と同じ内容です。型エラーはすべて Error で、`[E####]` の診断コードを `Diagnostic.code` に持ちます。直接の非末尾再帰(`E0701`)も報告します。文書が `file://` の URI のときは、そのファイルの位置から import 先のモジュールを解決します。
+- `exit` 通知を受けると、標準入力が閉じるのを待たずに終了します。終了コードは、先に `shutdown` を受けていれば `0`、そうでなければ `1` です。標準入力が閉じたときは `0` で終了します。
+- JSON-RPC として読み取れないメッセージ(JSON でない本文、`Content-Length` の欠けたヘッダ、リクエストでない JSON)には、エラー応答(JSON でない・ヘッダの誤りは `-32700`、リクエストでない JSON は `-32600`)を返して、動作を続けます。
+
 ---
 
 ## `taida auth`
@@ -402,8 +443,8 @@ taida auth <login|logout|status>
 ```
 
 - `login`: GitHub Device Authorization Flow を開始し、トークンを保存します。
-- `logout`: 保存済みトークンを削除します。
-- `status`: 現在の認証状態を表示します。
+- `logout`: 保存済みトークンを削除します。保存されたファイルが壊れていて読めない場合は、その旨を表示してファイルを削除します。
+- `status`: 現在の認証状態を表示します。保存されたファイルが壊れている場合は、その旨を標準エラーに表示して終了コード `1` で終了します。
 
 ---
 
@@ -466,4 +507,10 @@ cache ディレクトリは `HOME` (Windows では `USERPROFILE`) を起点に�
 
 `install.sh` の `TAIDA_VERIFY_SIGNATURES` 既定値は `required` です。`taida upgrade` の cosign 必須
 契約と `install.sh` の trust model はここで一致し、明示的に `TAIDA_VERIFY_SIGNATURES=best-effort` /
-`off` を指定したオペレーターだけが緩いモードに落ちます。
+`off` を指定したオペレーターだけが緩いモードに落ちます。`install.sh` はこの値の大文字・小文字を
+区別せず、`required` (`enforce` / `1` / `true` / `yes` / `on` も同じ)、`best-effort`、`off`
+(`0` / `false` / `no` も同じ) 以外の値は緩いモードに落とさずに終了コード 1 で停止します。
+`taida ingot install` がアドオンの配布物を検証するときも、この値を同じ意味で読み、知らない値ではインストールを止めます。
+未設定のときは、`taida-lang` の公式リリースの URL なら `best-effort`、それ以外の URL では検証しません。
+`--prefix` (`TAIDA_INSTALL_PREFIX`) に相対パスを渡した場合は、`install.sh` を実行したディレクトリ
+からのパスとして扱います。

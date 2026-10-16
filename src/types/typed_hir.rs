@@ -20,7 +20,7 @@
 //! this table; nested residual `Unknown` remains visible so backend
 //! boundaries can reject it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::parser::Expr;
 
@@ -42,6 +42,19 @@ impl ExprId {
 #[derive(Debug, Clone, Default)]
 pub struct TypedExprTable {
     types: HashMap<ExprId, Type>,
+    /// Type of the value each pipeline stage passes on, keyed by the stage
+    /// expression. It differs from the stage's own type when the stage is
+    /// applied to the piped value (`x => half`: `half` is a function, the
+    /// stage passes on its result).
+    stage_results: HashMap<ExprId, Type>,
+    /// Names that refer to a function the checker gives no full type: a
+    /// prelude or core function used as a value (`f <= jsonEncode`). Their
+    /// parameters take any value, so no `Type` can be published for them,
+    /// but the backends still need to know that the value is a function.
+    function_refs: HashSet<ExprId>,
+    /// While positive, only fully resolved types are published (see
+    /// [`TypedExprTable::begin_best_effort`]).
+    best_effort_depth: usize,
 }
 
 impl TypedExprTable {
@@ -55,13 +68,68 @@ impl TypedExprTable {
     /// caught by invariant checks.
     pub fn record(&mut self, expr: &Expr, ty: Type) {
         let id = ExprId::from_expr(expr);
+        // Synthetic nodes stand for no source expression; a record for one
+        // would be found by every other synthetic node.
+        if id.0 >= crate::parser::SYNTHETIC_NODE_ID_BASE {
+            return;
+        }
         let suppress_unpublishable = matches!(&ty, Type::Unknown)
-            || matches!(&ty, Type::List(inner) if matches!(inner.as_ref(), Type::Unknown));
+            || matches!(&ty, Type::List(inner) if matches!(inner.as_ref(), Type::Unknown))
+            || (self.best_effort_depth > 0 && ty.contains_concrete_unknown());
         if suppress_unpublishable {
             self.types.remove(&id);
         } else {
             self.types.insert(id, ty);
         }
+    }
+
+    /// Record the type of the value the pipeline stage `stage` passes on.
+    pub fn record_stage_result(&mut self, stage: &Expr, ty: Type) {
+        let id = ExprId::from_expr(stage);
+        if id.0 >= crate::parser::SYNTHETIC_NODE_ID_BASE {
+            return;
+        }
+        if ty.contains_concrete_unknown() {
+            self.stage_results.remove(&id);
+        } else {
+            self.stage_results.insert(id, ty);
+        }
+    }
+
+    /// Type of the value the pipeline stage `stage` passes on, if recorded.
+    pub fn stage_result(&self, stage: &Expr) -> Option<&Type> {
+        self.stage_results.get(&ExprId::from_expr(stage))
+    }
+
+    /// Enter a best-effort section: types inferred only to inform the
+    /// backends, outside the checker's own validation, are published only
+    /// when fully resolved, so a partial guess never trips the residual
+    /// `Unknown` invariant. Pair with [`TypedExprTable::end_best_effort`].
+    pub fn begin_best_effort(&mut self) {
+        self.best_effort_depth += 1;
+    }
+
+    pub fn end_best_effort(&mut self) {
+        self.best_effort_depth = self.best_effort_depth.saturating_sub(1);
+    }
+
+    /// Record whether the name `expr` refers to a function without a full
+    /// type (see `function_refs`).
+    pub fn note_function_ref(&mut self, expr: &Expr, is_function: bool) {
+        let id = ExprId::from_expr(expr);
+        if id.0 >= crate::parser::SYNTHETIC_NODE_ID_BASE {
+            return;
+        }
+        if is_function {
+            self.function_refs.insert(id);
+        } else {
+            self.function_refs.remove(&id);
+        }
+    }
+
+    /// Whether the name `expr` refers to a function without a full type.
+    pub fn is_function_ref(&self, expr: &Expr) -> bool {
+        self.function_refs.contains(&ExprId::from_expr(expr))
     }
 
     /// Lookup the type of `expr`. Returns `None` if not recorded.
@@ -96,10 +164,15 @@ impl TypedExprTable {
     }
 
     pub fn residual_unknown_types(&self) -> Vec<&Type> {
-        self.types
-            .values()
-            .filter(|t| t.contains_concrete_unknown())
-            .collect()
+        // In expression-id order, so the diagnostic lists them the same
+        // way on every run.
+        let mut residuals: Vec<(&ExprId, &Type)> = self
+            .types
+            .iter()
+            .filter(|(_, t)| t.contains_concrete_unknown())
+            .collect();
+        residuals.sort_by_key(|(id, _)| id.0);
+        residuals.into_iter().map(|(_, t)| t).collect()
     }
 
     /// Iterate over all recorded `(ExprId, Type)` pairs.

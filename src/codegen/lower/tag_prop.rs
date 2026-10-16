@@ -34,6 +34,89 @@ use crate::codegen::ir::*;
 use crate::parser::*;
 
 impl Lowering {
+    /// Runtime tag for a value of checker type `ty`, or `None` when the
+    /// type does not fix one: `Num`, a type parameter, an enum (its own
+    /// kind-entry path), an opaque or unknown type. Every heap object that
+    /// is not a Str / List / closure shares `TAG_PACK`; the runtime tells
+    /// those apart by their headers.
+    pub(crate) fn type_runtime_tag(&self, ty: &crate::types::Type) -> Option<i64> {
+        use crate::codegen::tag_prop::*;
+        use crate::types::Type;
+        Some(match ty {
+            Type::Int => TAG_INT,
+            Type::Float => TAG_FLOAT,
+            Type::Bool => TAG_BOOL,
+            Type::Str => TAG_STR,
+            Type::List(_) => TAG_LIST,
+            Type::Function(_, _) => TAG_CLOSURE,
+            Type::Bytes | Type::BuchiPack(_) | Type::Unit | Type::Error(_) => TAG_PACK,
+            Type::Generic(name, _) => match name.as_str() {
+                "Lax" | "Result" | "Async" | "Gorillax" | "RelaxedGorillax" | "HashMap" | "Set"
+                | "Stream" => TAG_PACK,
+                other if self.mold_defs.contains_key(other) => TAG_PACK,
+                _ => return None,
+            },
+            Type::Named(name) => {
+                if self.enum_defs.contains_key(name) {
+                    return None;
+                }
+                if self.type_field_types.contains_key(name)
+                    || self.type_fields.contains_key(name)
+                    || self.mold_defs.contains_key(name)
+                    || self.type_parents.contains_key(name)
+                    || self.imported_type_symbols.contains(name)
+                    || name == "Error"
+                {
+                    TAG_PACK
+                } else {
+                    return None;
+                }
+            }
+            Type::Num | Type::Unknown | Type::Any | Type::Json | Type::Molten => return None,
+        })
+    }
+
+    /// Runtime tag of `expr` as the checker typed it (see
+    /// [`Self::type_runtime_tag`]); `None` when the checker recorded no type
+    /// that fixes one. Kind decisions consult this first and only fall back
+    /// to syntax when it is `None`.
+    pub(crate) fn checked_tag(&self, expr: &Expr) -> Option<i64> {
+        if self.typed_expr_table.is_function_ref(expr) {
+            return Some(crate::codegen::tag_prop::TAG_CLOSURE);
+        }
+        let ty = self.typed_expr_table.lookup(expr)?;
+        self.type_runtime_tag(ty)
+    }
+
+    /// `TypeIs[expr, :target]()` decided from the checker's type of `expr`
+    /// when `target` is a primitive type and that type is concrete. `None`
+    /// leaves the check to the runtime (a type parameter, `Num`, an
+    /// unrecorded expression, or a user-defined target type).
+    pub(crate) fn static_primitive_type_is(&self, expr: &Expr, target: &str) -> Option<bool> {
+        use crate::types::Type;
+        if !matches!(target, "Int" | "Float" | "Num" | "Bool" | "Str" | "Bytes") {
+            return None;
+        }
+        let ty = self.typed_expr_table.lookup(expr)?;
+        match ty {
+            Type::Unknown | Type::Any | Type::Num | Type::Json | Type::Molten => return None,
+            Type::Named(name)
+                if !self.enum_defs.contains_key(name) && self.type_runtime_tag(ty).is_none() =>
+            {
+                return None;
+            }
+            _ => {}
+        }
+        Some(match target {
+            "Int" => *ty == Type::Int,
+            "Float" => *ty == Type::Float,
+            "Num" => matches!(ty, Type::Int | Type::Float),
+            "Bool" => *ty == Type::Bool,
+            "Str" => *ty == Type::Str,
+            _ => *ty == Type::Bytes,
+        })
+    }
+
     /// Maximum number of tagged arguments per call.
     /// Arguments beyond this limit are skipped (tag defaults to INT/0
     /// in the callee). 256 exceeds any practical function arity in
@@ -193,14 +276,24 @@ impl Lowering {
     /// TypeExpr から型タグへの変換（`Lowering` メソッド版）。
     ///
     /// 純関数版は `crate::codegen::tag_prop::type_expr_to_tag` にあり、
-    /// 本メソッドは state を持たないためそれに delegate する。
+    /// 本メソッドはそれに delegate する。ただし Enum の名前は、純関数版が
+    /// 知らない Enum 定義から判断する: Enum の値は実行時には序数（Int）で、
+    /// パックではない。
     pub(super) fn type_expr_to_tag(&self, ty: &crate::parser::TypeExpr) -> i64 {
+        if let crate::parser::TypeExpr::Named(name) = ty
+            && self.enum_defs.contains_key(name)
+        {
+            return crate::codegen::tag_prop::TAG_INT;
+        }
         crate::codegen::tag_prop::type_expr_to_tag(ty)
     }
 
     /// A-4c: 式から Pack フィールド値の型タグを推論する
     /// Returns: 0=Int, 1=Float, 2=Bool, 3=Str, 4=Pack, 5=List, 6=Closure, -1=Unknown
     pub(crate) fn expr_type_tag(&self, expr: &Expr) -> i64 {
+        if let Some(tag) = self.checked_tag(expr) {
+            return tag;
+        }
         match expr {
             Expr::IntLit(_, _) => 0,                              // TAIDA_TAG_INT
             Expr::FloatLit(_, _) => 1,                            // TAIDA_TAG_FLOAT
@@ -220,7 +313,8 @@ impl Lowering {
                     4
                 } else if self.list_vars.contains(name) {
                     5
-                } else if self.closure_vars.contains(name) {
+                } else if self.closure_vars.contains(name) || self.function_ref_vars.contains(name)
+                {
                     6
                 } else if self.int_vars.contains(name)
                     && !self.return_type_inferred_params.contains(name)
@@ -705,6 +799,7 @@ impl Lowering {
         arg: &Expr,
         rt_name: String,
     ) -> Result<IrVar, LowerError> {
+        self.reject_untyped_addon_value(func, arg)?;
         let compile_tag = self.expr_type_tag(arg);
 
         // (1) Compile-time Str fast path. The plain I/O entry expects a
@@ -719,8 +814,16 @@ impl Lowering {
 
         // (2) Polymorphic dispatch — every other tag.
         let is_param_tag_ident = compile_tag == -1 && self.is_param_tag_ident(arg);
+        // A Result's `throw` reads through `lower_field_access` (an absent
+        // error reads as the empty Error).
+        let is_result_throw = matches!(arg, Expr::FieldAccess(obj, field, _)
+        if field == "throw"
+            && matches!(
+                self.typed_expr_table.lookup(obj),
+                Some(crate::types::Type::Generic(name, _)) if name == "Result"
+            ));
         let is_field_access_unknown =
-            compile_tag == -1 && matches!(arg, Expr::FieldAccess(_, _, _));
+            compile_tag == -1 && matches!(arg, Expr::FieldAccess(_, _, _)) && !is_result_throw;
 
         let (arg_var, tag_var) = if is_field_access_unknown {
             // FieldAccess with compile-time-unknown tag: evaluate the
@@ -776,6 +879,17 @@ impl Lowering {
                 .param_tag_vars
                 .get(&name_str)
                 .expect("param_tag_vars.contains_key was checked");
+            (val, tag)
+        } else if compile_tag == -1
+            && let Some(shadow) = self.operand_shadow_kind(arg)
+        {
+            // A name bound by unmolding a Lax whose payload kind is known
+            // only at run time (`m.get("a") >=> a`): the kind the runtime
+            // recorded on the Lax (an unknown kind falls back to the
+            // runtime's own guess, as UNKNOWN does).
+            let val = self.lower_expr(func, arg)?;
+            let tag = func.alloc_var();
+            func.push(IrInst::UseVar(tag, shadow));
             (val, tag)
         } else {
             // Any remaining case: compile-time known tag (Bool / Int /

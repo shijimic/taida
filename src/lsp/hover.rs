@@ -106,33 +106,61 @@ fn format_doc_comments(doc_comments: &[String]) -> String {
 /// Get hover information for a position in the source.
 /// Returns a markdown string with type info, or None if no info available.
 pub fn get_hover_info(source: &str, position: Position) -> Option<String> {
+    get_hover_info_for_file(source, position, None)
+}
+
+/// [`get_hover_info`] for a document stored at `path`, so the names it
+/// imports from other modules are typed as `taida way check` types them.
+pub fn get_hover_info_for_file(
+    source: &str,
+    position: Position,
+    path: Option<&std::path::Path>,
+) -> Option<String> {
     let (program, parse_errors) = parse(source);
     if !parse_errors.is_empty() {
         return None;
     }
 
-    // Run type checker to populate scope info
-    let mut checker = TypeChecker::new();
-    checker.check_program(&program);
-
-    // Convert LSP 0-based UTF-16 offset to 0-based char index, then to
-    // 1-based column to match Span's convention.
-    let target_line = position.line as usize + 1; // Span uses 1-based
-    let line_text = source.lines().nth(position.line as usize).unwrap_or("");
-    let char_index =
-        super::utf16::utf16_offset_to_char_index(line_text, position.character as usize);
-    let target_col = char_index + 1;
-
-    // Walk the AST to find the identifier at this position
-    for stmt in &program.statements {
-        if let Some(info) =
-            find_hover_in_statement(stmt, target_line, target_col, &checker, &program.statements)
-        {
-            return Some(info);
+    // The server answers on its main thread, whose stack is the process
+    // default, so a deeply nested program is checked, walked and dropped on a
+    // stack sized for it.
+    crate::graph::walk::with_stack_for_owned(program, |program| {
+        // Run type checker to populate scope info
+        let mut checker = TypeChecker::new();
+        checker.set_compile_target(crate::types::CompileTarget::Interpreter);
+        if let Some(path) = path {
+            checker.set_source_file(path);
         }
-    }
+        checker.check_program(program);
 
-    None
+        // Convert LSP 0-based UTF-16 offset to 0-based char index, then to
+        // 1-based column to match Span's convention.
+        let target_line = position.line as usize + 1; // Span uses 1-based
+        let line_text = source.lines().nth(position.line as usize).unwrap_or("");
+        let mut char_index =
+            super::utf16::utf16_offset_to_char_index(line_text, position.character as usize);
+        // The lexer numbers columns from the first character after a byte order
+        // mark, which the editor counts as the first character of the line.
+        if position.line == 0 && source.starts_with('\u{feff}') {
+            char_index = char_index.saturating_sub(1);
+        }
+        let target_col = char_index + 1;
+
+        // Walk the AST to find the identifier at this position
+        for stmt in &program.statements {
+            if let Some(info) = find_hover_in_statement(
+                stmt,
+                target_line,
+                target_col,
+                &checker,
+                &program.statements,
+            ) {
+                return Some(info);
+            }
+        }
+
+        None
+    })
 }
 
 /// Search a statement for hover-relevant nodes at the given position.
@@ -145,13 +173,13 @@ fn find_hover_in_statement(
 ) -> Option<String> {
     match stmt {
         Statement::Assignment(assign) => {
-            // Check if cursor is on the variable name (target)
-            if assign.span.line == line {
-                // Check if cursor is on the value expression
-                if let Some(info) = find_hover_in_expr(&assign.value, line, col, checker, all_stmts)
-                {
-                    return Some(info);
-                }
+            // Check if cursor is on the value expression
+            if let Some(info) = find_hover_in_expr(&assign.value, line, col, checker, all_stmts) {
+                return Some(info);
+            }
+            // The statement starts at the target only in the `name <= expr`
+            // form; in `expr => name` the position of the target is not kept.
+            if assign.span.line == line && !assign.forward {
                 // Check if cursor is near the target name
                 if assign.span.column <= col
                     && col <= assign.span.column + assign.target.chars().count()
@@ -167,7 +195,16 @@ fn find_hover_in_statement(
                             assign.target, spacer, params, fn_name, arity
                         ));
                     }
-                    if let Some(ty) = checker.lookup_var(&assign.target) {
+                    // A binding inside a function is not in the top-level scope
+                    // the checker keeps, so fall back to the declared type or
+                    // the type recorded for the bound value.
+                    let ty = assign
+                        .type_annotation
+                        .as_ref()
+                        .map(format_type_expr)
+                        .or_else(|| recorded_type(&assign.value, checker).map(|ty| ty.to_string()))
+                        .or_else(|| checker.lookup_var(&assign.target).map(|ty| ty.to_string()));
+                    if let Some(ty) = ty {
                         return Some(format!("```taida\n{}: {}\n```", assign.target, ty));
                     }
                 }
@@ -215,156 +252,29 @@ fn find_hover_in_statement(
             None
         }
         // (E30 Sub-step 2.1) ClassLikeDef + kind dispatch (旧 TypeDef/MoldDef/InheritanceDef を統合)
-        Statement::ClassLikeDef(cl) => match &cl.kind {
-            crate::parser::ClassLikeKind::Alias { target } => {
-                if cl.span.line == line
-                    && cl.span.column <= col
-                    && col <= cl.span.column + cl.name.chars().count()
+        Statement::ClassLikeDef(cl) => {
+            if let Some(info) = find_hover_in_class_header(cl, line, col, checker) {
+                return Some(info);
+            }
+            // Field defaults and method bodies are code like any other.
+            for field in &cl.fields {
+                if let Some(default) = &field.default_value
+                    && let Some(info) = find_hover_in_expr(default, line, col, checker, all_stmts)
                 {
-                    let doc = format_doc_comments(&cl.doc_comments);
-                    return Some(format!(
-                        "```taida\n{} = {}\n```{}",
-                        cl.name,
-                        format_type_expr(target),
-                        doc
-                    ));
+                    return Some(info);
                 }
-                None
-            }
-            crate::parser::ClassLikeKind::BuchiPack => {
-                let td = cl;
-                if td.span.line == line
-                    && td.span.column <= col
-                    && col <= td.span.column + td.name.chars().count()
-                {
-                    let fields: Vec<String> = td
-                        .fields
-                        .iter()
-                        .filter(|f| !f.is_method)
-                        .map(|f| {
-                            if let Some(ty) = &f.type_annotation {
-                                format!("  {}: {}", f.name, format_type_expr(ty))
-                            } else {
-                                format!("  {}", f.name)
-                            }
-                        })
-                        .collect();
-                    let doc = format_doc_comments(&td.doc_comments);
-                    return Some(format!(
-                        "```taida\n{} = @(\n{}\n)\n```{}",
-                        td.name,
-                        fields.join(",\n"),
-                        doc
-                    ));
+                if let Some(method) = &field.method_def {
+                    for body_stmt in &method.body {
+                        if let Some(info) =
+                            find_hover_in_statement(body_stmt, line, col, checker, all_stmts)
+                        {
+                            return Some(info);
+                        }
+                    }
                 }
-                None
             }
-            crate::parser::ClassLikeKind::Mold { mold_args } => {
-                let md = cl;
-                if md.span.line == line
-                    && md.span.column <= col
-                    && col <= md.span.column + md.name.chars().count()
-                {
-                    let parent_args: Vec<String> =
-                        mold_args.iter().map(format_mold_header_arg).collect();
-                    let child_args: Vec<String> = md
-                        .name_args
-                        .as_ref()
-                        .unwrap_or(mold_args)
-                        .iter()
-                        .map(format_mold_header_arg)
-                        .collect();
-                    let fields: Vec<String> = md
-                        .fields
-                        .iter()
-                        .filter(|f| !f.is_method)
-                        .map(|f| {
-                            if let Some(ty) = &f.type_annotation {
-                                format!("  {}: {}", f.name, format_type_expr(ty))
-                            } else {
-                                format!("  {}", f.name)
-                            }
-                        })
-                        .collect();
-                    let doc = format_doc_comments(&md.doc_comments);
-                    return Some(format!(
-                        "```taida\nMold[{}] => {}[{}] = @(\n{}\n)\n```{}",
-                        parent_args.join(", "),
-                        md.name,
-                        child_args.join(", "),
-                        fields.join(",\n"),
-                        doc
-                    ));
-                }
-                None
-            }
-            crate::parser::ClassLikeKind::Inheritance {
-                parent,
-                parent_args,
-            } => {
-                let inh = cl;
-                if inh.span.line == line {
-                    let parent_header = parent_args
-                        .as_ref()
-                        .map(|args| {
-                            format!(
-                                "{}[{}]",
-                                parent,
-                                args.iter()
-                                    .map(format_mold_header_arg)
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            )
-                        })
-                        .unwrap_or_else(|| parent.clone());
-                    let child_header = inh
-                        .name_args
-                        .as_ref()
-                        .map(|args| {
-                            format!(
-                                "{}[{}]",
-                                inh.name,
-                                args.iter()
-                                    .map(format_mold_header_arg)
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            )
-                        })
-                        .unwrap_or_else(|| inh.name.clone());
-                    let fields: Vec<String> = inh
-                        .fields
-                        .iter()
-                        .filter(|f| !f.is_method)
-                        .map(|f| {
-                            if let Some(ty) = &f.type_annotation {
-                                format!("  {}: {}", f.name, format_type_expr(ty))
-                            } else {
-                                format!("  {}", f.name)
-                            }
-                        })
-                        .collect();
-                    let parent_fields =
-                        checker.registry.get_type_fields(parent).unwrap_or_default();
-                    let parent_fields_str: Vec<String> = parent_fields
-                        .iter()
-                        .map(|(n, t)| format!("  {}: {} (inherited)", n, t))
-                        .collect();
-
-                    let mut all_fields = parent_fields_str;
-                    all_fields.extend(fields);
-
-                    let doc = format_doc_comments(&inh.doc_comments);
-                    return Some(format!(
-                        "```taida\n{} => {} = @(\n{}\n)\n```{}",
-                        parent_header,
-                        child_header,
-                        all_fields.join(",\n"),
-                        doc
-                    ));
-                }
-                None
-            }
-        },
+            None
+        }
         Statement::Expr(expr) => find_hover_in_expr(expr, line, col, checker, all_stmts),
         Statement::ErrorCeiling(ec) => {
             for body_stmt in &ec.handler_body {
@@ -383,7 +293,11 @@ fn find_hover_in_statement(
             }
             // Check if cursor is on the target variable
             if uf.span.line == line
-                && let Some(ty) = checker.lookup_var(&uf.target)
+                && let Some(ty) = uf
+                    .type_annotation
+                    .as_ref()
+                    .map(format_type_expr)
+                    .or_else(|| checker.lookup_var(&uf.target).map(|ty| ty.to_string()))
             {
                 return Some(format!("```taida\n{}: {}\n```", uf.target, ty));
             }
@@ -394,9 +308,15 @@ fn find_hover_in_statement(
             if let Some(info) = find_hover_in_expr(&ub.source, line, col, checker, all_stmts) {
                 return Some(info);
             }
-            // Check if cursor is on the target variable
+            // The statement starts at the target it binds.
             if ub.span.line == line
-                && let Some(ty) = checker.lookup_var(&ub.target)
+                && ub.span.column <= col
+                && col <= ub.span.column + ub.target.chars().count()
+                && let Some(ty) = ub
+                    .type_annotation
+                    .as_ref()
+                    .map(format_type_expr)
+                    .or_else(|| checker.lookup_var(&ub.target).map(|ty| ty.to_string()))
             {
                 return Some(format!("```taida\n{}: {}\n```", ub.target, ty));
             }
@@ -406,7 +326,190 @@ fn find_hover_in_statement(
     }
 }
 
+/// Hover on the name in the header of a type, mold or inheritance definition.
+fn find_hover_in_class_header(
+    cl: &crate::parser::ClassLikeDef,
+    line: usize,
+    col: usize,
+    checker: &TypeChecker,
+) -> Option<String> {
+    match &cl.kind {
+        crate::parser::ClassLikeKind::Alias { target } => {
+            if cl.span.line == line
+                && cl.span.column <= col
+                && col <= cl.span.column + cl.name.chars().count()
+            {
+                let doc = format_doc_comments(&cl.doc_comments);
+                return Some(format!(
+                    "```taida\n{} = {}\n```{}",
+                    cl.name,
+                    format_type_expr(target),
+                    doc
+                ));
+            }
+            None
+        }
+        crate::parser::ClassLikeKind::BuchiPack => {
+            let td = cl;
+            if td.span.line == line
+                && td.span.column <= col
+                && col <= td.span.column + td.name.chars().count()
+            {
+                let fields: Vec<String> = td
+                    .fields
+                    .iter()
+                    .filter(|f| !f.is_method)
+                    .map(|f| {
+                        if let Some(ty) = &f.type_annotation {
+                            format!("  {}: {}", f.name, format_type_expr(ty))
+                        } else {
+                            format!("  {}", f.name)
+                        }
+                    })
+                    .collect();
+                let doc = format_doc_comments(&td.doc_comments);
+                return Some(format!(
+                    "```taida\n{} = @(\n{}\n)\n```{}",
+                    td.name,
+                    fields.join(",\n"),
+                    doc
+                ));
+            }
+            None
+        }
+        crate::parser::ClassLikeKind::Mold { mold_args } => {
+            let md = cl;
+            if md.span.line == line
+                && md.span.column <= col
+                && col <= md.span.column + md.name.chars().count()
+            {
+                let parent_args: Vec<String> =
+                    mold_args.iter().map(format_mold_header_arg).collect();
+                let child_args: Vec<String> = md
+                    .name_args
+                    .as_ref()
+                    .unwrap_or(mold_args)
+                    .iter()
+                    .map(format_mold_header_arg)
+                    .collect();
+                let fields: Vec<String> = md
+                    .fields
+                    .iter()
+                    .filter(|f| !f.is_method)
+                    .map(|f| {
+                        if let Some(ty) = &f.type_annotation {
+                            format!("  {}: {}", f.name, format_type_expr(ty))
+                        } else {
+                            format!("  {}", f.name)
+                        }
+                    })
+                    .collect();
+                let doc = format_doc_comments(&md.doc_comments);
+                return Some(format!(
+                    "```taida\nMold[{}] => {}[{}] = @(\n{}\n)\n```{}",
+                    parent_args.join(", "),
+                    md.name,
+                    child_args.join(", "),
+                    fields.join(",\n"),
+                    doc
+                ));
+            }
+            None
+        }
+        crate::parser::ClassLikeKind::Inheritance {
+            parent,
+            parent_args,
+        } => {
+            let inh = cl;
+            if inh.span.line == line {
+                let parent_header = parent_args
+                    .as_ref()
+                    .map(|args| {
+                        format!(
+                            "{}[{}]",
+                            parent,
+                            args.iter()
+                                .map(format_mold_header_arg)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    })
+                    .unwrap_or_else(|| parent.clone());
+                let child_header = inh
+                    .name_args
+                    .as_ref()
+                    .map(|args| {
+                        format!(
+                            "{}[{}]",
+                            inh.name,
+                            args.iter()
+                                .map(format_mold_header_arg)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    })
+                    .unwrap_or_else(|| inh.name.clone());
+                let fields: Vec<String> = inh
+                    .fields
+                    .iter()
+                    .filter(|f| !f.is_method)
+                    .map(|f| {
+                        if let Some(ty) = &f.type_annotation {
+                            format!("  {}: {}", f.name, format_type_expr(ty))
+                        } else {
+                            format!("  {}", f.name)
+                        }
+                    })
+                    .collect();
+                let parent_fields = checker.registry.get_type_fields(parent).unwrap_or_default();
+                let parent_fields_str: Vec<String> = parent_fields
+                    .iter()
+                    .map(|(n, t)| format!("  {}: {} (inherited)", n, t))
+                    .collect();
+
+                let mut all_fields = parent_fields_str;
+                all_fields.extend(fields);
+
+                let doc = format_doc_comments(&inh.doc_comments);
+                return Some(format!(
+                    "```taida\n{} => {} = @(\n{}\n)\n```{}",
+                    parent_header,
+                    child_header,
+                    all_fields.join(",\n"),
+                    doc
+                ));
+            }
+            None
+        }
+    }
+}
+
+/// Whether the cursor (1-based `line` / `col`) is on the `len`-character token
+/// that starts at `span`.
+fn on_token(span: &crate::lexer::Span, line: usize, col: usize, len: usize) -> bool {
+    span.line == line && span.column <= col && col < span.column + len.max(1)
+}
+
+/// The type the checker recorded for `expr`. A bare name the checker recorded
+/// nothing for falls back to the top-level binding of that name; one it
+/// recorded as unknown stays unknown, since a local of the same name may be
+/// what is meant.
+fn recorded_type(expr: &Expr, checker: &TypeChecker) -> Option<crate::types::Type> {
+    match checker.typed_expr_table.lookup(expr) {
+        Some(crate::types::Type::Unknown) => None,
+        Some(ty) => Some(ty.clone()),
+        None => match expr {
+            Expr::Ident(name, _) => checker.lookup_var(name),
+            _ => None,
+        },
+    }
+}
+
 /// Search an expression for hover-relevant nodes at the given position.
+///
+/// Only the token under the cursor answers: the children of an expression
+/// are searched first (a name inside a call is the name, not the call), and
+/// the expression's own operator or member name comes last.
 fn find_hover_in_expr(
     expr: &Expr,
     line: usize,
@@ -414,61 +517,84 @@ fn find_hover_in_expr(
     checker: &TypeChecker,
     all_stmts: &[Statement],
 ) -> Option<String> {
+    // The children of an expression, searched in source order. Template
+    // literals hold their interpolations as text, whose positions are not
+    // the document's, so they are left out.
+    let search_children = |expr: &Expr| -> Option<String> {
+        if matches!(expr, Expr::TemplateLit(..)) {
+            return None;
+        }
+        let mut found = None;
+        crate::graph::walk::for_each_child_of_expr(expr, &mut |child| {
+            if found.is_some() {
+                return;
+            }
+            found = match child {
+                crate::graph::walk::Node::Expr(inner) => {
+                    find_hover_in_expr(inner, line, col, checker, all_stmts)
+                }
+                crate::graph::walk::Node::Stmt(stmt) => {
+                    find_hover_in_statement(stmt, line, col, checker, all_stmts)
+                }
+            };
+        });
+        found
+    };
+
     match expr {
         Expr::Ident(name, span) => {
-            if span.line == line && span.column <= col && col < span.column + name.chars().count() {
-                let var_type = checker.lookup_var(name);
-                if let Some(ty) = var_type {
-                    return Some(format!("```taida\n{}: {}\n```", name, ty));
-                }
+            if on_token(span, line, col, name.chars().count())
+                && let Some(ty) = recorded_type(expr, checker)
+            {
+                return Some(format!("```taida\n{}: {}\n```", name, ty));
             }
             None
         }
         Expr::MethodCall(obj, method, _args, span) => {
-            if span.line == line {
-                // If hovering on the method name, show method info
-                let obj_type = {
-                    let mut tc = TypeChecker::new();
-                    tc.infer_expr_type(obj)
-                };
+            if let Some(info) = search_children(expr) {
+                return Some(info);
+            }
+            // The call's span is the `(`; the method name is written just
+            // before it.
+            let name_len = method.chars().count();
+            if span.line == line && span.column >= name_len && {
+                let start = span.column - name_len;
+                start <= col && col < span.column
+            } {
+                let obj_type = recorded_type(obj, checker)
+                    .map(|ty| ty.to_string())
+                    .unwrap_or_else(|| "?".to_string());
                 return Some(format!(
                     "```taida\n{}.{}\nReceiver type: {}\n```",
                     obj_type, method, obj_type
                 ));
             }
-            find_hover_in_expr(obj, line, col, checker, all_stmts)
+            None
         }
-        Expr::FuncCall(func, args, span) => {
-            if let Some(info) = find_hover_in_expr(func, line, col, checker, all_stmts) {
+        Expr::FuncCall(func, _args, span) => {
+            if let Some(info) = search_children(expr) {
                 return Some(info);
             }
-            for arg in args {
-                if let Some(info) = find_hover_in_expr(arg, line, col, checker, all_stmts) {
-                    return Some(info);
-                }
-            }
-            // Show return type on function name
-            if span.line == line
-                && let Expr::Ident(name, _) = func.as_ref()
+            // Show return type on the function name (or its parenthesis)
+            if let Expr::Ident(name, name_span) = func.as_ref()
+                && (on_token(name_span, line, col, name.chars().count())
+                    || on_token(span, line, col, 1))
             {
-                let mut tc = TypeChecker::new();
-                let ret = tc.infer_expr_type(expr);
+                let ret = recorded_type(expr, checker)
+                    .map(|ty| ty.to_string())
+                    .unwrap_or_else(|| "?".to_string());
                 return Some(format!("```taida\n{}(...) => :{}\n```", name, ret));
             }
             None
         }
-        Expr::BinaryOp(left, _op, right, _span) => {
-            if let Some(info) = find_hover_in_expr(left, line, col, checker, all_stmts) {
+        Expr::FieldAccess(obj, field, span) => {
+            if let Some(info) = search_children(expr) {
                 return Some(info);
             }
-            find_hover_in_expr(right, line, col, checker, all_stmts)
-        }
-        Expr::FieldAccess(obj, field, span) => {
-            if span.line == line {
-                let obj_type = {
-                    let mut tc = TypeChecker::new();
-                    tc.infer_expr_type(obj)
-                };
+            // The access's span is the `.`; the field name follows it.
+            let name_len = field.chars().count();
+            if span.line == line && span.column <= col && col <= span.column + name_len {
+                let obj_type = recorded_type(obj, checker).unwrap_or(crate::types::Type::Unknown);
                 // Try to get the field type from the registry
                 let field_type = match &obj_type {
                     crate::types::Type::Named(name) => {
@@ -491,10 +617,13 @@ fn find_hover_in_expr(
                     field, type_info, obj_type
                 ));
             }
-            find_hover_in_expr(obj, line, col, checker, all_stmts)
+            None
         }
         Expr::MoldInst(name, _type_args, _fields, span) => {
-            if span.line == line && span.column <= col && col < span.column + name.chars().count() {
+            if let Some(info) = search_children(expr) {
+                return Some(info);
+            }
+            if on_token(span, line, col, name.chars().count()) {
                 if let Some(info) = find_user_mold_hover_info(all_stmts, name, checker) {
                     return Some(info);
                 }
@@ -504,9 +633,10 @@ fn find_hover_in_expr(
             None
         }
         Expr::TypeInst(name, _fields, span) => {
-            if span.line == line
-                && span.column <= col
-                && col < span.column + name.chars().count()
+            if let Some(info) = search_children(expr) {
+                return Some(info);
+            }
+            if on_token(span, line, col, name.chars().count())
                 && let Some(fields) = checker.registry.get_type_fields(name)
             {
                 let fields_str: Vec<String> = fields
@@ -521,7 +651,7 @@ fn find_hover_in_expr(
             }
             None
         }
-        _ => None,
+        _ => search_children(expr),
     }
 }
 

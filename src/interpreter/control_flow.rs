@@ -16,7 +16,11 @@ use crate::parser::*;
 
 /// Rewrite all `Placeholder` nodes in an expression tree to `Ident(replacement)`.
 /// Used by pipeline MoldInst handling to substitute nested `_` with the pipe variable name.
-fn rewrite_nested_placeholder(expr: &Expr, replacement: &str, span: &crate::lexer::Span) -> Expr {
+pub(super) fn rewrite_nested_placeholder(
+    expr: &Expr,
+    replacement: &str,
+    span: &crate::lexer::Span,
+) -> Expr {
     match expr {
         Expr::Placeholder(_) => Expr::Ident(replacement.to_string(), span.clone()),
         Expr::BuchiPack(fields, s) => Expr::BuchiPack(
@@ -163,6 +167,7 @@ fn rewrite_statement_placeholder(
             value: rewrite_nested_placeholder(&assign.value, replacement, span),
             doc_comments: assign.doc_comments.clone(),
             span: assign.span.clone(),
+            forward: assign.forward,
         }),
         Statement::UnmoldForward(unmold) => Statement::UnmoldForward(UnmoldForwardStmt {
             source: rewrite_nested_placeholder(&unmold.source, replacement, span),
@@ -417,7 +422,14 @@ impl Interpreter {
     /// The tail variant lives in `eval_cond_arm_body_tail` (in `eval.rs`),
     /// which *is* reached from `eval_expr_tail::CondBranch` and therefore
     /// legitimately retains TCO.
+    ///
+    /// Each arm body is a scope of its own: names it defines are gone once
+    /// the arm finishes (`docs/reference/scope_rules.md`).
     fn eval_cond_arm_body(&mut self, body: &[Statement]) -> Result<Signal, RuntimeError> {
-        self.eval_statements_no_tco(body)
+        let mark = self.env.mark();
+        self.env.push_scope();
+        let result = self.eval_statements_no_tco(body);
+        self.env.truncate(mark);
+        result
     }
 }

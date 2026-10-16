@@ -421,7 +421,7 @@ fib10 <= fibonacci(10, 0, 1)  // 55
 
 エラー天井 `|==` 内での末尾再帰も最適化されます。
 
-```taida
+```taida fragment
 retryLoop maxRetries: Int attempt: Int =
   |== error: Error =
     | attempt < maxRetries |> retryLoop(maxRetries, attempt + 1)

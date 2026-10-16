@@ -192,8 +192,23 @@ pub fn reachable(graph: &Graph, source_label: &str) -> QueryResult {
 }
 
 /// Find all cycles in the graph.
+///
+/// `References` edges (a function named as a value) keep a function
+/// reachable but are not calls, so they do not close a cycle.
 pub fn find_cycles(graph: &Graph) -> QueryResult {
-    let adj = build_adjacency(graph);
+    let mut adj: HashMap<String, Vec<String>> = HashMap::new();
+    for node in &graph.nodes {
+        adj.entry(node.id.clone()).or_default();
+    }
+    for edge in graph
+        .edges
+        .iter()
+        .filter(|edge| edge.kind != EdgeKind::References)
+    {
+        adj.entry(edge.source.clone())
+            .or_default()
+            .push(edge.target.clone());
+    }
     let mut visited = HashSet::new();
     let mut rec_stack = HashSet::new();
     let mut cycles = Vec::new();

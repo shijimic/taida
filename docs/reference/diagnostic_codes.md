@@ -91,7 +91,7 @@
 
 | コード | メッセージ | フェーズ |
 |--------|-----------|---------|
-| `E0401` | リスト要素の型が不一致: 先頭要素は {T1} ですが、位置 {N} の要素は {T2} です | TypeChecker |
+| `E0401` | リスト要素の型が不一致: 先頭要素は {T1} ですが、位置 {N} の要素は {T2} です（ぶちパックのリストに `Append` / `Prepend` で加えるぶちパックと、`Concat` で連結するリストのぶちパックにも、先頭要素のフィールドをすべて含む規則が働く） | TypeChecker |
 
 ### 関数呼び出しエラー (`E13xx`)
 
@@ -99,7 +99,7 @@
 |--------|-----------|---------|
 | `E1301` | 関数の引数が宣言されたパラメータ数を超過している | TypeChecker |
 | `E1302` | デフォルト値式が自身または後続パラメータを参照している | TypeChecker |
-| `E1303` | デフォルト値の型がパラメータの型注釈と不一致 | TypeChecker |
+| `E1303` | デフォルト値の型がパラメータ、またはクラスライク型のフィールドの型注釈と不一致 | TypeChecker |
 
 ### モールド束縛エラー (`E14xx`)
 
@@ -118,21 +118,22 @@
 | `E1410` | 宣言のみの関数フィールドに既定関数または明示値が必要。戻り型が不透明型や不明な型エイリアスで `defaultFn` を自動生成できない場合に、定義位置で発火する | TypeChecker |
 | `E1411` | 継承定義の子フィールドが親の型と互換でない再定義 | TypeChecker |
 | `E1412` | `RustAddon["fn"](arity <= N)` の明示束縛違反: 表記不正 (`fn` が文字列リテラルでない / `arity` フィールド欠落 / アリティが非整数) / ファサード以外で書いている / 未宣言の関数 / マニフェストのアリティと不一致 | Interpreter / TypeChecker |
-| `E1413` | アドオンファサードでマニフェスト `[functions]` の関数名を **裸のまま (bare 参照)** している。`name <= RustAddon["name"](arity <= N)` をファサード先頭で明示する必要がある | Interpreter |
+| `E1413` | アドオンファサードでマニフェスト `[functions]` の関数名を **裸のまま (bare 参照)** している。`name <= RustAddon["name"](arity <= N)` をファサード先頭で明示する必要がある | Interpreter / Build driver |
+| `E1414` | ネイティブビルドで、型の分からないアドオン関数の戻り値を、表示 (`stdout` / テンプレート / `toString` / `jsonEncode` / `debug`)、算術や比較、リストやぶちパックの要素に使っている。ネイティブのコードは Int / Float / Bool を区別できないため、束縛に型を書くか (`x: Float <= f(...)`)、型の宣言された引数に渡す | Build driver |
 
 ### 定義・意味論エラー (`E15xx`)
 
 | コード | メッセージ | フェーズ |
 |--------|-----------|---------|
-| `E1501` | 同一スコープでの名前の再定義・関数オーバーロード禁止 | TypeChecker |
+| `E1501` | 同一スコープでの名前の再定義・関数オーバーロード禁止（トップレベルで宣言した型と同じ名前のトップレベルの束縛を含む） | TypeChecker |
 | `E1502` | パイプ外での `_` の使用禁止 — `_` はパイプ注入位置であり、パイプライン ステージの中でのみ意味を持つ。部分適用は空スロット `f(5, )` を使うこと (import alias 不可文脈にも同コードを使用) | TypeChecker |
-| `E1503` | TypeDef/BuchiPack インスタンス化での部分適用禁止 | TypeChecker |
+| `E1503` | TypeDef/BuchiPack インスタンス化での部分適用・位置引数の禁止 (フィールドは `P(field <= value)` の形で名前を付けて渡す) | TypeChecker |
 | `E1504` | パイプライン外での `Mold[_]()` 直接束縛禁止 | TypeChecker |
 | `E1505` | 部分適用のスロット数がアリティと不一致 | TypeChecker |
-| `E1506` | 関数呼び出しの引数型が宣言されたパラメータ型と不一致、または関数値引数の省略推論が解決不能 | TypeChecker |
+| `E1506` | 関数呼び出しの引数型が宣言されたパラメータ型と不一致、または関数値引数の省略推論が解決不能（`sleep` / `exit` / `Regex` / `hashMap` と組み込みモールドに、受け付けない種類の値を渡した場合を含む） | TypeChecker |
 | `E1507` | ビルトイン関数の引数個数がアリティの許容範囲外 | TypeChecker |
 | `E1508` | 関数値を受け取るメソッドまたは関数呼び出しの引数個数・型・推論境界が不一致 (`Lax[T]` / `Result[T, P]` / `Async[T]` の `map` / `flatMap` / `mapError`、`List[T].fold` / `reduce` の関数引数型ピン違反を含む) | TypeChecker |
-| `E1509` | メソッドが型に存在しない、またはジェネリック関数の型変数が宣言された制約を満たさない (`errorInfo()` を `Lax` / `Gorillax` / `RelaxedGorillax` / `Error` 系以外の型に呼んだ場合を含む) | TypeChecker |
+| `E1509` | メソッドが型に存在しない、またはジェネリック関数の型変数が宣言された制約を満たさない (`errorInfo()` を `Lax` / `Gorillax` / `RelaxedGorillax` / `Error` 系以外の型に呼んだ場合、リテラルで作ったぶちパックの関数でないフィールドを呼んだ場合を含む) | TypeChecker |
 | `E1510` | 推論専用ジェネリック関数の型変数が、パラメータの型注釈や呼び出し側から束縛・推論できない、または具体型名と衝突する | TypeChecker |
 | `E1511` | ユーザー定義関数をモールド構文 `Fn[args]()` で呼ぶ際に名前付き引数 `()` を渡せない — `Fn[a, b]()` か `Fn(a, b)` のみ受理する | TypeChecker |
 | `E1512` | `Cage` / `CageRilla`: コンパイル時のブランチ不一致 — `Cage[subject, runner]()` で `subject` 側の `Molten` ブランチと、`runner` (`CageRilla[Branch, Out]`) の `Branch` 型引数が一致しない | TypeChecker |
@@ -161,7 +162,7 @@
 | `E1536` | 封印キャリア (`Moltenized[T]` / `Secret[T]`) を二項演算のオペランドに使ったか、`assert` で観測した。`+` 連結は値を漏らし、`==` / `!=` や `assert` の成否は等値オラクルになる。内容比較は `ConstantTimeEq[secret, candidate]()` のみで行う。 | TypeChecker |
 | `E1537` | `Num` を値型注釈 (戻り型 `=> :Num` / 引数 `x: Num`、ネスト形含む) に使った。`Num` はジェネリック制約マーカー (`[T <= :Num]`) であり wire 上の実値型ではない。具体型 (`:Int` / `:Float`) を注釈するか、`[T <= :Num] ... => :T` のジェネリック関数にする。制約位置と型クエリ (`TypeIs[x, :Num]` / `TypeExtends[:Int, :Num]`) は引き続き有効。 | TypeChecker |
 | `E1538` | プリミティブ値型名 (`Int` / `Float` / `Str` / `Bool` / `Bytes` / `Num` / `Unit` / `Void` と正式別綴り `Integer` / `String` / `Boolean`) でクラスライク / Mold / Enum を定義した。注釈位置の解決は常に組み込みが勝つため、この定義は参照不能になる (silent 罠)。別名を選ぶこと。コンテナ / モールド名 (`Lax` / `Result` / `Async` 等) は対象外。 | TypeChecker |
-| `E1539` | トップレベルの実行文が、同一ファイル内でその文より後に定義される関数を参照した。トップレベル文は定義順に実行される (前方参照は実行時に未定義) ため、該当文を関数定義の後に移動する。関数本体・lambda 本体内からの参照は呼び出し時に解決されるため対象外 (相互再帰はこの形で書く)。 | TypeChecker |
+| `E1539` | トップレベルの実行文が、同一ファイル内でその文より後に定義される関数を参照した。または、その文が呼ぶ関数の本体が (直接、または他の関数を経由して) まだ定義されていない関数を呼ぶ。トップレベル文は定義順に実行される (前方参照は実行時に未定義) ため、該当文を関数定義の後に移動する。関数本体・lambda 本体内からの参照は呼び出し時に解決されるため、定義の位置は問わない (相互再帰はこの形で書き、呼び出しは両方の定義の後に置く)。 | TypeChecker |
 | `E1540` | 値の不在を表す予約語 (`null` / `undefined` / `none` / `nil` / `unit` / `void`) を識別子の定義位置 (変数 / 関数 / 引数 / 型 / Enum 名 / import 束縛) に使った。全ての型にデフォルト値がある Taida では「値の不在」の語彙そのものが不要 — 保持する内容を表す名前を付ける。これらの語は keyword token ではないため、読み取り位置は通常の未定義変数エラー (`E1542`) になる。 | TypeChecker |
 | `E1541` | `JSON[raw, Schema]()` の `Schema` が未定義。スキーマ名はプリミティブ型か、登録済みのクラスライク / Mold / Error / Enum 型でなければならない。定義 (`Schema = @(...)`) するか import してから鋳造する。 | TypeChecker |
 | `E1542` | 未定義変数の参照。タイポを確認するか、使用前に定義する。 | TypeChecker |
@@ -169,6 +170,7 @@
 | `E1544` | `_` のないパイプライン ステージが関数でない値に評価された。`_` のないステージは書かれたとおりに評価され、結果が関数値のときだけぶちこまれる値が適用される (`5 => add(, 3)` は部分適用クロージャへの適用で 8)。`5 => f(3)` のような引数を書き切った呼び出しは即時呼び出しの結果 (非関数) へのパイプとなりこのエラーになる — 注入位置を `_` で書く (`5 => f(_, 3)`) か、空スロットの部分適用 (`5 => f(, 3)`) を使う。 | TypeChecker / Runtime |
 | `E1545` | 取り出すものがない bare 値への アンモールド。`>=>` / `<=<` / `.unmold()` の対象はモールド値 (Lax / Gorillax / RelaxedGorillax / Result / Async / Stream / カスタムモールド)。スカラー・リスト・ぶちパック型・Enum など bare 値が静的に確定する source は compile-time に reject される (`5 >=> e` / `pack >=> q`)。モールド呼び出し形 `Mold[...]() >=> x` は結果型に関わらず正規の束縛イディオムとして許可。実行時は「機構なし plain pack (`__type` なし)」のアンモールドがゴリラ (診断 + `><` + exit 1) になる。bare 値は `<=` で束縛する。 | TypeChecker / Runtime |
 | `E1546` | モールド呼び出しの cast `()` 欠落。値位置 (代入 RHS / パイプ段 / 関数引数 / アンモールド source 等) の bare `Name[args]` は受理されない — `[]` は鋳型に入れる、`()` は鋳造する、の 2 段階であり cast は省略不可。型位置 (型注釈 `:Lax[Int]`、他モールドの `[...]` 引数内の型参照 `JSON[x, Schema]()` の `Schema` 等) は型参照なので `()` を付けない。既知の限界: 免除はモールド `[...]` 引数の**全域**に効くため、引数内の値式位置 (`Foo[someFunc(Bar[Int])]()` の `Bar[Int]` 等) の bare 形は受理され、下流の実行時エラーになる。 | Parser |
+| `E1547` | どこにも定義されていない関数・型の呼び出し (`notDefined(x)` / `Pilto(name <= "a")`)。どのスコープにも関数・束縛・型・import が無い名前は、その呼び出しを通る実行が必ず失敗する (native / WASM はビルドできない) ため、実行されない経路にあっても型検査で拒否する。名前の綴りを確認するか、使う前に定義・import する。 | TypeChecker |
 
 `E1512`〜`E1519` は **`Cage` / `CageRilla` 診断範囲**。`Cage[subject, runner]()` の型規則、および `CageRilla[Branch, Out]` の子系統 (`JSRilla` / `JSONRilla` / `BuildRilla` / `FileRilla`) が守る境界規約を扱う。`E1513` は将来の実行時検証用に予約している。
 
@@ -229,7 +231,7 @@ ClassLike / Inheritance で「親型を継承するだけで自前のフィー�
 
 | コード | メッセージ | フェーズ |
 |--------|-----------|---------|
-| `E1601` | 関数 / エラーハンドラの戻り型が宣言と不一致 | TypeChecker |
+| `E1601` | 関数 / エラーハンドラ / クラスライク型のメソッドの戻り型が宣言と不一致（エラーハンドラの戻り型が囲む関数の戻り型と食い違う場合と、本体が決まった型を返すジェネリック関数を、型変数を別の型にして呼んだ場合を含む） | TypeChecker |
 | `E1602` | BuchiPack / TypeDef の参照先にフィールドが存在しない | TypeChecker |
 | `E1603` | 条件分岐の値を返すアーム同士の戻り型が不一致。`throw` だけのアームなど型未確定のアームは基準型にしない | TypeChecker |
 | `E1604` | 条件分岐の条件式が `Bool` 型ではない | TypeChecker |
@@ -273,26 +275,26 @@ ClassLike / Inheritance で「親型を継承するだけで自前のフィー�
 | コード | メッセージ | フェーズ |
 |--------|-----------|---------|
 | `E1700` | 提供されていない top-level command / CLI flag が呼ばれた。新しい command path / positional syntax を使うこと | CLI |
-| `E1701` | `packages.tdm` で宣言された公開 API とエントリモジュールの実シンボル群が不整合 (未公開 symbol import / 宣言済み symbol 欠如 / module 内シンボル未発見) | TypeChecker |
+| `E1701` | `packages.tdm` で宣言された公開 API とエントリモジュールの実シンボル群が不整合 (未公開 symbol import / 宣言済み symbol 欠如 / module 内シンボル未発見 / import 先のローカルモジュールが存在しない) | TypeChecker |
 | `E1702` | テンプレート文字列の `${...}` 補間に式以外（文）が書かれた。補間には式のみを書くこと | Interpreter / コード生成 |
 
 `E1700` の標準表示:
 
 ```text
-[E1700] Command '<old>' is not available. Use '<replacement>' instead.
+[E1700] Command '<old>' was removed. Use '<replacement>' instead.
         See `taida --help` for the current command set.
 ```
 
 提供されていない flag の表示例:
 
 ```text
-[E1700] Flag '--target <target>' is not available. Use 'taida build <target> <PATH>' instead.
+[E1700] Flag '--target <target>' was removed. Use 'taida build <target> <PATH>' instead.
         For example: `taida build native src`.
 ```
 
 ### 命名規則違反 — `taida way lint` (`E18xx`)
 
-カテゴリ別命名規則を CI で確認する lint 診断帯です。`taida way lint <PATH>` で実行します。
+カテゴリ別命名規則を CI で確認する lint 診断帯です。`taida way lint <PATH>` で実行します。`E1810` だけは命名ではなく、doc-comment の `@Since` タグの書式を確認します。
 
 | コード | メッセージ | フェーズ |
 |--------|-----------|---------|
@@ -305,6 +307,7 @@ ClassLike / Inheritance で「親型を継承するだけで自前のフィー�
 | `E1807` | 型変数は単一大文字 (`T`, `U`, `V`, `E`, `K`, `P`, `R` など) で命名してください (4 つ以上の場合に `T1` / `T2` / `T3` といった添字形は許容します) | Parser / Lint |
 | `E1808` | ぶちパックフィールドの値型と命名規則が不整合 (関数値は camelCase、非関数値は snake_case) | Parser / Lint |
 | `E1809` | 戻り値型注釈には `:Type` の `:` マーカーを付けてください (例: `=> :Int`)。parser は寛容に受理しますが、戻り値型・制約・型引数のスロット・`TypeIs`・モールドの具象型スロットなど、型リテラルが必要な文脈では必須です | Parser / Lint |
+| `E1810` | `///@ Since:` の値は Taida のバージョン表記 (`[a-z]\.\d+(\.[a-z0-9]+)?`、例: `e.32`、`e.32.alpha`) で書いてください。`1.2.0` のような Semantic Versioning 風の値は受理しません | Lint |
 
 #### 適用範囲 / 適用対象外
 
@@ -467,7 +470,7 @@ verify されることを保証する診断。`TAIDA_VERIFY_SIGNATURES=required`
 | `E15xx` | TypeChecker | 定義・意味論。重複定義、禁止構文の明示拒否 |
 | `E16xx` | TypeChecker / Parser | 型推論・演算意味論。戻り型、比較、論理、cond-branch、循環継承 |
 | `E17xx` | CLI / TypeChecker | 削除済み CLI surface / モジュール境界 (`packages.tdm`) 公開 API 不整合 |
-| `E18xx` | Parser / Lint | 命名規則違反 (`taida way lint` 実行時のみ発射) |
+| `E18xx` | Parser / Lint | 命名規則違反と doc-comment の書式違反 (`taida way lint` 実行時のみ発射) |
 | `E19xx` | CLI / TypeChecker / Build driver | ビルドドライバ系 (ディスクリプタビルド文法、`AssetBundle` 安全性、トランザクショナル更新、依存閉包違反、内部フィールドアクセス禁止) |
 | `E36xx` | TypeChecker | host boundary 型制約。`Wired[T]` と host step list の境界違反 |
 

@@ -147,6 +147,154 @@ void *memset(void *dest, int c, unsigned long n) {
     return dest;
 }
 
+/* ── 128-bit integer support routines ──
+   wasm32 has no 128-bit arithmetic, and clang lowers it to compiler-rt
+   calls, which a -nostdlib link does not provide. Generated code can
+   reach them without any 128-bit value in the source: at -O2 clang
+   turns a self-recursive accumulation (`f(n - 1, acc + n)`) into its
+   closed form, computed with 128-bit multiplications. The bodies below
+   use 64-bit halves only, so they never call themselves. */
+typedef union {
+    __int128 s;
+    unsigned __int128 u;
+    struct { uint64_t lo; uint64_t hi; } w;  /* wasm32 is little-endian */
+} _wasm_ti;
+
+__int128 __multi3(__int128 a, __int128 b) {
+    _wasm_ti x, y, r;
+    x.s = a;
+    y.s = b;
+    uint64_t a0 = x.w.lo & 0xFFFFFFFFu, a1 = x.w.lo >> 32;
+    uint64_t b0 = y.w.lo & 0xFFFFFFFFu, b1 = y.w.lo >> 32;
+    uint64_t p00 = a0 * b0, p01 = a0 * b1, p10 = a1 * b0, p11 = a1 * b1;
+    uint64_t mid = (p00 >> 32) + (p01 & 0xFFFFFFFFu) + (p10 & 0xFFFFFFFFu);
+    r.w.lo = (p00 & 0xFFFFFFFFu) | (mid << 32);
+    r.w.hi = p11 + (p01 >> 32) + (p10 >> 32) + (mid >> 32)
+           + x.w.hi * y.w.lo + x.w.lo * y.w.hi;
+    return r.s;
+}
+
+__int128 __ashlti3(__int128 a, int b) {
+    _wasm_ti x, r;
+    x.s = a;
+    if (b & 64) {
+        r.w.lo = 0;
+        r.w.hi = x.w.lo << (b & 63);
+    } else if (b == 0) {
+        return a;
+    } else {
+        r.w.lo = x.w.lo << b;
+        r.w.hi = (x.w.hi << b) | (x.w.lo >> (64 - b));
+    }
+    return r.s;
+}
+
+unsigned __int128 __lshrti3(unsigned __int128 a, int b) {
+    _wasm_ti x, r;
+    x.u = a;
+    if (b & 64) {
+        r.w.hi = 0;
+        r.w.lo = x.w.hi >> (b & 63);
+    } else if (b == 0) {
+        return a;
+    } else {
+        r.w.hi = x.w.hi >> b;
+        r.w.lo = (x.w.lo >> b) | (x.w.hi << (64 - b));
+    }
+    return r.u;
+}
+
+__int128 __ashrti3(__int128 a, int b) {
+    _wasm_ti x, r;
+    x.s = a;
+    if (b & 64) {
+        r.w.hi = (uint64_t)((int64_t)x.w.hi >> 63);
+        r.w.lo = (uint64_t)((int64_t)x.w.hi >> (b & 63));
+    } else if (b == 0) {
+        return a;
+    } else {
+        r.w.hi = (uint64_t)((int64_t)x.w.hi >> b);
+        r.w.lo = (x.w.lo >> b) | (x.w.hi << (64 - b));
+    }
+    return r.s;
+}
+
+/* Unsigned 128-bit division by restoring shift-subtract. The remainder
+   briefly needs 129 bits when the divisor is at least 2^127: its shifted
+   out top bit means it already exceeds the divisor. Division by zero
+   traps, like the wasm 64-bit division instructions. */
+static unsigned __int128 _wasm_udivmodti4(unsigned __int128 n, unsigned __int128 d,
+                                          unsigned __int128 *rem) {
+    _wasm_ti nn, dd, q, r;
+    nn.u = n;
+    dd.u = d;
+    if (dd.w.hi == 0 && dd.w.lo == 0) __builtin_trap();
+    q.w.hi = q.w.lo = 0;
+    r.w.hi = r.w.lo = 0;
+    for (int i = 127; i >= 0; i--) {
+        uint64_t top = r.w.hi >> 63;
+        uint64_t bit = (i >= 64 ? nn.w.hi >> (i - 64) : nn.w.lo >> i) & 1u;
+        r.w.hi = (r.w.hi << 1) | (r.w.lo >> 63);
+        r.w.lo = (r.w.lo << 1) | bit;
+        if (top || r.w.hi > dd.w.hi || (r.w.hi == dd.w.hi && r.w.lo >= dd.w.lo)) {
+            uint64_t borrow = r.w.lo < dd.w.lo;
+            r.w.lo -= dd.w.lo;
+            r.w.hi -= dd.w.hi + borrow;
+            if (i >= 64) q.w.hi |= 1ULL << (i - 64);
+            else q.w.lo |= 1ULL << i;
+        }
+    }
+    if (rem) *rem = r.u;
+    return q.u;
+}
+
+unsigned __int128 __udivti3(unsigned __int128 a, unsigned __int128 b) {
+    return _wasm_udivmodti4(a, b, 0);
+}
+
+unsigned __int128 __umodti3(unsigned __int128 a, unsigned __int128 b) {
+    unsigned __int128 r;
+    _wasm_udivmodti4(a, b, &r);
+    return r;
+}
+
+/* Signed forms truncate toward zero; the remainder takes the dividend's
+   sign. Negation goes through the halves (two's complement). */
+static unsigned __int128 _wasm_ti_abs(__int128 v, int *neg) {
+    _wasm_ti x;
+    x.s = v;
+    *neg = (int)(x.w.hi >> 63);
+    if (*neg) {
+        x.w.lo = ~x.w.lo + 1;
+        x.w.hi = ~x.w.hi + (x.w.lo == 0);
+    }
+    return x.u;
+}
+
+static __int128 _wasm_ti_neg_if(unsigned __int128 v, int neg) {
+    _wasm_ti x;
+    x.u = v;
+    if (neg) {
+        x.w.lo = ~x.w.lo + 1;
+        x.w.hi = ~x.w.hi + (x.w.lo == 0);
+    }
+    return x.s;
+}
+
+__int128 __divti3(__int128 a, __int128 b) {
+    int na, nb;
+    unsigned __int128 ua = _wasm_ti_abs(a, &na), ub = _wasm_ti_abs(b, &nb);
+    return _wasm_ti_neg_if(_wasm_udivmodti4(ua, ub, 0), na ^ nb);
+}
+
+__int128 __modti3(__int128 a, __int128 b) {
+    int na, nb;
+    unsigned __int128 r;
+    unsigned __int128 ua = _wasm_ti_abs(a, &na), ub = _wasm_ti_abs(b, &nb);
+    _wasm_udivmodti4(ua, ub, &r);
+    return _wasm_ti_neg_if(r, na);
+}
+
 /* ── W-3: Bump allocator (WASM linear memory) ── */
 /* Simple bump allocator that never frees. Suitable for wasm-min's
    short-lived programs where memory pressure is minimal.
@@ -480,10 +628,6 @@ static const char *_wf_strstr(const char *haystack, const char *needle) {
     return (const char *)0;
 }
 
-static int _wf_is_whitespace(char c) {
-    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
-}
-
 /* B11-2: Type tag constants (early definition for taida_io_stdout_with_tag) */
 #ifndef WASM_TAG_INT
 #define WASM_TAG_INT     0
@@ -582,6 +726,13 @@ static uint32_t _wasm_elem_kind_at(const int64_t *c, int64_t i) {
     }
     if (v >= 0) return WASM_EKIND((uint32_t)v, 0);
     return WASM_EKIND_UNKNOWN;
+}
+
+/* The display tag of element i: its recorded kind, or -1 (unknown). The
+   slot itself is no tag when it carries the per-element array. */
+static int64_t _wasm_elem_display_tag(const int64_t *c, int64_t i) {
+    uint32_t ek = _wasm_elem_kind_at(c, i);
+    return ek == WASM_EKIND_UNKNOWN ? -1 : (int64_t)WASM_EKIND_KIND(ek);
 }
 
 /* Append one kind entry to a container that already carries an array,
@@ -779,7 +930,146 @@ int64_t taida_io_stdout(int64_t val_ptr) {
    C12-5: returns bytes written (Int). */
 int64_t taida_int_to_str(int64_t a); /* fwd: early Int display path */
 
+/* ── Function values and methods in displays (native twin has details) ──
+   A named function used as a value shows as `<function NAME>`, a lambda as
+   `<function <lambda>>`. A named function's value is a table index, which
+   an Int can equal, so its name is looked up only where the value is known
+   to be a function (a CLOSURE tag or a function-typed stdout); closures carry
+   their own marker. Methods belong to the type and are left out of a
+   value's display and jsonEncode. */
+int64_t taida_is_closure_value(int64_t val);
+#define WASM_FN_NAMES_CAP 1024
+static int64_t _wasm_fn_name_keys[WASM_FN_NAMES_CAP];
+static const char *_wasm_fn_name_vals[WASM_FN_NAMES_CAP];
+
+static unsigned int _wasm_fn_name_slot(int64_t fn) {
+    return (unsigned int)(((uint64_t)fn * 0x9E3779B97F4A7C15ULL) >> 32) % WASM_FN_NAMES_CAP;
+}
+
+int64_t taida_register_fn_name(int64_t fn, int64_t name) {
+    if (fn == 0 || name == 0) return fn;
+    unsigned int start = _wasm_fn_name_slot(fn);
+    for (unsigned int i = 0; i < WASM_FN_NAMES_CAP; i++) {
+        unsigned int slot = (start + i) % WASM_FN_NAMES_CAP;
+        if (_wasm_fn_name_keys[slot] == fn) break;
+        if (_wasm_fn_name_keys[slot] == 0) {
+            _wasm_fn_name_keys[slot] = fn;
+            _wasm_fn_name_vals[slot] = (const char *)(intptr_t)name;
+            break;
+        }
+    }
+    return fn;
+}
+
+static const char *_wasm_fn_name_of(int64_t fn) {
+    if (fn == 0) return 0;
+    unsigned int start = _wasm_fn_name_slot(fn);
+    for (unsigned int i = 0; i < WASM_FN_NAMES_CAP; i++) {
+        unsigned int slot = (start + i) % WASM_FN_NAMES_CAP;
+        if (_wasm_fn_name_keys[slot] == fn) return _wasm_fn_name_vals[slot];
+        if (_wasm_fn_name_keys[slot] == 0) return 0;
+    }
+    return 0;
+}
+
+static int64_t _wasm_function_text(const char *name) {
+    int nl = wasm_strlen(name);
+    char *r = _wasm_str_alloc((unsigned int)(nl + 12));
+    if (!r) return 0;
+    const char *head = "<function ";
+    for (int i = 0; i < 10; i++) r[i] = head[i];
+    for (int i = 0; i < nl; i++) r[10 + i] = name[i];
+    r[10 + nl] = '>';
+    r[11 + nl] = '\0';
+    return (int64_t)(intptr_t)r;
+}
+
+/* `<function NAME>` for a closure, or 0. */
+static int64_t _wasm_closure_display(int64_t val) {
+    if (!taida_is_closure_value(val)) return 0;
+    const char *name = _wasm_fn_name_of(((int64_t *)(intptr_t)val)[1]);
+    return _wasm_function_text(name ? name : "<lambda>");
+}
+
+/* `<function NAME>` for a value known to be a function. */
+static int64_t _wasm_function_display(int64_t val) {
+    int64_t closure = _wasm_closure_display(val);
+    if (closure) return closure;
+    const char *name = _wasm_fn_name_of(val);
+    return _wasm_function_text(name ? name : "<lambda>");
+}
+
+/* `<function NAME>` for a value the lowering knows is a function (a template
+   part or `Str[...]()` of a function-typed expression). */
+int64_t taida_function_to_string(int64_t val) {
+    return _wasm_function_display(val);
+}
+
+#define WASM_TYPE_METHODS_CAP 256
+static const char *_wasm_type_method_types[WASM_TYPE_METHODS_CAP];
+static const char *_wasm_type_method_lists[WASM_TYPE_METHODS_CAP];
+static int _wasm_type_method_count = 0;
+
+int64_t taida_register_type_methods(int64_t type_name, int64_t methods_csv) {
+    const char *name = (const char *)(intptr_t)type_name;
+    if (!name) return 0;
+    for (int i = 0; i < _wasm_type_method_count; i++) {
+        if (_wasm_type_method_types[i] == name || _wf_strcmp(_wasm_type_method_types[i], name) == 0) {
+            return 0;
+        }
+    }
+    if (_wasm_type_method_count < WASM_TYPE_METHODS_CAP) {
+        _wasm_type_method_types[_wasm_type_method_count] = name;
+        _wasm_type_method_lists[_wasm_type_method_count] = (const char *)(intptr_t)methods_csv;
+        _wasm_type_method_count++;
+    }
+    return 0;
+}
+
+int64_t taida_pack_get(int64_t pack_ptr, int64_t field_hash);
+int64_t taida_pack_has_hash(int64_t pack_ptr, int64_t field_hash);
+static int _looks_like_string(int64_t val);
+
+/* Whether `fname` names a method of the type of the pack with `fc` fields. */
+static int _wasm_pack_field_is_method(int64_t *pack, int64_t fc, const char *fname) {
+    if (_wasm_type_method_count == 0) return 0;
+    const char *type_name = 0;
+    for (int64_t i = 0; i < fc; i++) {
+        if (pack[1 + i * 3] == (int64_t)0x84d2d84b631f799bLL /* FNV-1a("__type") */) {
+            int64_t tv = pack[1 + i * 3 + 2];
+            if (_looks_like_string(tv)) type_name = (const char *)(intptr_t)tv;
+            break;
+        }
+    }
+    if (!type_name) return 0;
+    const char *methods = 0;
+    for (int i = 0; i < _wasm_type_method_count; i++) {
+        if (_wf_strcmp(_wasm_type_method_types[i], type_name) == 0) {
+            methods = _wasm_type_method_lists[i];
+            break;
+        }
+    }
+    if (!methods) return 0;
+    int fl = wasm_strlen(fname);
+    const char *p = methods;
+    while (*p) {
+        const char *end = p;
+        while (*end && *end != ',') end++;
+        if ((int)(end - p) == fl && _wf_strncmp(p, fname, fl) == 0) return 1;
+        if (!*end) break;
+        p = end + 1;
+    }
+    return 0;
+}
+
 int64_t taida_io_stdout_with_tag(int64_t val, int64_t tag) {
+    if ((int)tag == WASM_TAG_CLOSURE) {
+        const char *fs = (const char *)(intptr_t)_wasm_function_display(val);
+        int32_t len = wasm_strlen(fs);
+        write_stdout(fs, len);
+        write_stdout("\n", 1);
+        return (int64_t)len;
+    }
     if ((int)tag == WASM_TAG_BOOL) {
         int32_t len = val ? 4 : 5;
         if (val) { write_stdout("true", 4); } else { write_stdout("false", 5); }
@@ -1087,6 +1377,7 @@ int64_t taida_pack_has_hash(int64_t pack_ptr, int64_t field_hash);
 int64_t taida_throw(int64_t error_val);
 int64_t taida_make_error(int64_t type_ptr, int64_t msg_ptr);
 int64_t taida_can_throw_payload(int64_t val);
+extern int __wasm_error_thrown;           /* pending-throw flag (02_containers) */
 int64_t taida_int_to_str(int64_t a);      /* NTH-5: forward decl for poly_add */
 int64_t taida_str_concat(int64_t a_ptr, int64_t b_ptr);  /* NTH-5: forward decl for poly_add */
 static int64_t _wasm_invoke_callback1(int64_t fn_ptr, int64_t arg0);
@@ -1102,6 +1393,22 @@ int64_t taida_async_map(int64_t async_ptr, int64_t fn_ptr); /* PR-4: forward dec
 int64_t taida_async_get_or_default(int64_t async_ptr, int64_t fallback); /* PR-4 */
 static int64_t _wasm_async_to_string(int64_t async_ptr);    /* PR-4: forward decl */
 
+static int64_t _wasm_value_to_display_string(int64_t val);
+int64_t taida_float_to_str(int64_t a);
+int64_t taida_str_concat(int64_t a_ptr, int64_t b_ptr);
+/* The error a Result whose predicate failed raises, naming the value like
+   the reference does (native twin: taida_result_predicate_error). */
+static int64_t _wasm_result_predicate_error(int64_t result) {
+    int64_t value = taida_pack_get_idx(result, 0);
+    int64_t tag = taida_pack_get_tag(result, 0);
+    int64_t shown;
+    if (tag == 1 /* FLOAT */) shown = taida_float_to_str(value);
+    else if (tag == 2 /* BOOL */) shown = value ? WSTR("true") : WSTR("false");
+    else shown = _wasm_value_to_display_string(value);
+    int64_t msg = taida_str_concat(WSTR("Result predicate failed for value: "), shown);
+    return taida_make_error(WSTR("ResultError"), msg);
+}
+
 /* ── Hash constants needed by taida_generic_unmold (full definitions in W-5) ── */
 #define WASM_HASH___TYPE      0x84d2d84b631f799bLL  /* FNV-1a("__type") */
 #define WASM_HASH___VALUE     0x0a7fc9f13472bbe0LL  /* FNV-1a("__value") */
@@ -1114,21 +1421,24 @@ static int64_t _wasm_async_to_string(int64_t async_ptr);    /* PR-4: forward dec
 
 /* ── Div/Mod mold — W-5: now returns Lax (matching native backend) ── */
 
+/* Like a zero divisor, the smallest Int divided by -1 (whose quotient
+   does not fit) gives the failed Lax — the machine division would trap. */
 int64_t taida_div_mold(int64_t a, int64_t b) {
-    if (b == 0) return taida_lax_empty(0);
+    if (b == 0 || (b == -1 && a == -9223372036854775807LL - 1)) return taida_lax_empty(0);
     return taida_lax_new(a / b, 0);
 }
 
 int64_t taida_mod_mold(int64_t a, int64_t b) {
-    if (b == 0) return taida_lax_empty(0);
+    if (b == 0 || (b == -1 && a == -9223372036854775807LL - 1)) return taida_lax_empty(0);
     return taida_lax_new(a % b, 0);
 }
 
 // F58 P2-4: division/modulo with a compiler-proven non-zero divisor —
 // the fused form of `Div[a, b]() >=> v` where `b` is a non-zero Int
-// literal, so the empty-Lax path is unreachable and no Lax is built.
-int64_t taida_div_exact(int64_t a, int64_t b) { return a / b; }
-int64_t taida_mod_exact(int64_t a, int64_t b) { return a % b; }
+// literal, so no Lax is built. The one failing case left (the smallest
+// Int by -1) unmolds to the Lax default, 0.
+int64_t taida_div_exact(int64_t a, int64_t b) { return (b == -1 && a == -9223372036854775807LL - 1) ? 0 : a / b; }
+int64_t taida_mod_exact(int64_t a, int64_t b) { return (b == -1 && a == -9223372036854775807LL - 1) ? 0 : a % b; }
 
 /* F56: shared __type tags for sealed carriers. The producers
    (taida_moltenize_new / taida_secret_new in 02_containers.inc.c) and the
@@ -1231,10 +1541,7 @@ int64_t taida_generic_unmold(int64_t val) {
                 if (!pred_result) {
                     /* Predicate failed — throw the error */
                     if (taida_can_throw_payload(throw_val)) return taida_throw(throw_val);
-                    int64_t error = taida_make_error(
-                        WSTR("ResultError"),
-                        WSTR("Result predicate failed"));
-                    return taida_throw(error);
+                    return taida_throw(_wasm_result_predicate_error(val));
                 }
                 /* Predicate passed even with throw set — return value */
                 return value;
@@ -1252,10 +1559,7 @@ int64_t taida_generic_unmold(int64_t val) {
             int64_t pred_result = _wasm_invoke_callback1(pred, value);
             if (pred_result) return value;  /* success */
             /* Predicate failed — throw default error */
-            int64_t error = taida_make_error(
-                WSTR("ResultError"),
-                WSTR("Result predicate failed"));
-            return taida_throw(error);
+            return taida_throw(_wasm_result_predicate_error(val));
         }
 
         return value; /* no throw, no predicate — success */
@@ -1597,231 +1901,39 @@ int64_t taida_float_sub(int64_t a, int64_t b) { return _d2l(_to_double(a) - _to_
 int64_t taida_float_mul(int64_t a, int64_t b) { return _d2l(_to_double(a) * _to_double(b)); }
 int64_t taida_float_neg(int64_t a) { return _d2l(-_to_double(a)); }
 
-/* ── TF-1/TF-2: Rust f64::Display compatible float formatter ── */
-/* Matches Rust's Display for f64: no scientific notation, integers get ".0",
-   non-integers use minimum significant digits for exact round-trip.
-   Replaces the previous %g-equivalent fmt_g. */
-
-/* Helper: parse a decimal string back to double (freestanding strtod).
-   Uses integer accumulation + final division to avoid cumulative
-   floating-point errors from repeated factor *= 0.1 multiplication. */
-static double _parse_double(const char *s) {
-    int i = 0;
-    int negative = 0;
-    if (s[i] == '-') { negative = 1; i++; }
-    /* Accumulate all digits as an integer mantissa, count decimal places */
-    uint64_t mantissa = 0;
-    int decimal_places = 0;
-    int in_frac = 0;
-    /* Integer part */
-    while (s[i] >= '0' && s[i] <= '9') {
-        mantissa = mantissa * 10 + (uint64_t)(s[i] - '0');
-        i++;
-    }
-    /* Fractional part */
-    if (s[i] == '.') {
-        i++;
-        in_frac = 1;
-        while (s[i] >= '0' && s[i] <= '9') {
-            mantissa = mantissa * 10 + (uint64_t)(s[i] - '0');
-            decimal_places++;
-            i++;
-        }
-    }
-    /* Convert: result = mantissa / 10^decimal_places */
-    double result = (double)mantissa;
-    double divisor = 1.0;
-    for (int j = 0; j < decimal_places; j++) divisor *= 10.0;
-    result /= divisor;
-    if (negative) result = -result;
-    return result;
-}
-
-/* Helper: compute base-10 exponent and normalized mantissa for d > 0 */
-static int _compute_exp10(double d) {
-    int exp10 = 0;
-    double norm = d;
-    if (norm >= 10.0) {
-        while (norm >= 10.0) { norm /= 10.0; exp10++; }
-    } else if (norm < 1.0) {
-        while (norm < 1.0) { norm *= 10.0; exp10--; }
-    }
-    return exp10;
-}
-
-/* Helper: power of 10 (freestanding, integer exponent) */
-static double _pow10(int e) {
-    double r = 1.0;
-    double base = 10.0;
-    int neg = 0;
-    if (e < 0) { neg = 1; e = -e; }
-    while (e > 0) {
-        if (e & 1) r *= base;
-        base *= base;
-        e >>= 1;
-    }
-    return neg ? 1.0 / r : r;
-}
-
-/* Format d (positive) with `sig` significant digits in fixed notation.
-   Uses digit-by-digit extraction to avoid large-integer precision loss.
-   Returns length written to buf (not NUL-terminated). */
-static int _fmt_fixed_sig(double d, int sig, char *buf, int bufsize) {
-    int len = 0;
-    int exp10 = _compute_exp10(d);
-
-    /* Number of integer digits = exp10 + 1 */
-    int int_digits = exp10 + 1;
-    /* Number of decimal places = sig - int_digits */
-    int decimal_places = sig - int_digits;
-    if (decimal_places < 0) decimal_places = 0;
-
-    /* Extract integer part */
-    uint64_t ipart = (uint64_t)d;
-    double frac = d - (double)ipart;
-
-    /* Write integer part */
-    char itmp[24];
-    int ipos = 23;
-    itmp[ipos] = '\0';
-    if (ipart == 0) { itmp[--ipos] = '0'; }
-    else { while (ipart > 0) { itmp[--ipos] = '0' + (char)(ipart % 10); ipart /= 10; } }
-    for (int i = ipos; i < 23; i++) {
-        if (len < bufsize) buf[len++] = itmp[i];
-    }
-
-    /* Fractional part: extract digit by digit */
-    if (decimal_places > 0) {
-        if (len < bufsize) buf[len++] = '.';
-        int frac_start = len;
-        for (int i = 0; i < decimal_places; i++) {
-            frac *= 10.0;
-            int digit = (int)frac;
-            if (digit > 9) digit = 9;
-            frac -= (double)digit;
-            if (len < bufsize) buf[len++] = '0' + (char)digit;
-        }
-        /* Round: if remaining frac >= 0.5, round up last digit */
-        if (frac >= 0.5 && len > frac_start) {
-            int carry = 1;
-            for (int i = len - 1; i >= frac_start && carry; i--) {
-                int d2 = (buf[i] - '0') + carry;
-                if (d2 >= 10) { buf[i] = '0'; carry = 1; }
-                else { buf[i] = '0' + (char)d2; carry = 0; }
-            }
-            /* Carry into integer part */
-            if (carry) {
-                /* Need to carry into integer portion */
-                for (int i = frac_start - 2; i >= 0 && carry; i--) {
-                    if (buf[i] >= '0' && buf[i] <= '9') {
-                        int d2 = (buf[i] - '0') + carry;
-                        if (d2 >= 10) { buf[i] = '0'; carry = 1; }
-                        else { buf[i] = '0' + (char)d2; carry = 0; }
-                    }
-                }
-            }
-        }
-        /* Trim trailing zeros, but keep at least one digit after dot */
-        while (len > frac_start + 1 && buf[len-1] == '0') len--;
-        /* If only dot remains, remove it too */
-        if (len == frac_start) len--;
-    }
-    return len;
-}
-
-static int fmt_g(double d, char *buf, int bufsize) {
-    int len = 0;
-    union { double d; uint64_t u; } ux;
-    ux.d = d;
-    int negative = (ux.u >> 63) != 0;
-
-    /* Handle negative — extract sign, then work with positive value */
-    if (negative) { buf[len++] = '-'; d = -d; }
-
-    /* NaN check: NaN != NaN */
-    if (d != d) { buf[len++]='N'; buf[len++]='a'; buf[len++]='N'; return len; }
-    /* Infinity */
-    if (d > 1e308) { buf[len++]='i'; buf[len++]='n'; buf[len++]='f'; return len; }
-
-    /* Zero: always "0.0" (or "-0.0") — matching Rust */
-    if (d == 0.0) {
-        buf[len++] = '0'; buf[len++] = '.'; buf[len++] = '0';
-        return len;
-    }
-
-    /* Large integer-valued f64: every finite f64 at or above 2^53 is an
-       integer, and past ~1e18/1e19 the i64/u64 casts below are UB — the
-       old path printed 1e20 as "0". Expand exactly: decompose into
-       mantissa * 2^exp and double out in decimal (cold path; <= ~310
-       digits for the largest finite f64). */
-    if (d >= 1e18) {
-        union { double d; uint64_t u; } um;
-        um.d = d;
-        uint64_t mant = (um.u & 0xFFFFFFFFFFFFFULL) | (1ULL << 52);
-        int exp2 = (int)((um.u >> 52) & 0x7FF) - 1023 - 52; /* >= 0 here */
-        unsigned char dig[340];
-        int n = 0;
-        while (mant > 0) { dig[n++] = (unsigned char)(mant % 10); mant /= 10; }
-        for (int k = 0; k < exp2; k++) {
-            int carry = 0;
-            for (int i = 0; i < n; i++) {
-                int v = dig[i] * 2 + carry;
-                dig[i] = (unsigned char)(v % 10);
-                carry = v / 10;
-            }
-            while (carry) { dig[n++] = (unsigned char)(carry % 10); carry /= 10; }
-        }
-        for (int i = n - 1; i >= 0 && len < bufsize; i--) buf[len++] = (char)('0' + dig[i]);
-        if (len + 2 <= bufsize) { buf[len++] = '.'; buf[len++] = '0'; }
-        return len;
-    }
-
-    /* Integer check: if d == floor(d) and d < 1e18, format as "X.0" */
-    {
-        int64_t as_int = (int64_t)d;
-        double back = (double)as_int;
-        if (back == d && d < 1e18) {
-            /* Format integer part */
-            uint64_t uval = (uint64_t)d;
-            char itmp[24];
-            int ipos = 23;
-            itmp[ipos] = '\0';
-            if (uval == 0) { itmp[--ipos] = '0'; }
-            else { while (uval > 0) { itmp[--ipos] = '0' + (char)(uval % 10); uval /= 10; } }
-            for (int i = ipos; i < 23; i++) buf[len++] = itmp[i];
-            buf[len++] = '.'; buf[len++] = '0';
-            return len;
-        }
-    }
-
-    /* Non-integer: find minimum significant digits that round-trip exactly.
-       Try sig = 1..17. For each, format in fixed notation, parse back,
-       and check if the result equals the original. */
-    for (int sig = 1; sig <= 17; sig++) {
-        char trial[80];
-        int tlen = _fmt_fixed_sig(d, sig, trial, 79);
-        trial[tlen] = '\0';
-        /* Parse back */
-        double roundtrip = _parse_double(negative ? trial : trial);
-        if (roundtrip == d) {
-            /* Copy trial to output (after the sign if negative) */
-            for (int i = 0; i < tlen; i++) buf[len++] = trial[i];
-            return len;
-        }
-    }
-
-    /* Fallback: 17 significant digits */
-    int flen = _fmt_fixed_sig(d, 17, buf + len, bufsize - len);
-    len += flen;
-    return len;
-}
+/* ── Numeric kernel entry points ──
+   Float display / ToFixed / Float parsing (05_numeric.inc.c) reproduce
+   Rust's f64 formatting and `str::parse::<f64>` exactly. The math entry
+   points (runtime_crmath.inc.c, shared with the native runtime) return
+   correctly rounded values. Output buffers of TAIDA_WASM_FLOAT_TEXT_MAX
+   bytes hold every result. */
+#define TAIDA_WASM_FLOAT_TEXT_MAX 400
+static int _tf_display(double x, char *out);
+static int _tf_to_string(double x, char *out);
+static int _tf_fixed(double x, int digits, char *out);
+static int _tf_parse(const char *s, int len, double *out);
+static double _crm_exp(double x);
+static double _crm_ln(double x);
+static double _crm_log2(double x);
+static double _crm_log10(double x);
+static double _crm_pow(double x, double y);
+static double _crm_sin(double x);
+static double _crm_cos(double x);
+static double _crm_tan(double x);
+static double _crm_asin(double x);
+static double _crm_acos(double x);
+static double _crm_atan(double x);
+static double _crm_atan2(double y, double x);
+static double _crm_sinh(double x);
+static double _crm_cosh(double x);
+static double _crm_tanh(double x);
+static double _tm_round(double x);
 
 /* ── W-3: taida_debug_float: debug(Float) — f64 の文字列化 + stdout ── */
 
 int64_t taida_debug_float(int64_t val) {
-    double d = _l2d(val);
-    char buf[64];
-    int len = fmt_g(d, buf, 64);
+    char buf[TAIDA_WASM_FLOAT_TEXT_MAX];
+    int len = _tf_display(_l2d(val), buf);
     write_stdout(buf, len);
     write_stdout("\n", 1);
     return 0;
@@ -1833,16 +1945,21 @@ int64_t taida_int_to_float(int64_t a) {
     return _d2l((double)a);
 }
 
+/* Float -> Int like the interpreter's `as i64`: truncate toward zero,
+   saturate out-of-range values at the Int limits, NaN -> 0. */
 int64_t taida_float_to_int(int64_t a) {
-    return (int64_t)_to_double(a);
+    double d = _to_double(a);
+    if (d != d) return 0;
+    if (d >= 9223372036854775808.0) return TAIDA_WASM_I64_MAX;
+    if (d < -9223372036854775808.0) return TAIDA_WASM_I64_MIN;
+    return (int64_t)d;
 }
 
 /* ── W-3: taida_float_to_str: Float→Str 変換 (uses bump allocator) ── */
 
 int64_t taida_float_to_str(int64_t val) {
-    double d = _l2d(val);
-    char tmp[64];
-    int len = fmt_g(d, tmp, 64);
+    char tmp[TAIDA_WASM_FLOAT_TEXT_MAX];
+    int len = _tf_display(_l2d(val), tmp);
 
     char *buf = _wasm_str_alloc(len + 1);
     if (!buf) return 0;
@@ -1921,6 +2038,44 @@ int64_t taida_list_length(int64_t list_ptr);
    `_wasm_hashmap_new_with_cap` comment for the allocation layout. */
 #define WASM_HM_ORD_HEADER_SLOT(cap) ((WASM_HM_HEADER) + (cap) * 3 + 1)
 #define WASM_HM_ORD_SLOT(cap, i)     (WASM_HM_ORD_HEADER_SLOT(cap) + 1 + (i))
+
+/* Entry kinds after the order index: one slot per bucket holding the key's
+   kind entry in the low 32 bits and the value's in the high 32 bits
+   (0xFF = unknown). Every store of an entry writes its slot (native twin:
+   TAIDA_HM_KIND_SLOT), so display, keys / values / entries, get and
+   jsonEncode show each key and value as its own kind. */
+#define WASM_HM_KIND_SLOT(cap, slot) (WASM_HM_ORD_SLOT(cap, cap) + (slot))
+#define WASM_HM_KINDS(key_ek, value_ek) \
+    ((int64_t)(((uint64_t)(uint32_t)(value_ek) << 32) | (uint64_t)(uint32_t)(key_ek)))
+#define WASM_HM_KINDS_UNKNOWN WASM_HM_KINDS(WASM_EKIND_UNKNOWN, WASM_EKIND_UNKNOWN)
+#define WASM_HM_KEY_EK(k)   ((uint32_t)((uint64_t)(k) & 0xFFFFFFFFu))
+#define WASM_HM_VALUE_EK(k) ((uint32_t)((uint64_t)(k) >> 32))
+
+/* The kind of an occupied bucket's key: one stored without a kind is a Str
+   when it reads as one, else an Int (the guesses the readers used to make). */
+static uint32_t _wasm_hm_key_ek(const int64_t *hm, int64_t cap, int64_t slot) {
+    uint32_t ek = WASM_HM_KEY_EK(hm[WASM_HM_KIND_SLOT(cap, slot)]);
+    if (WASM_EKIND_KIND(ek) != WASM_EKIND_UNKNOWN) return ek;
+    return _wasm_is_string_ptr(hm[WASM_HM_HEADER + slot * 3 + 1])
+        ? WASM_EKIND(WASM_TAG_STR, 0) : WASM_EKIND(WASM_TAG_INT, 0);
+}
+
+/* The kind of an occupied bucket's value: one stored without a kind has
+   the map's single value tag (unknown when the map is mixed). */
+static uint32_t _wasm_hm_value_ek(const int64_t *hm, int64_t cap, int64_t slot) {
+    uint32_t ek = WASM_HM_VALUE_EK(hm[WASM_HM_KIND_SLOT(cap, slot)]);
+    if (WASM_EKIND_KIND(ek) != WASM_EKIND_UNKNOWN) return ek;
+    int64_t tag = hm[2];
+    return tag >= 0 ? WASM_EKIND((uint32_t)tag, 0) : WASM_EKIND_UNKNOWN;
+}
+
+/* A pack field / display tag for a kind entry: an Enum value is its ordinal. */
+static int64_t _wasm_hm_tag_of(uint32_t ek, int64_t fallback) {
+    uint32_t k = WASM_EKIND_KIND(ek);
+    if (k == WASM_EKIND_UNKNOWN) return fallback;
+    if (k == (uint32_t)WASM_TAG_ENUM) return WASM_TAG_INT;
+    return (int64_t)k;
+}
 
 /* ── W-3f/W-4: taida_polymorphic_length (wasm-min: string + list) ── */
 
@@ -2103,6 +2258,7 @@ static int64_t _wasm_value_to_debug_string(int64_t val);
    calls `_wasm_is_error` / `_wasm_error_to_string`, which are defined
    later in this fragment — forward-declare them here. */
 static int64_t _wasm_value_to_debug_string_full(int64_t val);
+static int _wasm_is_async_task_pack(int64_t val);
 /* C23B-005 (2026-04-22): tag-aware debug-string dispatcher. When the
    caller knows the element's primitive tag (e.g. a list's stored
    `elem_type_tag`, or a pack field's `field_tag`), this helper bypasses
@@ -2118,8 +2274,6 @@ static int64_t _wasm_value_to_debug_string_full(int64_t val);
 static int64_t _wasm_render_elem_tagged_debug(int64_t val, int64_t tag);
 static int64_t _wasm_render_elem_tagged_debug_full(int64_t val, int64_t tag);
 static int64_t _wasm_pack_to_string_full(int64_t pack_ptr);
-static int _wasm_is_error(int64_t val);
-static int64_t _wasm_error_to_string(int64_t val);
 static int _is_wasm_hashmap(int64_t ptr);
 static const char *_wasm_lookup_field_name(int64_t hash);
 static int64_t _wasm_lookup_field_type(int64_t hash);
@@ -2182,6 +2336,24 @@ static int64_t _sb_finish(_wasm_strbuf *sb) {
     return (int64_t)(intptr_t)sb->buf;
 }
 
+/* Bytes render as `Bytes[@[...]]` (interpreter shape) on every display
+   path. The Bytes layout matches neither the list nor the string
+   detector, so without this branch a Bytes value fell through to the
+   Int fallback and printed its address. */
+static int64_t _wasm_bytes_to_display_string(int64_t obj) {
+    int64_t len = _wasm_bytes_len(obj);
+    _wasm_strbuf sb;
+    _sb_init(&sb);
+    _sb_append(&sb, "Bytes[@[");
+    for (int64_t i = 0; i < len; i++) {
+        if (i > 0) _sb_append(&sb, ", ");
+        int64_t item_str = taida_int_to_str((int64_t)_wasm_bytes_at(obj, i));
+        _sb_append(&sb, (const char *)(intptr_t)item_str);
+    }
+    _sb_append(&sb, "]]");
+    return _sb_finish(&sb);
+}
+
 /* W-4f2: HashMap toString: HashMap({"key": value, ...}) */
 /* Tombstone: hash == 1, key == 0 (same as native TAIDA_HASHMAP_TOMBSTONE_HASH) */
 #define WASM_HM_TOMBSTONE_HASH 1
@@ -2192,10 +2364,6 @@ static int64_t _sb_finish(_wasm_strbuf *sb) {
 static int64_t _wasm_hashmap_to_string(int64_t hm_ptr) {
     int64_t *hm = (int64_t *)(intptr_t)hm_ptr;
     int64_t cap = hm[0];
-    /* C23B-005 / C23B-006 / C23B-007: `hm[2]` is reliable now — see the
-       `_wasm_hashmap_to_string` comment and the hardened
-       `taida_hashmap_set_value_tag` (HETEROGENEOUS latch). */
-    int64_t value_tag = hm[2];
     _wasm_strbuf sb;
     _sb_init(&sb);
     _sb_append(&sb, "HashMap({");
@@ -2211,8 +2379,9 @@ static int64_t _wasm_hashmap_to_string(int64_t hm_ptr) {
         if (WASM_HM_SLOT_OCCUPIED(sh, sk)) {
             int64_t value = hm[WASM_HM_HEADER + slot * 3 + 2];
             if (count > 0) _sb_append(&sb, ", ");
-            int64_t key_str = _wasm_value_to_debug_string(sk);
-            int64_t val_str = _wasm_render_elem_tagged_debug(value, value_tag);
+            /* Each key and value shows as its entry's kind. */
+            int64_t key_str = _wasm_render_elem_tagged_debug(sk, _wasm_hm_tag_of(_wasm_hm_key_ek(hm, cap, slot), -1));
+            int64_t val_str = _wasm_render_elem_tagged_debug(value, _wasm_hm_tag_of(_wasm_hm_value_ek(hm, cap, slot), -1));
             _sb_append(&sb, (const char *)(intptr_t)key_str);
             _sb_append(&sb, ": ");
             _sb_append(&sb, (const char *)(intptr_t)val_str);
@@ -2227,15 +2396,14 @@ static int64_t _wasm_hashmap_to_string(int64_t hm_ptr) {
 static int64_t _wasm_set_to_string(int64_t set_ptr) {
     int64_t *list = (int64_t *)(intptr_t)set_ptr;
     int64_t len = list[1];
-    /* C23B-005: honour the set's elem_type_tag. */
-    int64_t elem_tag = list[2];
+    /* C23B-005: honour the set's element kinds. */
     _wasm_strbuf sb;
     _sb_init(&sb);
     _sb_append(&sb, "Set({");
     for (int64_t i = 0; i < len; i++) {
         if (i > 0) _sb_append(&sb, ", ");
         int64_t elem = list[WASM_LIST_ELEMS + i];
-        int64_t elem_str = _wasm_render_elem_tagged_debug(elem, elem_tag);
+        int64_t elem_str = _wasm_render_elem_tagged_debug(elem, _wasm_elem_display_tag(list, i));
         _sb_append(&sb, (const char *)(intptr_t)elem_str);
     }
     _sb_append(&sb, "})");
@@ -2246,20 +2414,19 @@ static int64_t _wasm_set_to_string(int64_t set_ptr) {
 static int64_t _wasm_list_to_string(int64_t list_ptr) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
-    /* C23B-005: consult the list's stored elem_type_tag so primitive
+    /* C23B-005: consult each element's recorded kind so primitive
        elements dispatch through the tag-aware renderer instead of the
        structural detectors. Closes stack-overflow / short-form drift
        on `@[<large Int>]` etc. where a bare Int element aliased a
        heap allocation whose layout happened to match a collection
        sentinel. */
-    int64_t elem_tag = list[2];
     _wasm_strbuf sb;
     _sb_init(&sb);
     _sb_append(&sb, "@[");
     for (int64_t i = 0; i < len; i++) {
         if (i > 0) _sb_append(&sb, ", ");
         int64_t item = list[WASM_LIST_ELEMS + i];
-        int64_t item_str = _wasm_render_elem_tagged_debug(item, elem_tag);
+        int64_t item_str = _wasm_render_elem_tagged_debug(item, _wasm_elem_display_tag(list, i));
         _sb_append(&sb, (const char *)(intptr_t)item_str);
     }
     _sb_append(&sb, "]");
@@ -2307,6 +2474,18 @@ static void _wasm_register_internal_field_names(void) {
     }
 }
 
+static int _wasm_streq(const char *a, const char *b); /* below */
+
+/* A Molten value (one `__type` field holding "Molten") shows as `Molten`,
+   as the reference shows it. */
+static int _wasm_is_molten_pack(int64_t val) {
+    if (!_wasm_is_valid_ptr(val, 4 * 8)) return 0;
+    int64_t *p = (int64_t *)(intptr_t)val;
+    if (p[0] != 1 || p[1] != WASM_HASH___TYPE) return 0;
+    return _wasm_is_string_ptr(p[3])
+        && _wasm_streq((const char *)(intptr_t)p[3], "Molten");
+}
+
 static int64_t _wasm_pack_to_string(int64_t pack_ptr) {
     /* F56: a sealed carrier (Moltenized/Secret) renders only its policy label;
        every pack display path converges here so the sealed __value can never
@@ -2316,6 +2495,7 @@ static int64_t _wasm_pack_to_string(int64_t pack_ptr) {
         if (ck == 1) return WSTR("<Moltenized>");
         if (ck == 2) return WSTR("<Secret>");
     }
+    if (_wasm_is_molten_pack(pack_ptr)) return WSTR("Molten");
     _wasm_register_internal_field_names();
     int64_t *pack = (int64_t *)(intptr_t)pack_ptr;
     int64_t fc = pack[0];
@@ -2329,16 +2509,20 @@ static int64_t _wasm_pack_to_string(int64_t pack_ptr) {
         int64_t field_val  = pack[1 + i * 3 + 2];
         const char *fname = _wasm_lookup_field_name(field_hash);
         if (!fname) continue;
+        if (_wasm_pack_field_is_method(pack, fc, fname)) continue;
         if (count > 0) _sb_append(&sb, ", ");
         _sb_append(&sb, fname);
         _sb_append(&sb, " <= ");
-        /* C21B-seed-07: the per-field tag is authoritative for Float /
-           Bool rendering (matches the native `taida_pack_to_display_string`
-           rewrite). The legacy registry lookup (ftype == 4 => Bool) is kept
-           as a fallback for pre-seed-07 packs that only populated the
-           global field-name/type table. */
-        int64_t ftype = _wasm_lookup_field_type(field_hash);
-        int render_bool  = (field_tag == WASM_TAG_BOOL) || (field_tag == 0 && ftype == 4);
+        if (field_tag == WASM_TAG_CLOSURE) {
+            _sb_append(&sb, (const char *)(intptr_t)_wasm_function_display(field_val));
+            count++;
+            continue;
+        }
+        /* The per-field tag decides (as on the native runtime): the global
+           field-name registry is keyed by name, so another pack's Bool
+           field of the same name must not turn this pack's Int into
+           `true`. */
+        int render_bool  = (field_tag == WASM_TAG_BOOL);
         int render_float = (field_tag == WASM_TAG_FLOAT);
         int render_str   = (field_tag == WASM_TAG_STR);
         int render_unit  = field_val == 0
@@ -2351,10 +2535,7 @@ static int64_t _wasm_pack_to_string(int64_t pack_ptr) {
            untagged large Int value would fall through to the generic
            structural dispatcher and false-match a collection detector
            whose allocation layout happened to alias the Int's bit
-           pattern. We take `field_tag == WASM_TAG_INT` AND `ftype`
-           says it's an Int (ftype 1/3 for Int / literal-Int in the
-           legacy registry) to avoid stealing from the legacy Bool
-           fallback (`ftype == 4`). */
+           pattern. */
         int render_int = (field_tag == WASM_TAG_INT) && !render_bool;
         if (render_bool) {
             _sb_append(&sb, field_val ? "true" : "false");
@@ -2375,6 +2556,10 @@ static int64_t _wasm_pack_to_string(int64_t pack_ptr) {
             _sb_append(&sb, "\"");
             if (sv) _sb_append(&sb, sv);
             _sb_append(&sb, "\"");
+        } else if (render_unit && field_hash == WASM_HASH_THROW && _wasm_is_result(pack_ptr)) {
+            /* A Result given no error shows the empty Error its `throw`
+               reads as. */
+            _sb_append(&sb, "@(type <= \"\", message <= \"\", __type <= \"Error\")");
         } else if (render_unit) {
             _sb_append(&sb, "@()");
         } else if (render_int) {
@@ -2404,6 +2589,7 @@ static int64_t _wasm_pack_to_string_full(int64_t pack_ptr) {
         if (ck == 1) return WSTR("<Moltenized>");
         if (ck == 2) return WSTR("<Secret>");
     }
+    if (_wasm_is_molten_pack(pack_ptr)) return WSTR("Molten");
     _wasm_register_internal_field_names();
     int64_t *pack = (int64_t *)(intptr_t)pack_ptr;
     int64_t fc = pack[0];
@@ -2428,12 +2614,17 @@ static int64_t _wasm_pack_to_string_full(int64_t pack_ptr) {
             && field_hash == WASM_HASH___ERROR) {
             continue;
         }
+        if (_wasm_pack_field_is_method(pack, fc, fname)) continue;
         /* Unlike `_wasm_pack_to_string`, we do NOT skip __ fields here. */
         if (count > 0) _sb_append(&sb, ", ");
         _sb_append(&sb, fname);
         _sb_append(&sb, " <= ");
-        int64_t ftype = _wasm_lookup_field_type(field_hash);
-        int render_bool  = (field_tag == WASM_TAG_BOOL) || (field_tag == 0 && ftype == 4);
+        if (field_tag == WASM_TAG_CLOSURE) {
+            _sb_append(&sb, (const char *)(intptr_t)_wasm_function_display(field_val));
+            count++;
+            continue;
+        }
+        int render_bool  = (field_tag == WASM_TAG_BOOL);
         int render_float = (field_tag == WASM_TAG_FLOAT);
         int render_str   = (field_tag == WASM_TAG_STR);
         int render_unit  = field_val == 0
@@ -2461,6 +2652,10 @@ static int64_t _wasm_pack_to_string_full(int64_t pack_ptr) {
             _sb_append(&sb, "\"");
             if (sv) _sb_append(&sb, sv);
             _sb_append(&sb, "\"");
+        } else if (render_unit && field_hash == WASM_HASH_THROW && _wasm_is_result(pack_ptr)) {
+            /* A Result given no error shows the empty Error its `throw`
+               reads as. */
+            _sb_append(&sb, "@(type <= \"\", message <= \"\", __type <= \"Error\")");
         } else if (render_unit) {
             _sb_append(&sb, "@()");
         } else if (render_int) {
@@ -2498,6 +2693,7 @@ static int64_t _wasm_pack_to_string_full(int64_t pack_ptr) {
    for the `WASM_LIST_MAGIC` / `WASM_HM_MAGIC` / `WASM_SET_MAGIC` /
    `WASM_PACK_MAGIC` positive identification at the detector level. */
 static int64_t _wasm_render_elem_tagged_debug(int64_t val, int64_t tag) {
+    if (tag == WASM_TAG_CLOSURE) return _wasm_function_display(val);
     if (tag == WASM_TAG_INT) return taida_int_to_str(val);
     if (tag == WASM_TAG_FLOAT) return taida_float_to_str(val);
     if (tag == WASM_TAG_BOOL) return val ? WSTR("true") : WSTR("false");
@@ -2517,6 +2713,7 @@ static int64_t _wasm_render_elem_tagged_debug(int64_t val, int64_t tag) {
 }
 
 static int64_t _wasm_render_elem_tagged_debug_full(int64_t val, int64_t tag) {
+    if (tag == WASM_TAG_CLOSURE) return _wasm_function_display(val);
     if (tag == WASM_TAG_INT) return taida_int_to_str(val);
     if (tag == WASM_TAG_FLOAT) return taida_float_to_str(val);
     if (tag == WASM_TAG_BOOL) return val ? WSTR("true") : WSTR("false");
@@ -2543,10 +2740,12 @@ static int64_t _wasm_render_elem_tagged_debug_full(int64_t val, int64_t tag) {
    declarations at the top of this fragment keep the ordering valid. */
 static int64_t _wasm_value_to_debug_string_full(int64_t val) {
     if (val == 0) return WSTR("0");
+    { int64_t fd = _wasm_closure_display(val); if (fd) return fd; }
     /* HashMap / Set always display the public `HashMap({...})` /
        `Set({...})` shape — the carrier fields are compiler-internal. */
     if (_is_wasm_hashmap(val)) return _wasm_hashmap_to_string(val);
     if (_is_wasm_set(val)) return _wasm_set_to_string(val);
+    if (_looks_like_bytes(val)) return _wasm_bytes_to_display_string(val);
     /* C23B-003 reopen 3: render empty packs (`@()`) with their interpreter-
        parity string. Must be checked BEFORE `_looks_like_pack` (which
        requires `fc >= 1`) and BEFORE the int fallback which would otherwise
@@ -2557,16 +2756,15 @@ static int64_t _wasm_value_to_debug_string_full(int64_t val) {
     if (_looks_like_list(val)) {
         int64_t *list = (int64_t *)(intptr_t)val;
         int64_t len = list[1];
-        /* C23B-005: honour the stored elem_type_tag so primitive items
+        /* C23B-005: honour the element kinds so primitive items
            bypass the structural detectors. */
-        int64_t elem_tag = list[2];
-        _wasm_strbuf sb;
+                _wasm_strbuf sb;
         _sb_init(&sb);
         _sb_append(&sb, "@[");
         for (int64_t i = 0; i < len; i++) {
             if (i > 0) _sb_append(&sb, ", ");
             int64_t item = list[WASM_LIST_ELEMS + i];
-            int64_t item_str = _wasm_render_elem_tagged_debug_full(item, elem_tag);
+            int64_t item_str = _wasm_render_elem_tagged_debug_full(item, _wasm_elem_display_tag(list, i));
             _sb_append(&sb, (const char *)(intptr_t)item_str);
         }
         _sb_append(&sb, "]");
@@ -2578,8 +2776,9 @@ static int64_t _wasm_value_to_debug_string_full(int64_t val) {
        short-form (`Async[fulfilled: …]` etc.) — not a full-form
        BuchiPack. */
     if (_wasm_is_async_obj(val)) return _wasm_async_to_string(val);
-    /* Check Error before generic pack (unchanged). */
-    if (_wasm_is_error(val)) return _wasm_error_to_string(val);
+    /* An Error value nested in a pack or list shows its fields, like any
+       other pack (native twin: taida_value_to_debug_string_full). */
+    if (_wasm_is_async_task_pack(val)) return WSTR("AsyncTask[<task>]");
     /* All pack shapes (Lax / Result / Gorillax / user packs) must
        recurse through the full-form helper so nested typed values
        continue to render with their `__`-prefixed internals. */
@@ -2637,19 +2836,7 @@ static int64_t _wasm_stdout_display_string(int64_t obj) {
        the string fallback and print garbage (it no longer matches the
        list magic since the handler ABI moved to the shared TAIDBYT
        layout). */
-    if (_looks_like_bytes(obj)) {
-        int64_t len = _wasm_bytes_len(obj);
-        _wasm_strbuf sb;
-        _sb_init(&sb);
-        _sb_append(&sb, "Bytes[@[");
-        for (int64_t i = 0; i < len; i++) {
-            if (i > 0) _sb_append(&sb, ", ");
-            int64_t item_str = taida_int_to_str((int64_t)_wasm_bytes_at(obj, i));
-            _sb_append(&sb, (const char *)(intptr_t)item_str);
-        }
-        _sb_append(&sb, "]]");
-        return _sb_finish(&sb);
-    }
+    if (_looks_like_bytes(obj)) return _wasm_bytes_to_display_string(obj);
     /* C23B-003 reopen 2: Lists must render items through the full-form
        debug helper so nested HashMap/Set/Pack keep their interpreter
        shape. `_wasm_list_to_string` alone would dispatch those items
@@ -2658,17 +2845,16 @@ static int64_t _wasm_stdout_display_string(int64_t obj) {
     if (_looks_like_list(obj)) {
         int64_t *list = (int64_t *)(intptr_t)obj;
         int64_t len = list[1];
-        /* C23B-005: dispatch list items by the stored elem_type_tag so
+        /* C23B-005: dispatch list items by the element kinds so
            primitive elements (Int / Float / Bool / Str) bypass the
            structural collection detectors entirely. */
-        int64_t elem_tag = list[2];
-        _wasm_strbuf sb;
+                _wasm_strbuf sb;
         _sb_init(&sb);
         _sb_append(&sb, "@[");
         for (int64_t i = 0; i < len; i++) {
             if (i > 0) _sb_append(&sb, ", ");
             int64_t item = list[WASM_LIST_ELEMS + i];
-            int64_t item_str = _wasm_render_elem_tagged_debug_full(item, elem_tag);
+            int64_t item_str = _wasm_render_elem_tagged_debug_full(item, _wasm_elem_display_tag(list, i));
             _sb_append(&sb, (const char *)(intptr_t)item_str);
         }
         _sb_append(&sb, "]");
@@ -2704,7 +2890,9 @@ static int _wasm_is_valid_ptr(int64_t val, unsigned int min_bytes) {
     unsigned int mem_size = pages * 65536;
     unsigned int addr = (unsigned int)val;
     if (addr < WASM_MIN_HEAP_ADDR) return 0; /* skip null/very-low addresses */
-    if (addr + min_bytes > mem_size) return 0;
+    /* 64-bit sum: an Int just below 2^32 must not wrap around to a small
+       end address and pass as a pointer. */
+    if ((uint64_t)addr + min_bytes > (uint64_t)mem_size) return 0;
     return 1;
 }
 
@@ -2872,9 +3060,18 @@ static int64_t _wasm_gorillax_to_string(int64_t gx) {
     _sb_append(&sb, prefix);
     _sb_append(&sb, "(");
     if (is_ok) {
+        /* The value is shown by its slot's kind (a Float's bits and a
+           Bool's 0 / 1 say nothing alone), as Lax.toString() does. */
         int64_t value = taida_pack_get_idx(gx, 1);
-        int64_t val_str = _wasm_value_to_display_string(value);
-        _sb_append(&sb, (const char *)(intptr_t)val_str);
+        int64_t tag = taida_pack_get_tag(gx, 1);
+        if (tag == WASM_TAG_FLOAT) {
+            _sb_append(&sb, (const char *)(intptr_t)taida_float_to_str(value));
+        } else if (tag == WASM_TAG_BOOL) {
+            _sb_append(&sb, value ? "true" : "false");
+        } else {
+            int64_t val_str = _wasm_value_to_display_string(value);
+            _sb_append(&sb, (const char *)(intptr_t)val_str);
+        }
     } else {
         if (gtype == 2) {
             _sb_append(&sb, "escaped");
@@ -2887,40 +3084,6 @@ static int64_t _wasm_gorillax_to_string(int64_t gx) {
 }
 
 /* Detect Error pack: runtime-created errors carry type/message plus __type. */
-static int _wasm_is_error(int64_t val) {
-    if (!_wasm_is_valid_ptr(val, 32)) return 0;
-    int64_t *p = (int64_t *)(intptr_t)val;
-    if (p[0] < 2 || p[0] > 10 || p[1] != WASM_HASH_TYPE || p[4] != WASM_HASH_MESSAGE) return 0;
-    for (int64_t i = 0; i < p[0]; i++) {
-        if (p[1 + i * 3] == WASM_HASH___TYPE) return 1;
-    }
-    return 0;
-}
-
-/* Error.toString() — "Error(type: message)" format (matching interpreter) */
-static int64_t _wasm_error_to_string(int64_t val) {
-    int64_t *p = (int64_t *)(intptr_t)val;
-    int64_t fc = p[0];
-    int64_t type = 0;
-    int64_t msg = 0;
-    for (int64_t i = 0; i < fc; i++) {
-        if (p[1 + i * 3] == WASM_HASH_TYPE) {
-            type = p[1 + i * 3 + 2];
-        } else if (p[1 + i * 3] == WASM_HASH_MESSAGE) {
-            msg = p[1 + i * 3 + 2];
-        }
-    }
-    const char *type_s = (type && _looks_like_string(type)) ? (const char *)(intptr_t)type : "Error";
-    const char *msg_s = (msg && _looks_like_string(msg)) ? (const char *)(intptr_t)msg : "";
-    _wasm_strbuf sb;
-    _sb_init(&sb);
-    _sb_append(&sb, "Error(");
-    _sb_append(&sb, type_s);
-    _sb_append(&sb, ": ");
-    _sb_append(&sb, msg_s);
-    _sb_append(&sb, ")");
-    return _sb_finish(&sb);
-}
 
 static int _wasm_is_async_task_pack(int64_t val) {
     if (!_looks_like_pack(val)) return 0;
@@ -2932,21 +3095,27 @@ static int _wasm_is_async_task_pack(int64_t val) {
 
 /* W-4f2: Convert value to display string (like native's taida_value_to_display_string) */
 static int64_t _wasm_value_to_display_string(int64_t val) {
+    { int64_t fd = _wasm_closure_display(val); if (fd) return fd; }
     if (val == 0) return WSTR("0");
     /* Check HashMap first (has distinctive marker) */
     if (_is_wasm_hashmap(val)) return _wasm_hashmap_to_string(val);
     /* Check Set (has WASM_SET_MARKER_VAL marker) */
     if (_is_wasm_set(val)) return _wasm_set_to_string(val);
+    if (_looks_like_bytes(val)) return _wasm_bytes_to_display_string(val);
     /* Check List (has list-like header but no set/hashmap marker) */
     if (_looks_like_list(val)) return _wasm_list_to_string(val);
     /* PR-4: Check Async before monadic types */
     if (_wasm_is_async_obj(val)) return _wasm_async_to_string(val);
+    /* A Stream shows as `Stream[completed: N items]` here too, as in the
+       stdout path (native twin: taida_value_to_display_string). */
+    if (_wasm_is_stream_pack(val)) return _wasm_stream_to_display_string(val);
     /* W-5f: Check monadic types before generic pack (Lax/Result/Gorillax) */
     if (_wasm_is_result(val)) return _wasm_result_to_string(val);
     if (_wasm_is_gorillax(val)) return _wasm_gorillax_to_string(val);
     if (_wasm_is_lax(val)) return _wasm_lax_to_string(val);
     /* Check Error before generic pack (Error is a pack with "type" field) */
-    if (_wasm_is_error(val)) return _wasm_error_to_string(val);
+    /* An Error value shows its fields like any other pack (the reference
+       turns a caught error into a pack too). */
     if (_wasm_is_async_task_pack(val)) return WSTR("AsyncTask[<task>]");
     /* Check Pack (field_count + hash pattern) */
     if (_looks_like_pack(val)) return _wasm_pack_to_string(val);
@@ -2963,9 +3132,11 @@ static int64_t _wasm_value_to_display_string(int64_t val) {
 /* W-4f2: Convert value to debug string (strings are quoted, everything else like display) */
 static int64_t _wasm_value_to_debug_string(int64_t val) {
     if (val == 0) return WSTR("0");
+    { int64_t fd = _wasm_closure_display(val); if (fd) return fd; }
     /* Check collection types first */
     if (_is_wasm_hashmap(val)) return _wasm_hashmap_to_string(val);
     if (_is_wasm_set(val)) return _wasm_set_to_string(val);
+    if (_looks_like_bytes(val)) return _wasm_bytes_to_display_string(val);
     if (_looks_like_list(val)) return _wasm_list_to_string(val);
     /* PR-4: Check Async before monadic types */
     if (_wasm_is_async_obj(val)) return _wasm_async_to_string(val);
@@ -2973,8 +3144,9 @@ static int64_t _wasm_value_to_debug_string(int64_t val) {
     if (_wasm_is_result(val)) return _wasm_result_to_string(val);
     if (_wasm_is_gorillax(val)) return _wasm_gorillax_to_string(val);
     if (_wasm_is_lax(val)) return _wasm_lax_to_string(val);
-    /* Check Error before generic pack */
-    if (_wasm_is_error(val)) return _wasm_error_to_string(val);
+    /* An Error value nested in a list shows its fields (native twin:
+       taida_value_to_debug_string). */
+    if (_wasm_is_async_task_pack(val)) return WSTR("AsyncTask[<task>]");
     if (_looks_like_pack(val)) return _wasm_pack_to_string(val);
     /* C23B-003 reopen 3: same empty-pack fallback as the display helper so
        `_wasm_list_to_string` / `_wasm_pack_to_string` rendering nested
@@ -3024,76 +3196,168 @@ int64_t taida_int_mold_str(int64_t v) {
     if (s[0] == '-') { neg = 1; i = 1; }
     else if (s[0] == '+') { i = 1; }
     if (s[i] == '\0') return taida_lax_empty(0); /* just sign, no digits */
-    int found_digit = 0;
-    int digit_count = 0;
+    /* The magnitude must fit the Int range (-2^63 .. 2^63-1), exactly as
+       the reference `str::parse::<i64>` requires; leading zeros are fine.
+       A value that wrapped used to come back as a successful parse. */
+    uint64_t limit = neg ? 9223372036854775808ULL : 9223372036854775807ULL;
     uint64_t acc = 0;
-    while (s[i] >= '0' && s[i] <= '9') {
-        digit_count++;
-        if (digit_count > 19) return taida_lax_empty(0); /* overflow guard: int64_t max is 19 digits */
-        acc = acc * 10 + (uint64_t)(s[i] - '0');
-        found_digit = 1;
-        i++;
+    for (; s[i] >= '0' && s[i] <= '9'; i++) {
+        uint64_t d = (uint64_t)(s[i] - '0');
+        if (acc > (limit - d) / 10) return taida_lax_empty(0);
+        acc = acc * 10 + d;
     }
-    if (!found_digit || s[i] != '\0') return taida_lax_empty(0);
-    int64_t result = neg ? -(int64_t)acc : (int64_t)acc;
-    return taida_lax_new(result, 0);
+    if (s[i] != '\0') return taida_lax_empty(0);
+    return taida_lax_new(neg ? (int64_t)(0 - acc) : (int64_t)acc, 0);
 }
 
 /* ── W-4f2: Field name/type registry for Pack toString ── */
-/* Simple linear array registry. Sufficient for wasm-min programs with few field names. */
+/* A linear array that grows as needed: a program may use any number of
+   field names (a fixed table used to drop the names past its end, and the
+   renderers then skipped those fields). type_tag is a kind hint keyed by
+   the field NAME alone (-1: none): once two types give one name different
+   kinds it is dropped for good (WASM_FIELD_TYPE_CONFLICT reads as none),
+   so one type's kind is never applied to another type's field. Mirror of
+   the native registry. */
 
-#define WASM_FIELD_REGISTRY_MAX 256
+#define WASM_FIELD_TYPE_CONFLICT (-2)
 
-static struct {
+typedef struct {
     int64_t hash;
     const char *name;
     int64_t type_tag;
-} _wasm_field_registry[WASM_FIELD_REGISTRY_MAX];
+} _wasm_field_entry;
+static _wasm_field_entry *_wasm_field_registry = 0;
 static int _wasm_field_registry_count = 0;
+static int _wasm_field_registry_cap = 0;
 
-int64_t taida_register_field_name(int64_t hash, int64_t name_ptr) {
-    /* Check if already registered */
+static _wasm_field_entry *_wasm_field_registry_find(int64_t hash) {
     for (int i = 0; i < _wasm_field_registry_count; i++) {
-        if (_wasm_field_registry[i].hash == hash) return 0;
+        if (_wasm_field_registry[i].hash == hash) return &_wasm_field_registry[i];
     }
-    if (_wasm_field_registry_count < WASM_FIELD_REGISTRY_MAX) {
-        _wasm_field_registry[_wasm_field_registry_count].hash = hash;
-        _wasm_field_registry[_wasm_field_registry_count].name = (const char *)(intptr_t)name_ptr;
-        _wasm_field_registry[_wasm_field_registry_count].type_tag = -1;
-        _wasm_field_registry_count++;
+    return 0;
+}
+
+/* A new entry with no kind hint; 0 only when memory runs out. */
+__attribute__((noinline))
+static _wasm_field_entry *_wasm_field_registry_append(int64_t hash, int64_t name_ptr) {
+    if (_wasm_field_registry_count == _wasm_field_registry_cap) {
+        int ncap = _wasm_field_registry_cap ? _wasm_field_registry_cap * 2 : 256;
+        _wasm_field_entry *grown = (_wasm_field_entry *)wasm_alloc(
+            (unsigned int)ncap * (unsigned int)sizeof(_wasm_field_entry));
+        if (!grown) return 0;
+        for (int i = 0; i < _wasm_field_registry_count; i++) grown[i] = _wasm_field_registry[i];
+        _wasm_field_registry = grown;
+        _wasm_field_registry_cap = ncap;
     }
+    _wasm_field_entry *e = &_wasm_field_registry[_wasm_field_registry_count++];
+    e->hash = hash;
+    e->name = (const char *)(intptr_t)name_ptr;
+    e->type_tag = -1;
+    return e;
+}
+
+/* noinline: the runtime registers its built-in field names in runs of
+   four or five calls (Error, Lax, ...); inlining the lookup loop into
+   every one of them cost more than a kilobyte in each binary that can
+   throw or build a Lax. */
+__attribute__((noinline))
+int64_t taida_register_field_name(int64_t hash, int64_t name_ptr) {
+    if (!_wasm_field_registry_find(hash)) _wasm_field_registry_append(hash, name_ptr);
     return 0;
 }
 
 int64_t taida_register_field_type(int64_t hash, int64_t name_ptr, int64_t type_tag) {
-    /* Update existing entry or add new one */
-    for (int i = 0; i < _wasm_field_registry_count; i++) {
-        if (_wasm_field_registry[i].hash == hash) {
-            _wasm_field_registry[i].type_tag = type_tag;
-            return 0;
-        }
-    }
-    if (_wasm_field_registry_count < WASM_FIELD_REGISTRY_MAX) {
-        _wasm_field_registry[_wasm_field_registry_count].hash = hash;
-        _wasm_field_registry[_wasm_field_registry_count].name = (const char *)(intptr_t)name_ptr;
-        _wasm_field_registry[_wasm_field_registry_count].type_tag = type_tag;
-        _wasm_field_registry_count++;
-    }
+    _wasm_field_entry *e = _wasm_field_registry_find(hash);
+    if (!e) e = _wasm_field_registry_append(hash, name_ptr);
+    if (!e || type_tag <= 0 || e->type_tag == WASM_FIELD_TYPE_CONFLICT) return 0;
+    if (e->type_tag <= 0 || e->type_tag == type_tag) e->type_tag = type_tag;
+    else e->type_tag = WASM_FIELD_TYPE_CONFLICT;
     return 0;
 }
 
 static const char *_wasm_lookup_field_name(int64_t hash) {
-    for (int i = 0; i < _wasm_field_registry_count; i++) {
-        if (_wasm_field_registry[i].hash == hash) return _wasm_field_registry[i].name;
+    _wasm_field_entry *e = _wasm_field_registry_find(hash);
+    return e ? e->name : 0;
+}
+
+/* Enum-typed fields: the variant names of the field's Enum as
+   "A,B,C", so jsonEncode writes the variant name (a Str on the wire, as
+   the interpreter does) instead of the ordinal. Two tables, like the
+   native runtime: per field name (registered with the type), and per
+   pack instance (registered at construction), which wins because two
+   types may share a field name with different Enums. */
+#define WASM_ENUM_FIELD_MAX 256
+#define WASM_PACK_ENUM_FIELD_MAX 1024
+static struct { int64_t hash; const char *variants; } _wasm_enum_fields[WASM_ENUM_FIELD_MAX];
+static int _wasm_enum_field_count = 0;
+static struct { int64_t pack; int64_t hash; const char *variants; }
+    _wasm_pack_enum_fields[WASM_PACK_ENUM_FIELD_MAX];
+static int _wasm_pack_enum_field_count = 0;
+
+/* Field-registry type of an Enum-typed field. Display renders it as the
+   ordinal (like any Int field); jsonEncode looks up the variant names. */
+#define WASM_FIELD_TYPE_ENUM 5
+
+int64_t taida_register_field_enum(int64_t hash, int64_t name_ptr, int64_t variants_ptr) {
+    taida_register_field_type(hash, name_ptr, WASM_FIELD_TYPE_ENUM);
+    for (int i = 0; i < _wasm_enum_field_count; i++) {
+        if (_wasm_enum_fields[i].hash == hash) {
+            _wasm_enum_fields[i].variants = (const char *)(intptr_t)variants_ptr;
+            return 0;
+        }
+    }
+    if (_wasm_enum_field_count < WASM_ENUM_FIELD_MAX) {
+        _wasm_enum_fields[_wasm_enum_field_count].hash = hash;
+        _wasm_enum_fields[_wasm_enum_field_count].variants = (const char *)(intptr_t)variants_ptr;
+        _wasm_enum_field_count++;
+    }
+    return 0;
+}
+
+int64_t taida_register_pack_field_enum(int64_t pack_ptr, int64_t field_hash, int64_t variants_ptr) {
+    if (!pack_ptr) return 0;
+    for (int i = 0; i < _wasm_pack_enum_field_count; i++) {
+        if (_wasm_pack_enum_fields[i].pack == pack_ptr
+            && _wasm_pack_enum_fields[i].hash == field_hash) {
+            _wasm_pack_enum_fields[i].variants = (const char *)(intptr_t)variants_ptr;
+            return 0;
+        }
+    }
+    if (_wasm_pack_enum_field_count < WASM_PACK_ENUM_FIELD_MAX) {
+        _wasm_pack_enum_fields[_wasm_pack_enum_field_count].pack = pack_ptr;
+        _wasm_pack_enum_fields[_wasm_pack_enum_field_count].hash = field_hash;
+        _wasm_pack_enum_fields[_wasm_pack_enum_field_count].variants =
+            (const char *)(intptr_t)variants_ptr;
+        _wasm_pack_enum_field_count++;
+    }
+    return 0;
+}
+
+/* Variant names registered for this pack's field, or 0. */
+static const char *_wasm_lookup_pack_enum_variants(int64_t pack_ptr, int64_t field_hash) {
+    for (int i = _wasm_pack_enum_field_count - 1; i >= 0; i--) {
+        if (_wasm_pack_enum_fields[i].pack == pack_ptr
+            && _wasm_pack_enum_fields[i].hash == field_hash)
+            return _wasm_pack_enum_fields[i].variants;
+    }
+    return 0;
+}
+
+/* Variant names registered for the field name, or 0. Only meaningful
+   while the field registry still types the name as an Enum
+   (WASM_FIELD_TYPE_ENUM): a later type with a same-named plain field
+   re-registers it. */
+static const char *_wasm_lookup_field_enum_variants(int64_t field_hash) {
+    for (int i = 0; i < _wasm_enum_field_count; i++) {
+        if (_wasm_enum_fields[i].hash == field_hash) return _wasm_enum_fields[i].variants;
     }
     return 0;
 }
 
 static int64_t _wasm_lookup_field_type(int64_t hash) {
-    for (int i = 0; i < _wasm_field_registry_count; i++) {
-        if (_wasm_field_registry[i].hash == hash) return _wasm_field_registry[i].type_tag;
-    }
-    return -1;
+    _wasm_field_entry *e = _wasm_field_registry_find(hash);
+    if (!e || e->type_tag == WASM_FIELD_TYPE_CONFLICT) return -1;
+    return e->type_tag;
 }
 
 /* ── W-4: BuchiPack runtime (bump allocator, no RC) ── */
@@ -3142,15 +3406,13 @@ int64_t taida_pack_new(int64_t field_count) {
        allocation); the singleton approach here is the wasm-side
        equivalent without touching the detector or renderer path. */
     if (field_count == 0) {
-        static int64_t empty_pack_singleton = 0;
-        if (empty_pack_singleton == 0) {
-            int64_t *pack = (int64_t *)wasm_alloc(16);
-            if (!pack) return 0;
-            pack[0] = 0;
-            pack[1] = WASM_EMPTY_PACK_MAGIC;
-            empty_pack_singleton = (int64_t)(intptr_t)pack;
-        }
-        return empty_pack_singleton;
+        /* The singleton lives in static data, not the bump heap: when a
+           tail-recursive loop's per-iteration arena reset reclaimed the
+           iteration that first allocated it, the next allocation
+           overwrote it and `@()` printed as an address for the rest of
+           the program. */
+        static int64_t empty_pack_singleton[2] = { 0, WASM_EMPTY_PACK_MAGIC };
+        return (int64_t)(intptr_t)empty_pack_singleton;
     }
     /* C23B-005 (2026-04-22): append a magic sentinel slot after the last
        field so `_looks_like_pack` can positive-identify non-empty packs
@@ -3297,6 +3559,17 @@ int64_t taida_pack_has_hash(int64_t pack_ptr, int64_t field_hash) {
     return 0;
 }
 
+/* `e.type` / `e.message` of a value of an Error type (native twin:
+   taida_error_field): an omitted `type` reads as the value's type name and
+   an omitted `message` as "". */
+int64_t taida_error_field(int64_t err, int64_t want_message) {
+    int64_t hash = want_message ? WASM_HASH_MESSAGE : WASM_HASH_TYPE;
+    if (taida_pack_has_hash(err, hash)) return taida_pack_get(err, hash);
+    if (!want_message && taida_pack_has_hash(err, WASM_HASH___TYPE))
+        return taida_pack_get(err, WASM_HASH___TYPE);
+    return want_message ? WSTR("") : 0;
+}
+
 /* ── W-4: List runtime (bump allocator, no RC) ── */
 /* Layout: [capacity, length, elem_type_tag, elem0, ..., trailing magic]
    No refcount and no leading header (unlike native_runtime.c), but a
@@ -3412,11 +3685,29 @@ static int64_t _wasm_lax_new_k(int64_t value, int64_t default_value, uint32_t ek
 }
 
 /* taida_list_get: returns Lax[T]. OOB returns empty Lax. */
+/* The default of the Lax a list accessor returns (native twin:
+   taida_list_lax): the empty value of the kind of the list's first element,
+   0 when the list is empty or that kind is not a scalar or Str. */
+static int64_t _wasm_list_lax(int64_t *list, int found, int64_t item, uint32_t item_kind) {
+    uint32_t dk = WASM_EKIND_UNKNOWN;
+    if (list[1] > 0) {
+        uint32_t k = _wasm_elem_kind_at(list, 0) & 0xFFu;
+        if (k == WASM_TAG_INT || k == WASM_TAG_FLOAT || k == WASM_TAG_BOOL || k == WASM_TAG_STR) dk = k;
+    }
+    int64_t def = dk == WASM_TAG_STR ? WSTR("") : 0;
+    int64_t pack = found ? _wasm_lax_new_k(item, def, item_kind) : taida_lax_empty(def);
+    if (dk != WASM_EKIND_UNKNOWN) {
+        if (!found) taida_pack_set_tag(pack, 1, (int64_t)dk);
+        taida_pack_set_tag(pack, 2, (int64_t)dk);
+    }
+    return pack;
+}
+
 int64_t taida_list_get(int64_t list_ptr, int64_t index) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
-    if (index < 0 || index >= len) return taida_lax_empty(0);
-    return _wasm_lax_new_k(list[WASM_LIST_ELEMS + index], 0, _wasm_elem_kind_at(list, index));
+    if (index < 0 || index >= len) return _wasm_list_lax(list, 0, 0, WASM_EKIND_UNKNOWN);
+    return _wasm_list_lax(list, 1, list[WASM_LIST_ELEMS + index], _wasm_elem_kind_at(list, index));
 }
 
 int64_t taida_list_is_empty(int64_t list_ptr) {
@@ -3444,6 +3735,36 @@ static int _wasm_streq(const char *a, const char *b) {
     return *a == *b;
 }
 
+/* HashMap key equality: the same value (Int / Bool keys, or the same Str
+   object), or two Str values with equal content. A non-string key is
+   never dereferenced: comparing Int keys as C strings made keys whose
+   hashes collide (1 and 3, 0 and 2) read the same bytes at those low
+   addresses and merge into one entry. */
+static int _wasm_value_eq(int64_t a, int64_t b); /* below */
+static void _wasm_fp_accum(int64_t v, uint64_t *h); /* below */
+
+/* A HashMap key that is a list, pack or Bytes value: hashed by its content
+   and equal to a key of the same content, as the reference compares its
+   keys (native twin: taida_hashmap_key_is_structure). */
+static int _wasm_hm_key_is_structure(int64_t key) {
+    return _looks_like_list(key) || _looks_like_pack(key) || _looks_like_bytes(key);
+}
+
+static int _wasm_hm_key_eq(int64_t a, int64_t b) {
+    if (a == b) return 1;
+    /* A Str is identified exactly by its header word, so it is told apart
+       first (as taida_value_hash does): the structure probes read a
+       string's characters as a header, and a short key such as "k8" reads
+       as a pack whose tail sentinel lies far ahead, where another pack's
+       sentinel may sit. */
+    int a_str = _wasm_is_string_ptr(a), b_str = _wasm_is_string_ptr(b);
+    if (a_str || b_str) {
+        return a_str && b_str
+            && _wasm_streq((const char *)(intptr_t)a, (const char *)(intptr_t)b);
+    }
+    return _wasm_hm_key_is_structure(a) && _wasm_hm_key_is_structure(b) && _wasm_value_eq(a, b);
+}
+
 /* C23B-008 (2026-04-22): see the `WASM_HM_ORD_*` macros near the top of
    this file (colocated with `WASM_HM_HEADER`) for the insertion-order
    side-index layout. `_wasm_hashmap_new_with_cap` stamps the magic +
@@ -3465,7 +3786,7 @@ static int64_t _wasm_hashmap_new_with_cap(int64_t cap) {
        array). The trailing-magic position is UNCHANGED so `_is_wasm_hashmap`
        still probes `data[WASM_HM_HEADER + cap*3]` — the extra slots sit
        at higher offsets that only HashMap-order-aware code accesses. */
-    int64_t slots = WASM_HM_HEADER + cap * 3 + 1 + 1 + cap;  /* + trailing magic + next_ord + order_array[cap] */
+    int64_t slots = WASM_HM_HEADER + cap * 3 + 1 + 1 + cap + cap;  /* + trailing magic + next_ord + order_array[cap] + kinds[cap] */
     int64_t *hm = (int64_t *)wasm_alloc((unsigned int)(slots * 8));
     if (!hm) return 0;
     /* Zero-initialize everything (empty slots have hash=0, key=0).
@@ -3528,14 +3849,25 @@ int64_t taida_str_hash(int64_t str_ptr) {
     return (int64_t)hash;
 }
 
-int64_t taida_hashmap_set(int64_t hm_ptr, int64_t key_hash, int64_t key_ptr, int64_t value) {
+/* Store `value` under `key_ptr` with the entry kinds `kinds` (unknown when
+   the caller has no static kinds). */
+static int64_t _wasm_hashmap_set_kinds(int64_t hm_ptr, int64_t key_hash, int64_t key_ptr,
+                                       int64_t value, int64_t kinds) {
     int64_t *hm = (int64_t *)(intptr_t)hm_ptr;
     int64_t cap = hm[0];
     int64_t len = hm[1];
 
-    /* Resize if load factor > 70% */
-    if (len * 10 >= cap * 7) {
-        int64_t new_cap = cap * 2;
+    /* Rebuild once 70% of the insertion-order slots are used. Every
+       insertion takes an order slot and a removal leaves its slot (and a
+       tombstone in the table) behind, so `next_ord` bounds live entries
+       plus tombstones: the probe loops below always find an empty slot,
+       and the order array (cap entries) is never written past its end —
+       set / remove churn on a small map used to do both, silently
+       dropping later insertions and writing outside the allocation. The
+       table doubles when live entries fill it, and is rebuilt at the
+       same capacity (dropping tombstones and holes) when they do not. */
+    if (hm[WASM_HM_ORD_HEADER_SLOT(cap)] * 10 >= cap * 7) {
+        int64_t new_cap = (len * 20 >= cap * 7) ? cap * 2 : cap;
         int64_t new_hm_ptr = _wasm_hashmap_new_with_cap(new_cap);
         int64_t *new_hm = (int64_t *)(intptr_t)new_hm_ptr;
         new_hm[2] = hm[2]; /* propagate value_type_tag */
@@ -3554,7 +3886,7 @@ int64_t taida_hashmap_set(int64_t hm_ptr, int64_t key_hash, int64_t key_ptr, int
             if (slot < 0 || slot >= cap) continue;  /* removed or invalid */
             int64_t sh = hm[WASM_HM_HEADER + slot * 3];
             int64_t sk = hm[WASM_HM_HEADER + slot * 3 + 1];
-            if (sh == 0 && sk == 0) continue;  /* bucket emptied */
+            if (!WASM_HM_SLOT_OCCUPIED(sh, sk)) continue;  /* bucket emptied */
             int64_t sval = hm[WASM_HM_HEADER + slot * 3 + 2];
             /* Insert into new table */
             uint64_t uh = (uint64_t)sh;
@@ -3567,6 +3899,7 @@ int64_t taida_hashmap_set(int64_t hm_ptr, int64_t key_hash, int64_t key_ptr, int
                     new_hm[WASM_HM_HEADER + nslot * 3] = sh;
                     new_hm[WASM_HM_HEADER + nslot * 3 + 1] = sk;
                     new_hm[WASM_HM_HEADER + nslot * 3 + 2] = sval;
+                    new_hm[WASM_HM_KIND_SLOT(new_cap, nslot)] = hm[WASM_HM_KIND_SLOT(cap, slot)];
                     new_hm[1]++;
                     new_hm[WASM_HM_ORD_SLOT(new_cap, new_next_ord)] = nslot;
                     new_next_ord++;
@@ -3594,22 +3927,60 @@ int64_t taida_hashmap_set(int64_t hm_ptr, int64_t key_hash, int64_t key_ptr, int
             hm[WASM_HM_HEADER + slot * 3] = key_hash;
             hm[WASM_HM_HEADER + slot * 3 + 1] = key_ptr;
             hm[WASM_HM_HEADER + slot * 3 + 2] = value;
+            hm[WASM_HM_KIND_SLOT(cap, slot)] = kinds;
             hm[1]++;
             int64_t next_ord = hm[WASM_HM_ORD_HEADER_SLOT(cap)];
             hm[WASM_HM_ORD_SLOT(cap, next_ord)] = slot;
             hm[WASM_HM_ORD_HEADER_SLOT(cap)] = next_ord + 1;
             return hm_ptr;
         }
-        if (sh == key_hash && _wasm_streq((const char *)(intptr_t)sk, (const char *)(intptr_t)key_ptr)) {
+        if (sh == key_hash && _wasm_hm_key_eq(sk, key_ptr)) {
             /* Existing key — update value in place. C23B-008: do NOT touch
                the order side-index; the first insertion's position is
                preserved, matching interpreter semantics (updating an
                existing key keeps its original Vec index). */
             hm[WASM_HM_HEADER + slot * 3 + 2] = value;
+            hm[WASM_HM_KIND_SLOT(cap, slot)] = kinds;
             return hm_ptr;
         }
     }
     return hm_ptr;
+}
+
+int64_t taida_hashmap_set(int64_t hm_ptr, int64_t key_hash, int64_t key_ptr, int64_t value) {
+    return _wasm_hashmap_set_kinds(hm_ptr, key_hash, key_ptr, value, WASM_HM_KINDS_UNKNOWN);
+}
+
+/* Enum variant names by the lowering's enum type id (native twin:
+   taida_register_enum_variants), so jsonEncode names an Enum value a
+   HashMap holds. `variants` is a static "A,B,C" list. */
+#define WASM_ENUM_NAMES_CAP 256
+static const char *_wasm_enum_names_by_id[WASM_ENUM_NAMES_CAP];
+
+void taida_register_enum_variants(int64_t id, int64_t variants) {
+    if (id <= 0 || id >= WASM_ENUM_NAMES_CAP || !variants) return;
+    if (!_wasm_enum_names_by_id[id]) _wasm_enum_names_by_id[id] = (const char *)(intptr_t)variants;
+}
+
+/* Record the kinds of the entry stored under `key_ptr` — the static kinds
+   of the key and value of the `.set(key, value)` that stored it. */
+void taida_hashmap_note_kinds(int64_t hm_ptr, int64_t key_hash, int64_t key_ptr,
+                              int64_t key_ek, int64_t value_ek) {
+    if (!hm_ptr) return;
+    int64_t *hm = (int64_t *)(intptr_t)hm_ptr;
+    int64_t cap = hm[0];
+    uint64_t uh = (uint64_t)key_hash;
+    int64_t idx = (int64_t)(uh % (uint64_t)cap);
+    for (int64_t i = 0; i < cap; i++) {
+        int64_t slot = (idx + i) % cap;
+        int64_t sh = hm[WASM_HM_HEADER + slot * 3];
+        int64_t sk = hm[WASM_HM_HEADER + slot * 3 + 1];
+        if (sh == 0 && sk == 0) return;
+        if (sh == key_hash && _wasm_hm_key_eq(sk, key_ptr)) {
+            hm[WASM_HM_KIND_SLOT(cap, slot)] = WASM_HM_KINDS(key_ek, value_ek);
+            return;
+        }
+    }
 }
 
 int64_t taida_hashmap_get(int64_t hm_ptr, int64_t key_hash, int64_t key_ptr) {
@@ -3622,7 +3993,7 @@ int64_t taida_hashmap_get(int64_t hm_ptr, int64_t key_hash, int64_t key_ptr) {
         int64_t sh = hm[WASM_HM_HEADER + slot * 3];
         int64_t sk = hm[WASM_HM_HEADER + slot * 3 + 1];
         if (sh == 0 && sk == 0) return 0; /* not found */
-        if (sh == key_hash && _wasm_streq((const char *)(intptr_t)sk, (const char *)(intptr_t)key_ptr))
+        if (sh == key_hash && _wasm_hm_key_eq(sk, key_ptr))
             return hm[WASM_HM_HEADER + slot * 3 + 2];
     }
     return 0;
@@ -3638,7 +4009,7 @@ int64_t taida_hashmap_has(int64_t hm_ptr, int64_t key_hash, int64_t key_ptr) {
         int64_t sh = hm[WASM_HM_HEADER + slot * 3];
         int64_t sk = hm[WASM_HM_HEADER + slot * 3 + 1];
         if (sh == 0 && sk == 0) return 0;
-        if (sh == key_hash && _wasm_streq((const char *)(intptr_t)sk, (const char *)(intptr_t)key_ptr))
+        if (sh == key_hash && _wasm_hm_key_eq(sk, key_ptr))
             return 1;
     }
     return 0;
@@ -3665,6 +4036,7 @@ static int64_t _wasm_hashmap_clone(int64_t hm_ptr) {
         new_hm[WASM_HM_HEADER + i * 3] = sh;
         new_hm[WASM_HM_HEADER + i * 3 + 1] = sk;
         new_hm[WASM_HM_HEADER + i * 3 + 2] = hm[WASM_HM_HEADER + i * 3 + 2];
+        new_hm[WASM_HM_KIND_SLOT(cap, i)] = hm[WASM_HM_KIND_SLOT(cap, i)];
     }
     new_hm[1] = hm[1]; /* copy length */
     /* C23B-008 (2026-04-22): propagate the insertion-order side-index
@@ -3684,6 +4056,31 @@ int64_t taida_hashmap_set_immut(int64_t hm_ptr, int64_t key_hash, int64_t key_pt
     return taida_hashmap_set(clone, key_hash, key_ptr, value);
 }
 
+int64_t taida_set_new(void); /* defined below */
+
+/* The Lax a HashMap lookup returns (native twin: taida_hashmap_found_lax /
+   taida_hashmap_missing_lax). When every value of the map has the same
+   kind, the Lax records that kind and a missing key yields the empty value
+   of it; a map of mixed or unknown kinds keeps the plain 0 default. */
+static int64_t _wasm_hashmap_lax(int64_t *hm, int found, int64_t value, int64_t tag) {
+    (void)hm;
+    int64_t def;
+    switch (tag) {
+        case WASM_TAG_STR:  def = WSTR(""); break;
+        case WASM_TAG_LIST: def = taida_list_new(); break;
+        case WASM_TAG_HMAP: def = taida_hashmap_new(); break;
+        case WASM_TAG_SET:  def = taida_set_new(); break;
+        case WASM_TAG_PACK: def = taida_pack_new(0); break;
+        default:            def = 0; break; /* Int 0, Float 0.0, Bool false */
+    }
+    if (tag < 0 || tag == WASM_TAG_ENUM)
+        return found ? taida_lax_new(value, def) : taida_lax_empty(def);
+    int64_t pack = found ? _wasm_lax_new_k(value, def, (uint32_t)tag) : taida_lax_empty(def);
+    if (!found) taida_pack_set_tag(pack, 1, tag);
+    taida_pack_set_tag(pack, 2, tag);
+    return pack;
+}
+
 /* taida_hashmap_get_lax: returns Lax[V]. Key not found returns empty Lax.
    Single-pass lookup (inlined probe) avoids double hash-table traversal. */
 int64_t taida_hashmap_get_lax(int64_t hm_ptr, int64_t key_hash, int64_t key_ptr) {
@@ -3695,11 +4092,26 @@ int64_t taida_hashmap_get_lax(int64_t hm_ptr, int64_t key_hash, int64_t key_ptr)
         int64_t slot = (idx + i) % cap;
         int64_t sh = hm[WASM_HM_HEADER + slot * 3];
         int64_t sk = hm[WASM_HM_HEADER + slot * 3 + 1];
-        if (sh == 0 && sk == 0) return taida_lax_empty(0); /* empty slot — not found */
-        if (sh == key_hash && _wasm_streq((const char *)(intptr_t)sk, (const char *)(intptr_t)key_ptr))
-            return taida_lax_new(hm[WASM_HM_HEADER + slot * 3 + 2], 0);
+        if (sh == 0 && sk == 0) break; /* empty slot — not found */
+        if (sh == key_hash && _wasm_hm_key_eq(sk, key_ptr))
+            return _wasm_hashmap_lax(hm, 1, hm[WASM_HM_HEADER + slot * 3 + 2],
+                                     _wasm_hm_tag_of(_wasm_hm_value_ek(hm, cap, slot), -1));
     }
-    return taida_lax_empty(0);
+    /* Not found: the empty value of the map's value kind (of its first
+       entry when the map is mixed; a Str for an empty map — the
+       reference's default). */
+    int64_t tag = hm[1] == 0 ? WASM_TAG_STR : hm[2];
+    if (tag < 0) {
+        int64_t next_ord = hm[WASM_HM_ORD_HEADER_SLOT(cap)];
+        for (int64_t oi = 0; oi < next_ord; oi++) {
+            int64_t slot = hm[WASM_HM_ORD_SLOT(cap, oi)];
+            if (slot < 0 || slot >= cap) continue;
+            if (!WASM_HM_SLOT_OCCUPIED(hm[WASM_HM_HEADER + slot * 3], hm[WASM_HM_HEADER + slot * 3 + 1])) continue;
+            tag = _wasm_hm_tag_of(_wasm_hm_value_ek(hm, cap, slot), -1);
+            break;
+        }
+    }
+    return _wasm_hashmap_lax(hm, 0, 0, tag);
 }
 
 /* C23B-006 / C23B-005 reopen (2026-04-22): positive identification for
@@ -3744,6 +4156,14 @@ int64_t taida_value_hash(int64_t val) {
         if (h == 0 || h == 1) h = h + 2;
         return h;
     }
+    /* A list / pack / Bytes key hashes by content, as equal keys must. */
+    if (_wasm_hm_key_is_structure(val)) {
+        uint64_t fp = 0xcbf29ce484222325ULL;
+        _wasm_fp_accum(val, &fp);
+        int64_t h = (int64_t)fp;
+        if (h == 0 || h == 1) h = h + 2;
+        return h;
+    }
     /* Scalar: use identity, adjusted to avoid 0/1 */
     int64_t h = val;
     if (h == 0 || h == 1) h = h + 2;
@@ -3766,6 +4186,8 @@ int64_t taida_hashmap_keys(int64_t hm_ptr) {
         int64_t sh = hm[WASM_HM_HEADER + slot * 3];
         int64_t sk = hm[WASM_HM_HEADER + slot * 3 + 1];
         if (WASM_HM_SLOT_OCCUPIED(sh, sk)) {
+            /* Each key keeps the kind its `.set` recorded. */
+            _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)list, _wasm_hm_key_ek(hm, cap, slot));
             list = taida_list_push(list, sk);
         }
     }
@@ -3778,9 +4200,8 @@ int64_t taida_hashmap_values(int64_t hm_ptr) {
     int64_t *hm = (int64_t *)(intptr_t)hm_ptr;
     int64_t cap = hm[0];
     int64_t list = taida_list_new();
-    /* Propagate the value tag onto the result list (native NO-1 twin) —
-       without it a uniform-Float map's values displayed as raw bits. */
-    ((int64_t *)(intptr_t)list)[2] = hm[2];
+    /* Each value keeps its entry's kind (native twin) — without one a
+       Float value displayed as raw bits. */
     int64_t next_ord = hm[WASM_HM_ORD_HEADER_SLOT(cap)];
     for (int64_t oi = 0; oi < next_ord; oi++) {
         int64_t slot = hm[WASM_HM_ORD_SLOT(cap, oi)];
@@ -3788,6 +4209,7 @@ int64_t taida_hashmap_values(int64_t hm_ptr) {
         int64_t sh = hm[WASM_HM_HEADER + slot * 3];
         int64_t sk = hm[WASM_HM_HEADER + slot * 3 + 1];
         if (WASM_HM_SLOT_OCCUPIED(sh, sk)) {
+            _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)list, _wasm_hm_value_ek(hm, cap, slot));
             list = taida_list_push(list, hm[WASM_HM_HEADER + slot * 3 + 2]);
         }
     }
@@ -3834,19 +4256,93 @@ int64_t taida_hashmap_entries(int64_t hm_ptr) {
         if (WASM_HM_SLOT_OCCUPIED(sh, sk)) {
             int64_t pair = taida_pack_new(2);
             taida_pack_set_hash(pair, 0, WASM_HASH_KEY);
-            /* C23B-009: key is always Str (HashMap key contract). */
-            taida_pack_set_tag(pair, 0, WASM_TAG_STR);
+            /* The key and value fields carry their entry's kinds. */
+            taida_pack_set_tag(pair, 0, _wasm_hm_tag_of(_wasm_hm_key_ek(hm, cap, slot), WASM_TAG_STR));
             taida_pack_set(pair, 0, sk);
             taida_pack_set_hash(pair, 1, WASM_HASH_VAL);
-            /* C23B-009: propagate hashmap value_type_tag onto the value slot
-               so primitive values render correctly via the pack full-form
-               helper (matches native's `val_tag` propagation). */
-            taida_pack_set_tag(pair, 1, val_tag);
+            taida_pack_set_tag(pair, 1, _wasm_hm_tag_of(_wasm_hm_value_ek(hm, cap, slot), val_tag));
             taida_pack_set(pair, 1, hm[WASM_HM_HEADER + slot * 3 + 2]);
             list = taida_list_push(list, pair);
         }
     }
     return list;
+}
+
+int64_t taida_str_new_copy(int64_t src_raw); /* fwd */
+
+/* The kind entry of a key or value of `hashMap(...)`: the static kind
+   `static_ek` the lowering passed when it names an Enum (whose type id the
+   value's tag does not carry), else the value's own tag `tag`, else
+   `static_ek` (unknown: 0xFF). */
+static uint32_t _wasm_hashmap_from_ek(int64_t static_ek, int64_t tag) {
+    uint32_t ek = (uint32_t)static_ek;
+    if (WASM_EKIND_KIND(ek) == (uint32_t)WASM_TAG_ENUM || tag < 0) return ek;
+    return WASM_EKIND((uint32_t)tag, 0);
+}
+
+/* One entry of `hashMap(...)`, stored as `.set(key, value)` stores it with
+   the kinds `key_ek` / `value_ek`. */
+static int64_t _wasm_hashmap_from_add(int64_t hm, int64_t key, uint32_t key_ek,
+                                      int64_t value, uint32_t value_ek) {
+    int64_t value_tag = _wasm_ekind_to_tag(value_ek);
+    if (value_tag == WASM_TAG_ENUM) value_tag = WASM_TAG_INT;
+    taida_hashmap_set_value_tag(hm, value_tag);
+    return _wasm_hashmap_set_kinds(hm, taida_value_hash(key), key, value,
+                                   WASM_HM_KINDS(key_ek, value_ek));
+}
+
+/* `hashMap(src)`: a list of `@(key, value)` packs (as `entries()` returns)
+   or a pack, whose fields become entries keyed by the field names. A later
+   duplicate key replaces the value and keeps the first position. A list
+   element pack without `key` and `value` fields gives its first two
+   fields, a list element list its first two elements; other elements, and
+   other values, give no entries. */
+int64_t taida_hashmap_from(int64_t src, int64_t key_ek, int64_t value_ek) {
+    int64_t hm = taida_hashmap_new();
+    if (_looks_like_list(src)) {
+        int64_t *list = (int64_t *)(intptr_t)src;
+        int64_t len = list[1];
+        for (int64_t i = 0; i < len; i++) {
+            int64_t item = list[WASM_LIST_ELEMS + i];
+            uint32_t kind = WASM_EKIND_KIND(_wasm_elem_kind_at(list, i));
+            int unknown = kind == WASM_EKIND_UNKNOWN;
+            if ((kind == (uint32_t)WASM_TAG_PACK || unknown) && _looks_like_pack(item)) {
+                int64_t *pack = (int64_t *)(intptr_t)item;
+                int64_t count = pack[0];
+                int64_t ki = -1, vi = -1;
+                for (int64_t f = 0; f < count; f++) {
+                    if (pack[1 + f * 3] == WASM_HASH_KEY) ki = f;
+                    else if (pack[1 + f * 3] == WASM_HASH_VAL) vi = f;
+                }
+                if (ki < 0 || vi < 0) {
+                    if (count < 2) continue;
+                    ki = 0;
+                    vi = 1;
+                }
+                hm = _wasm_hashmap_from_add(hm, pack[3 + ki * 3], _wasm_hashmap_from_ek(key_ek, pack[2 + ki * 3]),
+                                            pack[3 + vi * 3], _wasm_hashmap_from_ek(value_ek, pack[2 + vi * 3]));
+            } else if ((kind == (uint32_t)WASM_TAG_LIST || unknown) && _looks_like_list(item)) {
+                int64_t *pair = (int64_t *)(intptr_t)item;
+                if (pair[1] < 2) continue;
+                hm = _wasm_hashmap_from_add(hm, pair[WASM_LIST_ELEMS],
+                                            _wasm_hashmap_from_ek(key_ek, _wasm_ekind_to_tag(_wasm_elem_kind_at(pair, 0))),
+                                            pair[WASM_LIST_ELEMS + 1],
+                                            _wasm_hashmap_from_ek(value_ek, _wasm_ekind_to_tag(_wasm_elem_kind_at(pair, 1))));
+            }
+        }
+        return hm;
+    }
+    if (_looks_like_pack(src)) {
+        int64_t *pack = (int64_t *)(intptr_t)src;
+        int64_t count = pack[0];
+        for (int64_t f = 0; f < count; f++) {
+            const char *name = _wasm_lookup_field_name(pack[1 + f * 3]);
+            if (!name || (name[0] == '_' && name[1] == '_')) continue;
+            hm = _wasm_hashmap_from_add(hm, taida_str_new_copy((int64_t)(intptr_t)name), WASM_EKIND(WASM_TAG_STR, 0),
+                                        pack[3 + f * 3], _wasm_hashmap_from_ek(WASM_EKIND_UNKNOWN, pack[2 + f * 3]));
+        }
+    }
+    return hm;
 }
 
 /* HashMap.merge(other) -> new HashMap with other's entries overwriting.
@@ -3884,7 +4380,8 @@ int64_t taida_hashmap_merge(int64_t hm_ptr, int64_t other_ptr) {
         int64_t sk = self[WASM_HM_HEADER + slot * 3 + 1];
         if (!WASM_HM_SLOT_OCCUPIED(sh, sk)) continue;
         if (taida_hashmap_has(other_ptr, sh, sk)) continue;
-        result = taida_hashmap_set(result, sh, sk, self[WASM_HM_HEADER + slot * 3 + 2]);
+        result = _wasm_hashmap_set_kinds(result, sh, sk, self[WASM_HM_HEADER + slot * 3 + 2],
+                                         self[WASM_HM_KIND_SLOT(self_cap, slot)]);
     }
 
     /* Step 2: all other entries in other-order (all new to result). */
@@ -3895,7 +4392,8 @@ int64_t taida_hashmap_merge(int64_t hm_ptr, int64_t other_ptr) {
         int64_t sh = other[WASM_HM_HEADER + slot * 3];
         int64_t sk = other[WASM_HM_HEADER + slot * 3 + 1];
         if (!WASM_HM_SLOT_OCCUPIED(sh, sk)) continue;
-        result = taida_hashmap_set(result, sh, sk, other[WASM_HM_HEADER + slot * 3 + 2]);
+        result = _wasm_hashmap_set_kinds(result, sh, sk, other[WASM_HM_HEADER + slot * 3 + 2],
+                                         other[WASM_HM_KIND_SLOT(other_cap, slot)]);
     }
     return result;
 }
@@ -3912,7 +4410,7 @@ static int64_t taida_hashmap_remove(int64_t hm_ptr, int64_t key_hash, int64_t ke
         int64_t sh = hm[WASM_HM_HEADER + slot * 3];
         int64_t sk = hm[WASM_HM_HEADER + slot * 3 + 1];
         if (sh == 0 && sk == 0) return hm_ptr; /* not found */
-        if (sh == key_hash && _wasm_streq((const char *)(intptr_t)sk, (const char *)(intptr_t)key_ptr)) {
+        if (sh == key_hash && _wasm_hm_key_eq(sk, key_ptr)) {
             /* Found — tombstone it */
             hm[WASM_HM_HEADER + slot * 3] = 1; /* tombstone hash */
             hm[WASM_HM_HEADER + slot * 3 + 1] = 0;
@@ -3970,6 +4468,8 @@ void taida_set_set_elem_tag(int64_t set_ptr, int64_t tag) {
    Int<->Enum equivalence is automatic (enum-name distinction is out of scope,
    F54B-018). HashMap / Set elements fall back to identity. */
 static int _wasm_list_struct_eq_k(int64_t *la, int64_t *lb); /* kind-aware list walk (below) */
+static int _wasm_hashmap_struct_eq(const int64_t *a, const int64_t *b); /* below */
+
 static int _wasm_value_eq(int64_t a, int64_t b) {
     /* F56: a sealed carrier (Moltenized/Secret) is NEVER equal — not even to
        itself (same pointer). A content compare of __value would be an equality
@@ -4003,7 +4503,11 @@ static int _wasm_value_eq(int64_t a, int64_t b) {
         int64_t *la = (int64_t *)(intptr_t)a, *lb = (int64_t *)(intptr_t)b;
         return _wasm_list_struct_eq_k(la, lb);
     }
-    if (_is_wasm_hashmap(a) || _is_wasm_hashmap(b) || _is_wasm_set(a) || _is_wasm_set(b))
+    if (_is_wasm_hashmap(a) || _is_wasm_hashmap(b)) {
+        if (!_is_wasm_hashmap(a) || !_is_wasm_hashmap(b)) return 0;
+        return _wasm_hashmap_struct_eq((const int64_t *)(intptr_t)a, (const int64_t *)(intptr_t)b);
+    }
+    if (_is_wasm_set(a) || _is_wasm_set(b))
         return 0;
     int a_ep = _looks_like_empty_pack(a), b_ep = _looks_like_empty_pack(b);
     if (a_ep || b_ep) return (a_ep && b_ep) ? 1 : 0;
@@ -4221,6 +4725,42 @@ static int _wasm_ekind_value_eq(int64_t a, uint32_t eka, int64_t b, uint32_t ekb
     }
 }
 
+/* Two maps are equal when their entries are, pairwise in insertion order
+   (native twin: taida_hashmap_struct_eq), keys and values under their
+   recorded kinds. */
+static int _wasm_hashmap_struct_eq(const int64_t *a, const int64_t *b) {
+    if (a[1] != b[1]) return 0;
+    int64_t ca = a[0], cb = b[0];
+    int64_t na = a[WASM_HM_ORD_HEADER_SLOT(ca)], nb = b[WASM_HM_ORD_HEADER_SLOT(cb)];
+    int64_t ia = 0, ib = 0;
+    for (;;) {
+        int64_t sa = -1, sb = -1;
+        for (; ia < na; ia++) {
+            int64_t slot = a[WASM_HM_ORD_SLOT(ca, ia)];
+            if (slot >= 0 && slot < ca
+                && WASM_HM_SLOT_OCCUPIED(a[WASM_HM_HEADER + slot * 3], a[WASM_HM_HEADER + slot * 3 + 1])) {
+                sa = slot;
+                break;
+            }
+        }
+        for (; ib < nb; ib++) {
+            int64_t slot = b[WASM_HM_ORD_SLOT(cb, ib)];
+            if (slot >= 0 && slot < cb
+                && WASM_HM_SLOT_OCCUPIED(b[WASM_HM_HEADER + slot * 3], b[WASM_HM_HEADER + slot * 3 + 1])) {
+                sb = slot;
+                break;
+            }
+        }
+        if (sa < 0 || sb < 0) return sa < 0 && sb < 0;
+        if (!_wasm_ekind_value_eq(a[WASM_HM_HEADER + sa * 3 + 1], _wasm_hm_key_ek(a, ca, sa),
+                                  b[WASM_HM_HEADER + sb * 3 + 1], _wasm_hm_key_ek(b, cb, sb))) return 0;
+        if (!_wasm_ekind_value_eq(a[WASM_HM_HEADER + sa * 3 + 2], _wasm_hm_value_ek(a, ca, sa),
+                                  b[WASM_HM_HEADER + sb * 3 + 2], _wasm_hm_value_ek(b, cb, sb))) return 0;
+        ia++;
+        ib++;
+    }
+}
+
 /* Kind-aware fingerprint. Int and Enum share tag 0 + ordinal — mirroring
    the interpreter's ValueKey, which deliberately leaves the enum type id
    out of the hash and lets equality confirmation distinguish same-ordinal
@@ -4308,6 +4848,54 @@ static int _wasm_seen_contains(_wasm_seen *s, int64_t v) {
     }
 }
 
+/* Elements of a container tagged Int or Bool are plain numbers: they are
+   compared and hashed by value, never read as an address (a number can
+   point into linear memory, and the structural engine would then read
+   whatever lies there). Mirror of native taida_seen_add_raw & co. */
+static int _wasm_tag_is_plain_number(int64_t tag) {
+    return tag == WASM_TAG_INT || tag == WASM_TAG_BOOL;
+}
+static uint64_t _wasm_raw_fingerprint(int64_t v) {
+    uint64_t h = 0xcbf29ce484222325ULL;
+    for (int k = 0; k < 8; k++) {
+        h ^= (uint64_t)(((uint64_t)v >> (k * 8)) & 0xffu);
+        h *= 0x100000001b3ULL;
+    }
+    return h;
+}
+static int _wasm_seen_add_raw(_wasm_seen *s, int64_t v) {
+    uint64_t fp = _wasm_raw_fingerprint(v);
+    int i = (int)(fp & (uint64_t)s->mask);
+    for (;;) {
+        if (!s->used[i]) { s->used[i] = 1; s->fps[i] = fp; s->vals[i] = v; return 1; }
+        if (s->vals[i] == v) return 0;
+        i = (i + 1) & s->mask;
+    }
+}
+static int _wasm_seen_contains_raw(_wasm_seen *s, int64_t v) {
+    uint64_t fp = _wasm_raw_fingerprint(v);
+    int i = (int)(fp & (uint64_t)s->mask);
+    for (;;) {
+        if (!s->used[i]) return 0;
+        if (s->vals[i] == v) return 1;
+        i = (i + 1) & s->mask;
+    }
+}
+static int _wasm_list_has_raw(int64_t list_ptr, int64_t v) {
+    int64_t *list = (int64_t *)(intptr_t)list_ptr;
+    for (int64_t i = 0; i < list[1]; i++) if (list[WASM_LIST_ELEMS + i] == v) return 1;
+    return 0;
+}
+/* Two sets whose elements are all of one plain-number kind (an empty side
+   takes the other side's kind). */
+static int _wasm_sets_plain_numbers(const int64_t *a, const int64_t *b) {
+    int64_t ta = _wasm_elem_tag_for_propagation(a);
+    int64_t tb = _wasm_elem_tag_for_propagation(b);
+    if (a[1] == 0) ta = tb;
+    if (b[1] == 0) tb = ta;
+    return ta == tb && _wasm_tag_is_plain_number(ta);
+}
+
 /* Kind-aware seen-set (mirror of native taida_seen_k): entries carry
    (value, ekind) pairs so collision confirmation runs under
    _wasm_ekind_value_eq. Engaged only when every element kind passes
@@ -4364,6 +4952,15 @@ int64_t taida_set_has(int64_t set_ptr, int64_t item) {
  * instead of collapsing onto the legacy tag latch. */
 void taida_list_note_push_ekind(int64_t list_ptr, int64_t ekind) {
     _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)list_ptr, (uint32_t)ekind);
+}
+
+/* A list-literal element whose kind is known only at run time (a value of a
+ * type parameter, tagged by the caller). No reference to take: WASM does not
+ * count references. `tag` is negative if unknown. */
+void taida_list_note_push_dyn(int64_t list_ptr, int64_t item, int64_t tag) {
+    (void)item;
+    _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)list_ptr,
+                                 tag < 0 ? WASM_EKIND_UNKNOWN : (uint32_t)tag);
 }
 
 /* Kind-aware membership core: the set side reports each element's recorded
@@ -4507,11 +5104,13 @@ int64_t taida_set_from_list(int64_t list_ptr) {
        structural dispatcher would false-match the large Int against a
        collection sentinel. */
     taida_list_set_elem_tag(set, _wasm_elem_tag_for_propagation(list));
+    int raw = _wasm_tag_is_plain_number(_wasm_elem_tag_for_propagation(list));
     _wasm_seen seen;
-    int use_hash = _wasm_list_all_hashable(list) && _wasm_seen_init(&seen, len);
+    int use_hash = (raw || _wasm_list_all_hashable(list)) && _wasm_seen_init(&seen, len);
     for (int64_t i = 0; i < len; i++) {
         int64_t item = list[WASM_LIST_ELEMS + i];
-        int dup = use_hash ? !_wasm_seen_add(&seen, item) : taida_set_has(set, item);
+        int dup = use_hash ? (raw ? !_wasm_seen_add_raw(&seen, item) : !_wasm_seen_add(&seen, item))
+                           : (raw ? _wasm_list_has_raw(set, item) : taida_set_has(set, item));
         if (!dup) set = taida_list_push(set, item);
     }
     return set;
@@ -4614,16 +5213,22 @@ int64_t taida_set_union(int64_t set_a, int64_t set_b) {
        above (mirrors native taida_set_union). */
     int64_t result = taida_set_new();
     taida_list_set_elem_tag(result, tag_a);
+    int raw = _wasm_sets_plain_numbers(a, b);
     _wasm_seen seen;
-    int use_hash = _wasm_list_all_hashable(a) && _wasm_list_all_hashable(b)
+    int use_hash = (raw || (_wasm_list_all_hashable(a) && _wasm_list_all_hashable(b)))
                    && _wasm_seen_init(&seen, a_len + b_len);
     for (int64_t i = 0; i < a_len; i++) {
-        if (use_hash) _wasm_seen_add(&seen, a[WASM_LIST_ELEMS + i]);
+        if (use_hash) {
+            if (raw) _wasm_seen_add_raw(&seen, a[WASM_LIST_ELEMS + i]);
+            else _wasm_seen_add(&seen, a[WASM_LIST_ELEMS + i]);
+        }
         result = taida_list_push(result, a[WASM_LIST_ELEMS + i]);
     }
     for (int64_t i = 0; i < b_len; i++) {
-        int dup = use_hash ? !_wasm_seen_add(&seen, b[WASM_LIST_ELEMS + i])
-                           : (taida_set_has(result, b[WASM_LIST_ELEMS + i]) != 0);
+        int64_t item = b[WASM_LIST_ELEMS + i];
+        int dup = use_hash ? (raw ? !_wasm_seen_add_raw(&seen, item) : !_wasm_seen_add(&seen, item))
+                           : (raw ? _wasm_list_has_raw(result, item)
+                                  : (taida_set_has(result, item) != 0));
         if (!dup) {
             /* F54 tier 2: every actually-added b element stamps its tag
                through the shared latch — BEFORE the push (the latch's
@@ -4680,13 +5285,22 @@ int64_t taida_set_intersect(int64_t set_a, int64_t set_b) {
     /* Same-domain homogeneous fast path; the result holds a-side
        elements only, so the a tag stays honest (mirrors native). */
     taida_list_set_elem_tag(result, tag_a);
+    int raw = _wasm_sets_plain_numbers(a, b);
     _wasm_seen seen;
-    int use_hash = _wasm_list_all_hashable(a) && _wasm_list_all_hashable(b)
+    int use_hash = (raw || (_wasm_list_all_hashable(a) && _wasm_list_all_hashable(b)))
                    && _wasm_seen_init(&seen, b[1]);
-    if (use_hash) for (int64_t i = 0; i < b[1]; i++) _wasm_seen_add(&seen, b[WASM_LIST_ELEMS + i]);
+    if (use_hash) {
+        for (int64_t i = 0; i < b[1]; i++) {
+            if (raw) _wasm_seen_add_raw(&seen, b[WASM_LIST_ELEMS + i]);
+            else _wasm_seen_add(&seen, b[WASM_LIST_ELEMS + i]);
+        }
+    }
     for (int64_t i = 0; i < a_len; i++) {
-        int in_b = use_hash ? _wasm_seen_contains(&seen, a[WASM_LIST_ELEMS + i])
-                            : (taida_set_has(set_b, a[WASM_LIST_ELEMS + i]) != 0);
+        int64_t item = a[WASM_LIST_ELEMS + i];
+        int in_b = use_hash ? (raw ? _wasm_seen_contains_raw(&seen, item)
+                                   : _wasm_seen_contains(&seen, item))
+                            : (raw ? _wasm_list_has_raw(set_b, item)
+                                   : (taida_set_has(set_b, item) != 0));
         if (in_b) result = taida_list_push(result, a[WASM_LIST_ELEMS + i]);
     }
     return result;
@@ -4730,13 +5344,22 @@ int64_t taida_set_diff(int64_t set_a, int64_t set_b) {
     int64_t result = taida_set_new();
     /* Same-domain homogeneous fast path (mirrors native). */
     taida_list_set_elem_tag(result, tag_a);
+    int raw = _wasm_sets_plain_numbers(a, b);
     _wasm_seen seen;
-    int use_hash = _wasm_list_all_hashable(a) && _wasm_list_all_hashable(b)
+    int use_hash = (raw || (_wasm_list_all_hashable(a) && _wasm_list_all_hashable(b)))
                    && _wasm_seen_init(&seen, b[1]);
-    if (use_hash) for (int64_t i = 0; i < b[1]; i++) _wasm_seen_add(&seen, b[WASM_LIST_ELEMS + i]);
+    if (use_hash) {
+        for (int64_t i = 0; i < b[1]; i++) {
+            if (raw) _wasm_seen_add_raw(&seen, b[WASM_LIST_ELEMS + i]);
+            else _wasm_seen_add(&seen, b[WASM_LIST_ELEMS + i]);
+        }
+    }
     for (int64_t i = 0; i < a_len; i++) {
-        int in_b = use_hash ? _wasm_seen_contains(&seen, a[WASM_LIST_ELEMS + i])
-                            : (taida_set_has(set_b, a[WASM_LIST_ELEMS + i]) != 0);
+        int64_t item = a[WASM_LIST_ELEMS + i];
+        int in_b = use_hash ? (raw ? _wasm_seen_contains_raw(&seen, item)
+                                   : _wasm_seen_contains(&seen, item))
+                            : (raw ? _wasm_list_has_raw(set_b, item)
+                                   : (taida_set_has(set_b, item) != 0));
         if (!in_b) result = taida_list_push(result, a[WASM_LIST_ELEMS + i]);
     }
     return result;
@@ -4906,78 +5529,14 @@ int64_t taida_hashmap_clone(int64_t hm_ptr) {
 
 /* HashMap.toString() -- "HashMap({key: value, ...})" */
 int64_t taida_hashmap_to_string(int64_t hm_ptr) {
-    int64_t *hm = (int64_t *)(intptr_t)hm_ptr;
-    int64_t cap = hm[0];
-
-    /* Count entries */
-    int entry_count = 0;
-    for (int64_t i = 0; i < cap; i++) {
-        int64_t kh = hm[WASM_HM_HEADER + i * 3];
-        int64_t kp = hm[WASM_HM_HEADER + i * 3 + 1];
-        if ((kh != 0 || kp != 0) && !(kh == 1 && kp == 0)) {
-            entry_count++;
-        }
-    }
-
-    if (entry_count == 0) {
-        // WCR-6: "HashMap({})" = 11 chars + NUL = 12 bytes
-        char *r = _wasm_str_alloc(12);
-        _wf_memcpy(r, "HashMap({})", 11);
-        r[11] = '\0';
-        return (int64_t)r;
-    }
-
-    /* Build "HashMap({k: v, k: v, ...})" */
-    int buf_size = 256;
-    char *buf = _wasm_str_alloc((unsigned int)buf_size);
-    _wf_memcpy(buf, "HashMap({", 9);
-    int pos = 9;
-    int first = 1;
-    for (int64_t i = 0; i < cap; i++) {
-        int64_t kh = hm[WASM_HM_HEADER + i * 3];
-        int64_t kp = hm[WASM_HM_HEADER + i * 3 + 1];
-        int64_t val = hm[WASM_HM_HEADER + i * 3 + 2];
-        if ((kh != 0 || kp != 0) && !(kh == 1 && kp == 0)) {
-            if (!first) { buf[pos++] = ','; buf[pos++] = ' '; }
-            first = 0;
-            const char *ks = (const char *)(intptr_t)taida_polymorphic_to_string(kp);
-            int kl = _wf_strlen(ks);
-            const char *vs = (const char *)(intptr_t)taida_polymorphic_to_string(val);
-            int vl = _wf_strlen(vs);
-            while (pos + kl + vl + 10 > buf_size) {
-                buf_size *= 2;
-                char *new_buf = _wasm_str_alloc((unsigned int)buf_size);
-                _wf_memcpy(new_buf, buf, pos);
-                buf = new_buf;
-            }
-            _wf_memcpy(buf + pos, ks, kl); pos += kl;
-            buf[pos++] = ':'; buf[pos++] = ' ';
-            _wf_memcpy(buf + pos, vs, vl); pos += vl;
-        }
-    }
-    buf[pos++] = '}'; buf[pos++] = ')';
-    buf[pos] = '\0';
-    return (int64_t)buf;
+    /* The display every other path uses: insertion order, each key and
+       value by its entry's kind. */
+    return _wasm_hashmap_to_string(hm_ptr);
 }
 
 /* HashMap.remove(key) -> new HashMap without that key (immutable) */
 int64_t taida_hashmap_remove_immut(int64_t hm_ptr, int64_t key_hash, int64_t key_ptr) {
-    int64_t clone = taida_hashmap_clone(hm_ptr);
-    int64_t *hm = (int64_t *)(intptr_t)clone;
-    int64_t cap = hm[0];
-    for (int64_t i = 0; i < cap; i++) {
-        int64_t kh = hm[WASM_HM_HEADER + i * 3];
-        int64_t kp = hm[WASM_HM_HEADER + i * 3 + 1];
-        if (kh == key_hash && kp != 0) {
-            if (taida_str_eq(kp, key_ptr)) {
-                hm[WASM_HM_HEADER + i * 3] = 1;     /* tombstone hash */
-                hm[WASM_HM_HEADER + i * 3 + 1] = 0;
-                hm[WASM_HM_HEADER + i * 3 + 2] = 0;
-                break;
-            }
-        }
-    }
-    return clone;
+    return taida_hashmap_remove(taida_hashmap_clone(hm_ptr), key_hash, key_ptr);
 }
 
 /* HashMap with initial capacity (public wrapper) */
@@ -5071,6 +5630,7 @@ int64_t taida_set_to_string(int64_t set_ptr) {
 
 /* Pack call field: invoke a BuchiPack field as a function */
 int64_t taida_pack_call_field0(int64_t pack_ptr, int64_t field_hash) {
+    if (__wasm_error_thrown) return 0;
     int64_t fn_ptr = taida_pack_get(pack_ptr, field_hash);
     if (taida_is_closure_value(fn_ptr)) {
         int64_t env = taida_closure_get_env(fn_ptr);
@@ -5092,6 +5652,7 @@ int64_t taida_pack_call_field2(int64_t pack_ptr, int64_t field_hash, int64_t a, 
 }
 
 int64_t taida_pack_call_field3(int64_t pack_ptr, int64_t field_hash, int64_t a, int64_t b, int64_t c) {
+    if (__wasm_error_thrown) return 0;
     int64_t fn_ptr = taida_pack_get(pack_ptr, field_hash);
     if (taida_is_closure_value(fn_ptr)) {
         int64_t env = taida_closure_get_env(fn_ptr);
@@ -5137,7 +5698,7 @@ int64_t taida_is_buchi_pack(int64_t val) {
     return 0;
 }
 int64_t taida_is_molten(int64_t val) { (void)val; return 0; /* Molten is JS-only */ }
-int64_t taida_is_bytes(int64_t val) { (void)val; return 0; /* Bytes not in core */ }
+int64_t taida_is_bytes(int64_t val) { return _looks_like_bytes(val); }
 int64_t taida_is_async(int64_t val) { return _wasm_is_async_obj(val); }
 int64_t taida_detect_value_tag(int64_t val) { (void)val; return 0; }
 int64_t taida_detect_gorillax_type(int64_t val) { (void)val; return 0; }

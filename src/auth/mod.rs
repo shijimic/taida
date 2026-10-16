@@ -1,7 +1,7 @@
 pub mod device_flow;
 pub mod token;
 
-use token::{delete_token, load_token, save_token};
+use token::{delete_token, load_token, load_token_checked, save_token};
 
 fn is_help_flag(raw: &str) -> bool {
     matches!(raw, "--help" | "-h")
@@ -250,17 +250,27 @@ fn run_logout(args: &[String]) {
         }
     }
 
-    match load_token() {
-        Some(token) => match delete_token() {
+    match load_token_checked() {
+        Ok(Some(token)) => match delete_token() {
             Ok(()) => println!("Logged out (was {}).", token.username),
             Err(e) => {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
         },
-        None => {
+        Ok(None) => {
             println!("Not logged in.");
         }
+        // The credentials file is there but unusable. Logging out is meant to
+        // leave no credentials behind, so remove it and say so.
+        Err(reason) => match delete_token() {
+            Ok(()) => println!("Removed the unusable credentials file ({}).", reason),
+            Err(e) => {
+                eprintln!("Error: {}", reason);
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        },
     }
 }
 
@@ -277,8 +287,8 @@ fn run_status(args: &[String]) {
         }
     }
 
-    match load_token() {
-        Some(token) => {
+    match load_token_checked() {
+        Ok(Some(token)) => {
             println!("Logged in as {}.", token.username);
             println!("Token created: {}", token.created_at);
             if token.community_token().is_none() {
@@ -287,8 +297,13 @@ fn run_status(args: &[String]) {
                 );
             }
         }
-        None => {
+        Ok(None) => {
             println!("Not logged in. Run `taida auth login` to authenticate.");
+        }
+        Err(reason) => {
+            eprintln!("Error: {}", reason);
+            eprintln!("Run `taida auth logout` to remove it, then `taida auth login`.");
+            std::process::exit(1);
         }
     }
 }

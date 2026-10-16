@@ -183,7 +183,18 @@ pub fn collect_entry_effective_exports(entry_path: &Path) -> Result<BTreeSet<Str
             e
         )
     })?;
-    let (program, parse_errors) = parser::parse(&source);
+    effective_exports_from_source(&source, entry_path)
+}
+
+/// [`collect_entry_effective_exports`] for a module whose source is
+/// already in memory (for example read from a git tag). `origin` names the
+/// module in diagnostics.
+pub fn effective_exports_from_source(
+    source: &str,
+    origin: &Path,
+) -> Result<BTreeSet<String>, String> {
+    let entry_path = origin;
+    let (program, parse_errors) = parser::parse(source);
     if !parse_errors.is_empty() {
         let msgs: Vec<String> = parse_errors.iter().map(|e| e.to_string()).collect();
         return Err(format!(

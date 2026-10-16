@@ -308,7 +308,7 @@ fn test_encode_binary_body() {
 }
 
 #[test]
-fn test_encode_user_content_length_preserved() {
+fn test_encode_user_content_length_uses_body_length() {
     let response = Value::pack(vec![
         ("status".into(), Value::Int(200)),
         (
@@ -327,8 +327,9 @@ fn test_encode_user_content_length_preserved() {
         _ => panic!("no bytes"),
     };
     let text = String::from_utf8(bytes).unwrap();
-    // User's Content-Length should be preserved, no auto-append
-    assert!(text.contains("Content-Length: 99\r\n"));
+    // The handler's Content-Length keeps its place but carries the real body
+    // length; no second Content-Length is appended.
+    assert!(text.contains("Content-Length: 2\r\n"));
     assert_eq!(text.matches("Content-Length").count(), 1);
 }
 
@@ -5550,9 +5551,8 @@ fn make_streaming_handler(stmts: Vec<Statement>) -> Value {
         body: stmts,
         closure: Arc::new(std::collections::HashMap::new()),
         return_type: None,
-        module_type_defs: None,
-        module_enum_defs: None,
-        module_symbols: None,
+        module: 0,
+        def_site: None,
     })
 }
 
@@ -7322,9 +7322,8 @@ fn test_http_serve_tls_arg_non_pack_rejected() {
             body: vec![],
             closure: std::sync::Arc::new(std::collections::HashMap::new()),
             return_type: None,
-            module_type_defs: None,
-            module_enum_defs: None,
-            module_symbols: None,
+            module: 0,
+            def_site: None,
         }),
     );
 
@@ -7369,9 +7368,8 @@ fn test_http_serve_tls_cert_key_returns_phase2_error() {
             body: vec![],
             closure: std::sync::Arc::new(std::collections::HashMap::new()),
             return_type: None,
-            module_type_defs: None,
-            module_enum_defs: None,
-            module_symbols: None,
+            module: 0,
+            def_site: None,
         }),
     );
 

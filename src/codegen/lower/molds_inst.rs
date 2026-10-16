@@ -1,4 +1,4 @@
-use super::{LowerError, Lowering};
+use super::{HIDDEN, LowerError, Lowering};
 use crate::codegen::ir::*;
 /// Mold instantiation lowering for the Taida native backend.
 ///
@@ -7,27 +7,120 @@ use crate::codegen::ir::*;
 /// These are `impl Lowering` methods split from lower.rs for maintainability.
 use crate::parser::*;
 
+/// A Bool mold option (`all`, `start`, `reverse`, ...): a literal decided
+/// while lowering, or a value computed at run time.
+pub(crate) enum MoldFlag {
+    Static(bool),
+    Dynamic(IrVar),
+}
+
 impl Lowering {
-    /// モールドフィールド（オプション引数）から名前指定のフィールドを検索してloweringする
-    pub(crate) fn lower_mold_field_bool(
+    /// The Bool mold option `name` of `fields` (`default` when absent).
+    pub(crate) fn lower_mold_flag(
         &mut self,
-        _func: &mut IrFunction,
+        func: &mut IrFunction,
         fields: &[crate::parser::BuchiField],
         name: &str,
         default: bool,
-    ) -> Result<bool, LowerError> {
-        for field in fields {
-            if field.name == name {
-                // 静的にリテラル値を評価
-                match &field.value {
-                    Expr::BoolLit(b, _) => return Ok(*b),
-                    Expr::Ident(s, _) if s == "true" => return Ok(true),
-                    Expr::Ident(s, _) if s == "false" => return Ok(false),
-                    _ => return Ok(default), // 動的値は default にフォールバック
-                }
+    ) -> Result<MoldFlag, LowerError> {
+        let Some(field) = fields.iter().find(|f| f.name == name) else {
+            return Ok(MoldFlag::Static(default));
+        };
+        Ok(match &field.value {
+            Expr::BoolLit(b, _) => MoldFlag::Static(*b),
+            other => MoldFlag::Dynamic(self.lower_expr(func, other)?),
+        })
+    }
+
+    /// `if flag { name(args) } else { otherwise }`.
+    pub(crate) fn call_if(
+        func: &mut IrFunction,
+        flag: IrVar,
+        name: &str,
+        args: Vec<IrVar>,
+        otherwise: IrVar,
+    ) -> IrVar {
+        let called = func.alloc_var();
+        let result = func.alloc_var();
+        func.push(IrInst::CondBranch(
+            result,
+            vec![
+                crate::codegen::ir::CondArm {
+                    condition: Some(flag),
+                    body: vec![IrInst::Call(called, name.to_string(), args)],
+                    result: called,
+                },
+                crate::codegen::ir::CondArm {
+                    condition: None,
+                    body: vec![],
+                    result: otherwise,
+                },
+            ],
+        ));
+        result
+    }
+
+    /// `if flag { then_name(args) } else { else_name(args) }`.
+    pub(crate) fn call_either(
+        func: &mut IrFunction,
+        flag: IrVar,
+        then_name: &str,
+        else_name: &str,
+        args: Vec<IrVar>,
+    ) -> IrVar {
+        let then_var = func.alloc_var();
+        let else_var = func.alloc_var();
+        let result = func.alloc_var();
+        func.push(IrInst::CondBranch(
+            result,
+            vec![
+                crate::codegen::ir::CondArm {
+                    condition: Some(flag),
+                    body: vec![IrInst::Call(then_var, then_name.to_string(), args.clone())],
+                    result: then_var,
+                },
+                crate::codegen::ir::CondArm {
+                    condition: None,
+                    body: vec![IrInst::Call(else_var, else_name.to_string(), args)],
+                    result: else_var,
+                },
+            ],
+        ));
+        result
+    }
+
+    /// Store a mold's `default` option (already evaluated) as the default of
+    /// the fresh Lax `lax` the mold returned.
+    fn set_lax_default(
+        &self,
+        func: &mut IrFunction,
+        lax: IrVar,
+        fields: &[crate::parser::BuchiField],
+        default: Option<IrVar>,
+    ) {
+        let Some(default) = default else {
+            return;
+        };
+        func.push(IrInst::PackSet(lax, 2, default));
+        if let Some(field) = fields.iter().find(|f| f.name == "default") {
+            let tag = self.expr_type_tag(&field.value);
+            if tag > 0 {
+                func.push(IrInst::PackSetTag(lax, 2, tag));
             }
         }
-        Ok(default)
+    }
+
+    /// Apply `name` to `value` according to `flag`.
+    fn apply_if(func: &mut IrFunction, flag: MoldFlag, name: &str, value: IrVar) -> IrVar {
+        match flag {
+            MoldFlag::Static(false) => value,
+            MoldFlag::Static(true) => {
+                let result = func.alloc_var();
+                func.push(IrInst::Call(result, name.to_string(), vec![value]));
+                result
+            }
+            MoldFlag::Dynamic(v) => Self::call_if(func, v, name, vec![value], value),
+        }
     }
 
     /// モールドフィールドから文字列リテラル値を取得
@@ -125,7 +218,7 @@ impl Lowering {
     /// F62B-021: lower a host-call Out slot into its schema operand. A
     /// concrete type resolves to a constant descriptor string; a type
     /// parameter of the enclosing schema-passing generic reads the hidden
-    /// `__taida_schema_{T}` parameter instead (dictionary passing).
+    /// `#schema_{T}` parameter instead (dictionary passing).
     fn lower_out_schema_operand(
         &mut self,
         func: &mut IrFunction,
@@ -158,6 +251,9 @@ impl Lowering {
         type_args: &[Expr],
         fields: &[crate::parser::BuchiField],
     ) -> Result<IrVar, LowerError> {
+        if let Some(exported) = self.core_mold_aliases.get(type_name).cloned() {
+            return self.lower_mold_inst(func, &exported, type_args, fields);
+        }
         match type_name {
             // -- Str molds --
             "Upper" => {
@@ -198,20 +294,26 @@ impl Lowering {
                 }
                 let s = self.lower_expr(func, &type_args[0])?;
                 // オプション: start (default true), end (default true)
-                let trim_start = self.lower_mold_field_bool(func, fields, "start", true)?;
-                let trim_end = self.lower_mold_field_bool(func, fields, "end", true)?;
-                let runtime_fn = match (trim_start, trim_end) {
-                    (true, true) => "taida_str_trim",
-                    (true, false) => "taida_str_trim_start",
-                    (false, true) => "taida_str_trim_end",
-                    (false, false) => {
-                        // No trimming -- return the string as-is
-                        return Ok(s);
-                    }
-                };
-                let result = func.alloc_var();
-                func.push(IrInst::Call(result, runtime_fn.to_string(), vec![s]));
-                Ok(result)
+                let trim_start = self.lower_mold_flag(func, fields, "start", true)?;
+                let trim_end = self.lower_mold_flag(func, fields, "end", true)?;
+                if let (MoldFlag::Static(start), MoldFlag::Static(end)) = (&trim_start, &trim_end) {
+                    let runtime_fn = match (start, end) {
+                        (true, true) => "taida_str_trim",
+                        (true, false) => "taida_str_trim_start",
+                        (false, true) => "taida_str_trim_end",
+                        (false, false) => {
+                            // No trimming -- return the string as-is
+                            return Ok(s);
+                        }
+                    };
+                    let result = func.alloc_var();
+                    func.push(IrInst::Call(result, runtime_fn.to_string(), vec![s]));
+                    return Ok(result);
+                }
+                // A run-time option: trimming the start and then the end
+                // trims both sides.
+                let trimmed = Self::apply_if(func, trim_start, "taida_str_trim_start", s);
+                Ok(Self::apply_if(func, trim_end, "taida_str_trim_end", trimmed))
             }
             "Split" => {
                 if type_args.len() < 2 {
@@ -254,19 +356,29 @@ impl Lowering {
                 let old = self.lower_expr(func, &type_args[1])?;
                 let new_str = self.lower_expr(func, &type_args[2])?;
                 // オプション: all (default false)
-                let replace_all = self.lower_mold_field_bool(func, fields, "all", false)?;
-                let runtime_fn = if replace_all {
-                    "taida_str_replace"
-                } else {
-                    "taida_str_replace_first"
-                };
-                let result = func.alloc_var();
-                func.push(IrInst::Call(
-                    result,
-                    runtime_fn.to_string(),
-                    vec![s, old, new_str],
-                ));
-                Ok(result)
+                match self.lower_mold_flag(func, fields, "all", false)? {
+                    MoldFlag::Static(replace_all) => {
+                        let runtime_fn = if replace_all {
+                            "taida_str_replace"
+                        } else {
+                            "taida_str_replace_first"
+                        };
+                        let result = func.alloc_var();
+                        func.push(IrInst::Call(
+                            result,
+                            runtime_fn.to_string(),
+                            vec![s, old, new_str],
+                        ));
+                        Ok(result)
+                    }
+                    MoldFlag::Dynamic(all) => Ok(Self::call_either(
+                        func,
+                        all,
+                        "taida_str_replace",
+                        "taida_str_replace_first",
+                        vec![s, old, new_str],
+                    )),
+                }
             }
             // F62B-020: ordering comparison molds. `a <= b` ≡ `b >= a`, so
             // both lower onto the existing gte runtime family with swapped
@@ -632,14 +744,42 @@ impl Lowering {
                     "taida_str_char_at".to_string(),
                     vec![s, idx],
                 ));
-                // TF-15: CharAt returns Lax[Str] (matching interpreter)
+                // TF-15: CharAt returns Lax[Str] (matching interpreter).
+                // An index outside the string yields "" from the runtime,
+                // while a character is never empty: "" is the failed Lax.
                 let default_val = func.alloc_var();
                 func.push(IrInst::ConstStr(default_val, String::new()));
-                let result = func.alloc_var();
+                let found = func.alloc_var();
                 func.push(IrInst::Call(
-                    result,
-                    "taida_lax_new".to_string(),
+                    found,
+                    "taida_str_neq".to_string(),
                     vec![raw, default_val],
+                ));
+                let present = func.alloc_var();
+                let absent = func.alloc_var();
+                let result = func.alloc_var();
+                func.push(IrInst::CondBranch(
+                    result,
+                    vec![
+                        crate::codegen::ir::CondArm {
+                            condition: Some(found),
+                            body: vec![IrInst::Call(
+                                present,
+                                "taida_lax_new".to_string(),
+                                vec![raw, default_val],
+                            )],
+                            result: present,
+                        },
+                        crate::codegen::ir::CondArm {
+                            condition: None,
+                            body: vec![IrInst::Call(
+                                absent,
+                                "taida_lax_empty".to_string(),
+                                vec![default_val],
+                            )],
+                            result: absent,
+                        },
+                    ],
                 ));
                 Ok(result)
             }
@@ -781,24 +921,38 @@ impl Lowering {
                 let s = self.lower_expr(func, &type_args[0])?;
                 let target_len = self.lower_expr(func, &type_args[1])?;
                 // オプション: char (default " "), side (default "start")
-                let pad_char_var = match self.lower_mold_field_str(func, fields, "char")? {
-                    Some(c) => {
-                        let v = func.alloc_var();
-                        func.push(IrInst::ConstStr(v, c));
-                        v
-                    }
+                let pad_char_var = match self.lower_mold_field_expr(func, fields, "char")? {
+                    Some(v) => v,
                     None => {
                         let v = func.alloc_var();
                         func.push(IrInst::ConstStr(v, " ".to_string()));
                         v
                     }
                 };
-                let side_str = self
-                    .lower_mold_field_str(func, fields, "side")?
-                    .unwrap_or_else(|| "start".to_string());
-                let pad_end_flag = func.alloc_var();
-                let is_end = if side_str == "end" { 1i64 } else { 0i64 };
-                func.push(IrInst::ConstInt(pad_end_flag, is_end));
+                let pad_end_flag = match fields.iter().find(|f| f.name == "side") {
+                    Some(side) if !matches!(side.value, Expr::StringLit(_, _)) => {
+                        // A run-time side: pad the end exactly when it is "end".
+                        let side_var = self.lower_expr(func, &side.value)?;
+                        let end = func.alloc_var();
+                        func.push(IrInst::ConstStr(end, "end".to_string()));
+                        let flag = func.alloc_var();
+                        func.push(IrInst::Call(
+                            flag,
+                            "taida_str_eq".to_string(),
+                            vec![side_var, end],
+                        ));
+                        flag
+                    }
+                    _ => {
+                        let side_str = self
+                            .lower_mold_field_str(func, fields, "side")?
+                            .unwrap_or_else(|| "start".to_string());
+                        let flag = func.alloc_var();
+                        let is_end = if side_str == "end" { 1i64 } else { 0i64 };
+                        func.push(IrInst::ConstInt(flag, is_end));
+                        flag
+                    }
+                };
                 let result = func.alloc_var();
                 func.push(IrInst::Call(
                     result,
@@ -972,11 +1126,26 @@ impl Lowering {
                     });
                 }
                 let num = self.lower_expr(func, &type_args[0])?;
-                let min_val = self.lower_expr(func, &type_args[1])?;
-                let max_val = self.lower_expr(func, &type_args[2])?;
+                let mut min_val = self.lower_expr(func, &type_args[1])?;
+                let mut max_val = self.lower_expr(func, &type_args[2])?;
                 let is_float = self.expr_returns_float(&type_args[0])
                     || self.expr_returns_float(&type_args[1])
                     || self.expr_returns_float(&type_args[2]);
+                if self.expr_returns_float(&type_args[0]) {
+                    // Int bounds on a Float value compare in f64, as the
+                    // reference widens them.
+                    for (bound, expr) in [(&mut min_val, &type_args[1]), (&mut max_val, &type_args[2])] {
+                        if self.expr_is_int(expr) {
+                            let widened = func.alloc_var();
+                            func.push(IrInst::Call(
+                                widened,
+                                "taida_int_to_float".to_string(),
+                                vec![*bound],
+                            ));
+                            *bound = widened;
+                        }
+                    }
+                }
                 let result = func.alloc_var();
                 if is_float {
                     func.push(IrInst::Call(
@@ -1084,17 +1253,34 @@ impl Lowering {
             }
             "Log" => {
                 // Log[value, base]() -> Float. Matches interpreter:
-                // `val.log(base)` = `ln(val) / ln(base)`. When base is
-                // omitted, interpreter falls through to `val.ln()`; we
-                // don't lower that single-arg form here because it
-                // would shadow the 2-arg form, and the fixture always
-                // supplies both. Single-arg callers should use Ln.
-                if type_args.len() < 2 {
+                // `val.log(base)` = `ln(val) / ln(base)`; without a base,
+                // `Log[value]()` is the natural logarithm (`val.ln()`).
+                if type_args.is_empty() {
                     return Err(LowerError {
-                        message: "Log requires 2 arguments at the codegen boundary: \
-                                  Log[value, base](). For natural-log use Ln[value]()."
+                        message: "Log requires 1-2 arguments: Log[value]() or Log[value, base]()"
                             .into(),
                     });
+                }
+                if type_args.len() == 1 {
+                    let val_raw = self.lower_expr(func, &type_args[0])?;
+                    let val = if self.expr_returns_float(&type_args[0]) {
+                        val_raw
+                    } else {
+                        let tmp = func.alloc_var();
+                        func.push(IrInst::Call(
+                            tmp,
+                            "taida_int_to_float".to_string(),
+                            vec![val_raw],
+                        ));
+                        tmp
+                    };
+                    let result = func.alloc_var();
+                    func.push(IrInst::Call(
+                        result,
+                        "taida_float_ln".to_string(),
+                        vec![val],
+                    ));
+                    return Ok(result);
                 }
                 let val_raw = self.lower_expr(func, &type_args[0])?;
                 let base_raw = self.lower_expr(func, &type_args[1])?;
@@ -1624,28 +1810,57 @@ impl Lowering {
                 let list = self.lower_expr(func, &type_args[0])?;
                 // オプション: by (key extraction function), reverse, desc
                 let by_fn = self.lower_mold_field_expr(func, fields, "by")?;
-                let reverse = self.lower_mold_field_bool(func, fields, "reverse", false)?;
-                let desc = self.lower_mold_field_bool(func, fields, "desc", false)?;
-                let result = func.alloc_var();
-                if let Some(by_var) = by_fn {
-                    // Sort by key extraction function: taida_list_sort_by(list, fn)
-                    // The function extracts a sort key from each element, then sorts ascending by key.
-                    // If reverse or desc is set, we sort descending instead (sort_by returns ascending).
-                    func.push(IrInst::Call(result, "taida_list_sort_by".to_string(), vec![list, by_var]));
-                    if reverse || desc {
-                        // Reverse the result for descending order
-                        let reversed = func.alloc_var();
-                        func.push(IrInst::Call(reversed, "taida_list_reverse".to_string(), vec![result]));
-                        return Ok(reversed);
+                let reverse = self.lower_mold_flag(func, fields, "reverse", false)?;
+                let desc = self.lower_mold_flag(func, fields, "desc", false)?;
+                // Descending when either option is set.
+                let descending = match (reverse, desc) {
+                    (MoldFlag::Static(a), MoldFlag::Static(b)) => MoldFlag::Static(a || b),
+                    (MoldFlag::Static(true), _) | (_, MoldFlag::Static(true)) => {
+                        MoldFlag::Static(true)
                     }
-                } else {
-                    let runtime_fn = if reverse || desc {
-                        "taida_list_sort_desc"
-                    } else {
-                        "taida_list_sort"
-                    };
-                    func.push(IrInst::Call(result, runtime_fn.to_string(), vec![list]));
-                }
+                    (MoldFlag::Dynamic(v), MoldFlag::Static(false))
+                    | (MoldFlag::Static(false), MoldFlag::Dynamic(v)) => MoldFlag::Dynamic(v),
+                    (MoldFlag::Dynamic(a), MoldFlag::Dynamic(b)) => {
+                        let either = func.alloc_var();
+                        func.push(IrInst::Call(either, "taida_bool_or".to_string(), vec![a, b]));
+                        MoldFlag::Dynamic(either)
+                    }
+                };
+                // The reference's order (see `taida_list_sort_kind`): keys of
+                // the kind the `by` function returns, NaN keys last.
+                let key_tag = match fields.iter().find(|f| f.name == "by") {
+                    Some(field) => match self.typed_expr_table.lookup(&field.value) {
+                        Some(crate::types::Type::Function(_, ret)) => {
+                            self.type_runtime_tag(ret).unwrap_or(-1)
+                        }
+                        _ => -1,
+                    },
+                    None => -1,
+                };
+                let key_fn = match by_fn {
+                    Some(by_var) => by_var,
+                    None => {
+                        let zero = func.alloc_var();
+                        func.push(IrInst::ConstInt(zero, 0));
+                        zero
+                    }
+                };
+                let key_tag_var = func.alloc_var();
+                func.push(IrInst::ConstInt(key_tag_var, key_tag));
+                let descending_var = match descending {
+                    MoldFlag::Static(flag) => {
+                        let v = func.alloc_var();
+                        func.push(IrInst::ConstInt(v, i64::from(flag)));
+                        v
+                    }
+                    MoldFlag::Dynamic(v) => v,
+                };
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_list_sort_kind".to_string(),
+                    vec![list, key_fn, key_tag_var, descending_var],
+                ));
                 Ok(result)
             }
             "Unique" => {
@@ -1741,6 +1956,18 @@ impl Lowering {
                     result,
                     "taida_list_find_index_lax".to_string(),
                     vec![list, fn_var],
+                ));
+                Ok(result)
+            }
+            // Length[x](): the `.length()` of the value (list elements, Str
+            // characters, Bytes bytes).
+            "Length" if type_args.len() == 1 => {
+                let value = self.lower_expr(func, &type_args[0])?;
+                let result = func.alloc_var();
+                func.push(IrInst::Call(
+                    result,
+                    "taida_polymorphic_length".to_string(),
+                    vec![value],
                 ));
                 Ok(result)
             }
@@ -1987,12 +2214,15 @@ impl Lowering {
                     ));
                     Ok(result)
                 } else {
+                    // The payload's static kind lets the runtime release,
+                    // display and throw it as what it is.
                     let val = self.lower_expr(func, &type_args[0])?;
+                    let ekind = self.emit_operand_ekind(func, &type_args[0]);
                     let result = func.alloc_var();
                     func.push(IrInst::Call(
                         result,
-                        "taida_async_err".to_string(),
-                        vec![val],
+                        "taida_async_err_kinded".to_string(),
+                        vec![val, ekind],
                     ));
                     Ok(result)
                 }
@@ -2120,16 +2350,27 @@ impl Lowering {
                 let raw_val = self.lower_expr(func, &type_args[0])?;
                 // Resolve schema from second type arg at compile time
                 let schema_desc = self.resolve_json_schema_descriptor(&type_args[1])?;
+                self.note_json_schema_field_names(&schema_desc);
                 // Pass schema descriptor as string constant
                 let schema_var = func.alloc_var();
                 func.push(IrInst::ConstStr(schema_var, schema_desc));
                 // Call: taida_json_schema_cast(raw_str, schema_descriptor) -> Lax[BuchiPack]
+                // (the _hooked form also gets the rebuild functions of the
+                // TypeDefs with methods the schema can build).
+                let hooks = self.lower_json_rebuild_hooks(func, &type_args[1])?;
                 let result = func.alloc_var();
-                func.push(IrInst::Call(
-                    result,
-                    "taida_json_schema_cast".to_string(),
-                    vec![raw_val, schema_var],
-                ));
+                match hooks {
+                    Some(hooks) => func.push(IrInst::Call(
+                        result,
+                        "taida_json_schema_cast_hooked".to_string(),
+                        vec![raw_val, schema_var, hooks],
+                    )),
+                    None => func.push(IrInst::Call(
+                        result,
+                        "taida_json_schema_cast".to_string(),
+                        vec![raw_val, schema_var],
+                    )),
+                }
                 Ok(result)
             }
             "Lax" => {
@@ -2146,16 +2387,42 @@ impl Lowering {
                     ));
                     Ok(result)
                 } else {
+                    use crate::codegen::tag_prop::{
+                        TAG_BOOL, TAG_FLOAT, TAG_LIST, TAG_PACK, TAG_STR,
+                    };
                     let val = self.lower_expr(func, &type_args[0])?;
-                    // default value is 0 for native (Int default)
+                    // The default is the empty value of the payload's kind, as
+                    // the reference picks it; both slots record that kind.
+                    let checked = self.typed_expr_table.lookup(&type_args[0]).cloned();
+                    let tag = checked
+                        .as_ref()
+                        .and_then(|ty| self.type_runtime_tag(ty))
+                        .unwrap_or(-1);
                     let default_val = func.alloc_var();
-                    func.push(IrInst::ConstInt(default_val, 0));
+                    match tag {
+                        TAG_FLOAT => func.push(IrInst::ConstFloat(default_val, 0.0)),
+                        TAG_BOOL => func.push(IrInst::ConstBool(default_val, false)),
+                        TAG_STR => func.push(IrInst::ConstStr(default_val, String::new())),
+                        TAG_LIST => func.push(IrInst::Call(
+                            default_val,
+                            "taida_list_new".to_string(),
+                            vec![],
+                        )),
+                        TAG_PACK if !matches!(checked, Some(crate::types::Type::Bytes)) => {
+                            func.push(IrInst::PackNew(default_val, 0))
+                        }
+                        _ => func.push(IrInst::ConstInt(default_val, 0)),
+                    }
                     let result = func.alloc_var();
                     func.push(IrInst::Call(
                         result,
                         "taida_lax_new".to_string(),
                         vec![val, default_val],
                     ));
+                    if tag > 0 && !matches!(checked, Some(crate::types::Type::Bytes)) {
+                        func.push(IrInst::PackSetTag(result, 1, tag));
+                        func.push(IrInst::PackSetTag(result, 2, tag));
+                    }
                     Ok(result)
                 }
             }
@@ -2373,6 +2640,9 @@ impl Lowering {
                 }
                 let a_raw = self.lower_expr(func, &type_args[0])?;
                 let b_raw = self.lower_expr(func, &type_args[1])?;
+                // The `default` option is evaluated after the operands (a throw
+                // in it reaches the caller) and becomes the Lax's default.
+                let custom_default = self.lower_mold_field_expr(func, fields, "default")?;
                 let a_is_float = self.expr_returns_float(&type_args[0]);
                 let b_is_float = self.expr_returns_float(&type_args[1]);
                 if a_is_float || b_is_float {
@@ -2404,6 +2674,7 @@ impl Lowering {
                         "taida_div_mold_f".to_string(),
                         vec![a, b],
                     ));
+                    self.set_lax_default(func, result, fields, custom_default);
                     return Ok(result);
                 }
                 let result = func.alloc_var();
@@ -2412,6 +2683,7 @@ impl Lowering {
                     "taida_div_mold".to_string(),
                     vec![a_raw, b_raw],
                 ));
+                self.set_lax_default(func, result, fields, custom_default);
                 Ok(result)
             }
             "Mod" => {
@@ -2428,6 +2700,9 @@ impl Lowering {
                 }
                 let a_raw = self.lower_expr(func, &type_args[0])?;
                 let b_raw = self.lower_expr(func, &type_args[1])?;
+                // The `default` option is evaluated after the operands (a throw
+                // in it reaches the caller) and becomes the Lax's default.
+                let custom_default = self.lower_mold_field_expr(func, fields, "default")?;
                 let a_is_float = self.expr_returns_float(&type_args[0]);
                 let b_is_float = self.expr_returns_float(&type_args[1]);
                 if a_is_float || b_is_float {
@@ -2459,6 +2734,7 @@ impl Lowering {
                         "taida_mod_mold_f".to_string(),
                         vec![a, b],
                     ));
+                    self.set_lax_default(func, result, fields, custom_default);
                     return Ok(result);
                 }
                 let result = func.alloc_var();
@@ -2467,6 +2743,7 @@ impl Lowering {
                     "taida_mod_mold".to_string(),
                     vec![a_raw, b_raw],
                 ));
+                self.set_lax_default(func, result, fields, custom_default);
                 Ok(result)
             }
             // -- Type conversion molds (v0.5.0) --
@@ -2489,8 +2766,23 @@ impl Lowering {
                         message: "Str requires 1 argument: Str[x]()".into(),
                     });
                 }
-                let val = self.lower_expr(func, &type_args[0])?;
-                let runtime_fn = if self.expr_returns_float(&type_args[0]) {
+                let mut val = self.lower_expr(func, &type_args[0])?;
+                let is_function =
+                    self.expr_type_tag(&type_args[0]) == crate::codegen::tag_prop::TAG_CLOSURE;
+                if is_function {
+                    // `<function name>`: only the static type tells a named
+                    // function's WASM table index apart from an Int.
+                    let shown = func.alloc_var();
+                    func.push(IrInst::Call(
+                        shown,
+                        "taida_function_to_string".to_string(),
+                        vec![val],
+                    ));
+                    val = shown;
+                }
+                let runtime_fn = if is_function {
+                    "taida_str_mold_str"
+                } else if self.expr_returns_float(&type_args[0]) {
                     "taida_str_mold_float"
                 } else if self.expr_is_string_full(&type_args[0]) {
                     "taida_str_mold_str"
@@ -3149,7 +3441,7 @@ impl Lowering {
                         3 => "Str",
                         4 => "Pack",
                         5 => "List",
-                        6 => "Closure",
+                        6 => "Function",
                         _ => "unknown",
                     };
                     let msg = format!(
@@ -3253,6 +3545,15 @@ impl Lowering {
                     }
                     // Primitive type check: use compile-time type analysis
                     Expr::TypeLiteral(type_name, None, _) => {
+                        // The checker's type of the operand answers a check
+                        // against a primitive type outright, whatever else
+                        // the operand is (a list, an enum, a pack).
+                        if let Some(is_match) =
+                            self.static_primitive_type_is(&type_args[0], type_name)
+                        {
+                            func.push(IrInst::ConstBool(result, is_match));
+                            return Ok(result);
+                        }
                         if let Expr::Ident(name, _) = &type_args[0] {
                             let tracked_match = if self.int_vars.contains(name) {
                                 Some(matches!(type_name.as_str(), "Int" | "Num"))
@@ -3389,8 +3690,7 @@ impl Lowering {
                             } else {
                                 // Runtime check via taida_typeis_named
                                 let val_var = self.lower_expr(func, &type_args[0])?;
-                                let type_str = func.alloc_var();
-                                func.push(IrInst::ConstStr(type_str, type_name.to_string()));
+                                let type_str = self.emit_type_name_tag(func, type_name);
                                 func.push(IrInst::Call(
                                     result,
                                     "taida_typeis_named".to_string(),
@@ -3672,7 +3972,7 @@ impl Lowering {
                         bind_order.push(field_name.to_string());
                     }
                     let alias = format!(
-                        "__taida_mold_bind_{}_{}_{}",
+                        "{HIDDEN}mold_bind_{}_{}_{}",
                         bind_nonce, type_name, field_name
                     );
                     func.push(IrInst::DefVar(alias.clone(), value_var));
@@ -3761,12 +4061,56 @@ impl Lowering {
                     }
                 }
 
+                // The reference's layout: `filling`, the declared fields, the
+                // extra named fields, `__value`, `__unmold`, `__type`, each
+                // slot recording its value's kind.
+                let annotation_tag = |this: &Self, field: &crate::parser::FieldDef| {
+                    field
+                        .type_annotation
+                        .as_ref()
+                        .map(|ann| this.type_expr_to_tag(ann))
+                        .unwrap_or(-1)
+                };
+                let mut field_tags = std::collections::HashMap::<String, i64>::new();
+                if let Some(arg) = type_args.first() {
+                    field_tags.insert("filling".to_string(), self.expr_type_tag(arg));
+                }
+                for (idx, field_def) in required_fields.iter().enumerate() {
+                    let tag = match type_args.get(idx + 1) {
+                        Some(arg) => self.expr_type_tag(arg),
+                        None => annotation_tag(self, field_def),
+                    };
+                    field_tags.insert(field_def.name.clone(), tag);
+                }
+                for field_def in &optional_fields {
+                    let tag = match fields.iter().rev().find(|f| f.name == field_def.name) {
+                        Some(given) => self.expr_type_tag(&given.value),
+                        None => annotation_tag(self, field_def),
+                    };
+                    field_tags.insert(field_def.name.clone(), tag);
+                }
+                for field in fields {
+                    field_tags
+                        .entry(field.name.clone())
+                        .or_insert_with(|| self.expr_type_tag(&field.value));
+                }
+
                 let mut materialized_fields = Vec::<(String, IrVar)>::new();
-                let type_var = func.alloc_var();
-                func.push(IrInst::ConstStr(type_var, type_name.to_string()));
-                materialized_fields.push(("__type".to_string(), type_var));
-                materialized_fields.push(("__value".to_string(), filling_var));
                 materialized_fields.push(("filling".to_string(), filling_var));
+                for field_def in non_method_fields.iter().filter(|f| f.name != "filling") {
+                    if let Some(v) = bound_vars.get(&field_def.name).copied() {
+                        materialized_fields.push((field_def.name.clone(), v));
+                    }
+                }
+                for name in &extra_named {
+                    if let Some(v) = bound_vars.get(name).copied() {
+                        materialized_fields.push((name.clone(), v));
+                    }
+                }
+                materialized_fields.push(("__value".to_string(), filling_var));
+                if let Some(tag) = field_tags.get("filling").copied() {
+                    field_tags.insert("__value".to_string(), tag);
+                }
 
                 // F62B-034: a custom `unmold` hook compiles into a closure
                 // captured over the instance's field values and rides the
@@ -3782,7 +4126,7 @@ impl Lowering {
                 {
                     let data_names: Vec<String> = bind_order.clone();
                     let capture_prefix =
-                        format!("__moldinst_{}_{}_", type_name, self.lambda_counter);
+                        format!("{HIDDEN}moldinst_{}_{}_", type_name, self.lambda_counter);
                     let capture_names: Vec<String> = data_names
                         .iter()
                         .map(|n| format!("{capture_prefix}{n}"))
@@ -3803,24 +4147,56 @@ impl Lowering {
                         &data_names,
                     )?;
                     materialized_fields.push(("__unmold".to_string(), closure_var));
+                    field_tags.insert("__unmold".to_string(), crate::codegen::tag_prop::TAG_CLOSURE);
+                    let name_var = func.alloc_var();
+                    func.push(IrInst::ConstStr(name_var, "__unmold".to_string()));
+                    let closure_fn = func.alloc_var();
+                    func.push(IrInst::Call(
+                        closure_fn,
+                        "taida_closure_get_fn".to_string(),
+                        vec![closure_var],
+                    ));
+                    let dummy = func.alloc_var();
+                    func.push(IrInst::Call(
+                        dummy,
+                        "taida_register_fn_name".to_string(),
+                        vec![closure_fn, name_var],
+                    ));
                 }
-
-                for field_def in non_method_fields.iter().filter(|f| f.name != "filling") {
-                    if let Some(v) = bound_vars.get(&field_def.name).copied() {
-                        materialized_fields.push((field_def.name.clone(), v));
-                    }
+                // The mold's other methods ride the instance as closures over
+                // its fields, as a class-like type's do.
+                let method_defs: Vec<(String, crate::parser::FuncDef)> = mold_def
+                    .fields
+                    .iter()
+                    .filter(|f| f.is_method && f.name != "unmold")
+                    .filter_map(|f| f.method_def.clone().map(|m| (f.name.clone(), m)))
+                    .collect();
+                let data: Vec<(String, IrVar)> = bind_order
+                    .iter()
+                    .filter_map(|n| bound_vars.get(n).map(|v| (n.clone(), *v)))
+                    .collect();
+                let method_closures =
+                    self.lower_method_closures(func, type_name, "moldinst", &method_defs, &data)?;
+                for (method_name, closure_var) in method_closures {
+                    field_tags.insert(method_name.clone(), crate::codegen::tag_prop::TAG_CLOSURE);
+                    materialized_fields.push((method_name, closure_var));
                 }
-                for name in extra_named {
-                    if let Some(v) = bound_vars.get(&name).copied() {
-                        materialized_fields.push((name, v));
-                    }
-                }
+                let type_var = func.alloc_var();
+                func.push(IrInst::ConstStr(type_var, type_name.to_string()));
+                materialized_fields.push(("__type".to_string(), type_var));
+                field_tags.insert("__type".to_string(), crate::codegen::tag_prop::TAG_STR);
 
                 let pack_var = func.alloc_var();
                 func.push(IrInst::PackNew(pack_var, materialized_fields.len()));
                 for (i, (field_name, field_val)) in materialized_fields.iter().enumerate() {
                     self.emit_pack_field_hash(func, pack_var, i, field_name);
                     func.push(IrInst::PackSet(pack_var, i, *field_val));
+                    let tag = field_tags.get(field_name).copied().unwrap_or(-1);
+                    if tag > 0 {
+                        func.push(IrInst::PackSetTag(pack_var, i, tag));
+                        // retain-on-store
+                        self.emit_retain_if_heap_tag(func, *field_val, tag);
+                    }
                 }
 
                 if let Some(helper_symbol) = self.mold_solidify_funcs.get(type_name).cloned() {

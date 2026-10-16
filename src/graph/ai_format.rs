@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use super::escape_json;
+use super::walk::{self, Node};
 use crate::parser::*;
 
 /// Top-level AI-oriented graph representation.
@@ -18,6 +19,10 @@ struct AiGraph {
     main_flow: Vec<String>,
     imports: Vec<AiImport>,
     exports: Vec<String>,
+    /// Local imports whose module could not be found, read or parsed while
+    /// following imports (`--recursive`); `None` when imports are not
+    /// followed.
+    unresolved_imports: Option<Vec<String>>,
 }
 
 struct AiType {
@@ -66,7 +71,11 @@ const MAX_RECURSION_DEPTH: usize = 256;
 
 pub fn format_ai_json_recursive(entry_path: &str) -> Result<String, String> {
     let entry = Path::new(entry_path);
-    let entry_dir = entry.parent().unwrap_or_else(|| Path::new("."));
+    // A bare file name has an empty parent; it lives in the current directory.
+    let entry_dir = match entry.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
 
     // Canonicalize entry_dir once to avoid repeated filesystem stat calls.
     let entry_dir_canon =
@@ -121,16 +130,22 @@ fn collect_modules_recursive(
         return; // prevent stack overflow on pathological import chains
     }
 
-    let ai = extract_ai_graph(program, display_path);
+    let mut ai = extract_ai_graph(program, display_path);
 
     // Collect local import paths before we move `ai` into `modules`.
     let local_imports: Vec<String> = ai
         .imports
         .iter()
-        .filter(|imp| imp.path.starts_with("./") || imp.path.starts_with("../"))
+        .filter(|imp| {
+            imp.path.starts_with("./") || imp.path.starts_with("../") || imp.path.starts_with('/')
+        })
         .map(|imp| imp.path.clone())
         .collect();
 
+    // Imports that lead nowhere are listed on the module, not dropped.
+    let mut unresolved = Vec::new();
+    ai.unresolved_imports = Some(Vec::new());
+    let module_index = modules.len();
     modules.push(ai);
 
     // Recurse into local imports
@@ -143,9 +158,13 @@ fn collect_modules_recursive(
                 if resolved.extension().is_none() {
                     match std::fs::canonicalize(resolved.with_extension("td")) {
                         Ok(c) => c,
-                        Err(_) => continue,
+                        Err(_) => {
+                            unresolved.push(imp_path.clone());
+                            continue;
+                        }
                     }
                 } else {
+                    unresolved.push(imp_path.clone());
                     continue;
                 }
             }
@@ -154,12 +173,20 @@ fn collect_modules_recursive(
             continue; // already visited (circular import)
         }
 
+        // A module that cannot be read or parsed is left unvisited, so every
+        // module that imports it lists it as unresolved.
         let source = match std::fs::read_to_string(&canon) {
             Ok(s) => s,
-            Err(_) => continue,
+            Err(_) => {
+                visited.remove(&canon);
+                unresolved.push(imp_path.clone());
+                continue;
+            }
         };
         let (child_program, child_errors) = parse(&source);
         if !child_errors.is_empty() {
+            visited.remove(&canon);
+            unresolved.push(imp_path.clone());
             continue; // parse error — skip
         }
 
@@ -180,6 +207,7 @@ fn collect_modules_recursive(
             depth + 1,
         );
     }
+    modules[module_index].unresolved_imports = Some(unresolved);
 }
 
 /// Produce a display path relative to `base`, prefixed with `./`.
@@ -224,6 +252,10 @@ fn render_recursive_json(entry: &str, modules: &[AiGraph]) -> String {
 }
 
 fn extract_ai_graph(program: &Program, file: &str) -> AiGraph {
+    walk::with_stack_for(program, || extract_ai_graph_here(program, file))
+}
+
+fn extract_ai_graph_here(program: &Program, file: &str) -> AiGraph {
     let mut types = Vec::new();
     let mut functions = Vec::new();
     let mut main_flow = Vec::new();
@@ -234,12 +266,12 @@ fn extract_ai_graph(program: &Program, file: &str) -> AiGraph {
     let func_names: HashSet<String> = program
         .statements
         .iter()
-        .filter_map(|s| {
-            if let Statement::FuncDef(fd) = s {
-                Some(fd.name.clone())
-            } else {
-                None
+        .filter_map(|s| match s {
+            Statement::FuncDef(fd) => Some(fd.name.clone()),
+            Statement::Assignment(a) if a.as_rust_addon_binding().is_some() => {
+                Some(a.target.clone())
             }
+            _ => None,
         })
         .collect();
 
@@ -259,79 +291,95 @@ fn extract_ai_graph(program: &Program, file: &str) -> AiGraph {
                 });
             }
             // (E30 Sub-step 2.1) ClassLikeDef + kind dispatch (旧 TypeDef/MoldDef/InheritanceDef を統合)
-            Statement::ClassLikeDef(cl) => match &cl.kind {
-                crate::parser::ClassLikeKind::BuchiPack => {
-                    types.push(AiType {
-                        name: cl.name.clone(),
-                        kind: "buchi_pack",
-                        parent: None,
-                        fields: cl
-                            .fields
-                            .iter()
-                            .map(|f| (f.name.clone(), type_expr_to_str(&f.type_annotation)))
-                            .collect(),
-                        line: cl.span.line,
-                    });
+            Statement::ClassLikeDef(cl) => {
+                match &cl.kind {
+                    crate::parser::ClassLikeKind::BuchiPack => {
+                        types.push(AiType {
+                            name: cl.name.clone(),
+                            kind: "buchi_pack",
+                            parent: None,
+                            fields: cl
+                                .fields
+                                .iter()
+                                .map(|f| (f.name.clone(), type_expr_to_str(&f.type_annotation)))
+                                .collect(),
+                            line: cl.span.line,
+                        });
+                    }
+                    crate::parser::ClassLikeKind::Mold { .. } => {
+                        types.push(AiType {
+                            name: cl.name.clone(),
+                            kind: "mold",
+                            parent: None,
+                            fields: cl
+                                .fields
+                                .iter()
+                                .filter(|f| !f.is_method)
+                                .map(|f| (f.name.clone(), type_expr_to_str(&f.type_annotation)))
+                                .collect(),
+                            line: cl.span.line,
+                        });
+                    }
+                    crate::parser::ClassLikeKind::Inheritance { parent, .. } => {
+                        let kind = if parent == "Error" {
+                            "error"
+                        } else {
+                            "inheritance"
+                        };
+                        types.push(AiType {
+                            name: cl.name.clone(),
+                            kind,
+                            parent: Some(parent.clone()),
+                            fields: cl
+                                .fields
+                                .iter()
+                                .map(|f| (f.name.clone(), type_expr_to_str(&f.type_annotation)))
+                                .collect(),
+                            line: cl.span.line,
+                        });
+                    }
+                    crate::parser::ClassLikeKind::Alias { target } => {
+                        types.push(AiType {
+                            name: cl.name.clone(),
+                            kind: "type_alias",
+                            parent: None,
+                            fields: vec![(
+                                "=".to_string(),
+                                type_expr_to_str(&Some(target.clone())),
+                            )],
+                            line: cl.span.line,
+                        });
+                    }
                 }
-                crate::parser::ClassLikeKind::Mold { .. } => {
-                    types.push(AiType {
-                        name: cl.name.clone(),
-                        kind: "mold",
-                        parent: None,
-                        fields: cl
-                            .fields
-                            .iter()
-                            .filter(|f| !f.is_method)
-                            .map(|f| (f.name.clone(), type_expr_to_str(&f.type_annotation)))
-                            .collect(),
-                        line: cl.span.line,
-                    });
-                }
-                crate::parser::ClassLikeKind::Inheritance { parent, .. } => {
-                    let kind = if parent == "Error" {
-                        "error"
-                    } else {
-                        "inheritance"
+
+                // A method is listed as a function of its own, named
+                // `Type.method`, so what it calls and throws is reported.
+                for field in &cl.fields {
+                    let Some(method) = &field.method_def else {
+                        continue;
                     };
-                    types.push(AiType {
-                        name: cl.name.clone(),
-                        kind,
-                        parent: Some(parent.clone()),
-                        fields: cl
-                            .fields
+                    let facts = collect_body_facts(&method.params, &method.body, &func_names);
+                    functions.push(AiFunction {
+                        name: format!("{}.{}", cl.name, method.name),
+                        params: method
+                            .params
                             .iter()
-                            .map(|f| (f.name.clone(), type_expr_to_str(&f.type_annotation)))
+                            .map(|p| (p.name.clone(), type_expr_to_str(&p.type_annotation)))
                             .collect(),
-                        line: cl.span.line,
+                        returns: type_expr_to_str(&method.return_type),
+                        body_summary: summarize_body(&method.body),
+                        calls: facts.calls,
+                        throws: facts.throws,
+                        has_error_ceiling: facts.has_error_ceiling,
+                        is_recursive: false,
+                        line: method.span.line,
                     });
                 }
-                crate::parser::ClassLikeKind::Alias { target } => {
-                    types.push(AiType {
-                        name: cl.name.clone(),
-                        kind: "type_alias",
-                        parent: None,
-                        fields: vec![("=".to_string(), type_expr_to_str(&Some(target.clone())))],
-                        line: cl.span.line,
-                    });
-                }
-            },
+            }
 
             Statement::FuncDef(fd) => {
-                let mut calls = Vec::new();
-                let mut throws = false;
-                let mut has_error_ceiling = false;
-                collect_calls_and_throws(
-                    &fd.body,
-                    &func_names,
-                    &mut calls,
-                    &mut throws,
-                    &mut has_error_ceiling,
-                );
-                let is_recursive = calls.contains(&fd.name);
-
-                // Deduplicate calls
-                let mut seen = HashSet::new();
-                calls.retain(|c| seen.insert(c.clone()));
+                let facts = collect_body_facts(&fd.params, &fd.body, &func_names);
+                let is_recursive = facts.calls.contains(&fd.name);
 
                 functions.push(AiFunction {
                     name: fd.name.clone(),
@@ -342,9 +390,9 @@ fn extract_ai_graph(program: &Program, file: &str) -> AiGraph {
                         .collect(),
                     returns: type_expr_to_str(&fd.return_type),
                     body_summary: summarize_body(&fd.body),
-                    calls,
-                    throws,
-                    has_error_ceiling,
+                    calls: facts.calls,
+                    throws: facts.throws,
+                    has_error_ceiling: facts.has_error_ceiling,
                     is_recursive,
                     line: fd.span.line,
                 });
@@ -404,6 +452,7 @@ fn extract_ai_graph(program: &Program, file: &str) -> AiGraph {
         main_flow,
         imports,
         exports,
+        unresolved_imports: None,
     }
 }
 
@@ -445,118 +494,177 @@ fn format_type_expr(te: &TypeExpr) -> String {
 
 // ── Call / throw collection ────────────────────────────
 
-fn collect_calls_and_throws(
-    stmts: &[Statement],
-    func_names: &HashSet<String>,
-    calls: &mut Vec<String>,
-    throws: &mut bool,
-    has_error_ceiling: &mut bool,
-) {
-    for stmt in stmts {
-        match stmt {
-            Statement::Expr(expr) => {
-                collect_from_expr(expr, func_names, calls, throws, has_error_ceiling);
-            }
-            Statement::Assignment(assign) => {
-                collect_from_expr(&assign.value, func_names, calls, throws, has_error_ceiling);
-            }
-            Statement::UnmoldForward(uf) => {
-                collect_from_expr(&uf.source, func_names, calls, throws, has_error_ceiling);
-            }
-            Statement::UnmoldBackward(ub) => {
-                collect_from_expr(&ub.source, func_names, calls, throws, has_error_ceiling);
-            }
-            Statement::ErrorCeiling(ec) => {
-                *has_error_ceiling = true;
-                collect_calls_and_throws(
-                    &ec.handler_body,
-                    func_names,
-                    calls,
-                    throws,
-                    has_error_ceiling,
-                );
-            }
-            _ => {}
-        }
-    }
+/// What a function body does, as the graph output reports it.
+#[derive(Default)]
+struct BodyFacts {
+    /// Functions the body calls or names as a value, in first-use order.
+    calls: Vec<String>,
+    throws: bool,
+    has_error_ceiling: bool,
 }
 
-fn collect_from_expr(
-    expr: &Expr,
-    func_names: &HashSet<String>,
-    calls: &mut Vec<String>,
-    throws: &mut bool,
-    has_error_ceiling: &mut bool,
-) {
-    match expr {
-        Expr::FuncCall(callee, args, _) => {
-            if let Expr::Ident(name, _) = callee.as_ref()
-                && func_names.contains(name)
-            {
-                calls.push(name.clone());
+/// Collect the calls, throws and error ceilings of a function or method body.
+///
+/// `known` holds the functions callable by name at the top level. Functions
+/// nested in the body are callable from it too, and whatever they do counts
+/// for the function they are written in. A name the body binds (a parameter,
+/// an earlier binding, a lambda parameter) is that value, not a function of
+/// the same name.
+fn collect_body_facts(params: &[Param], body: &[Statement], known: &HashSet<String>) -> BodyFacts {
+    let mut nested = HashSet::new();
+    for stmt in body {
+        walk::for_each_nested_stmt(stmt, &mut |inner| {
+            if let Statement::FuncDef(fd) = inner {
+                nested.insert(fd.name.clone());
             }
-            // Recurse into callee (for chained calls)
-            collect_from_expr(callee, func_names, calls, throws, has_error_ceiling);
-            for arg in args {
-                collect_from_expr(arg, func_names, calls, throws, has_error_ceiling);
-            }
-        }
-        Expr::MethodCall(obj, _method, args, _) => {
-            collect_from_expr(obj, func_names, calls, throws, has_error_ceiling);
-            for arg in args {
-                collect_from_expr(arg, func_names, calls, throws, has_error_ceiling);
-            }
-        }
-        Expr::Throw(inner, _) => {
-            *throws = true;
-            collect_from_expr(inner, func_names, calls, throws, has_error_ceiling);
-        }
-        Expr::BinaryOp(lhs, _, rhs, _) => {
-            collect_from_expr(lhs, func_names, calls, throws, has_error_ceiling);
-            collect_from_expr(rhs, func_names, calls, throws, has_error_ceiling);
-        }
-        Expr::UnaryOp(_, inner, _) => {
-            collect_from_expr(inner, func_names, calls, throws, has_error_ceiling);
-        }
-        Expr::Pipeline(exprs, _) => {
-            for e in exprs {
-                collect_from_expr(e, func_names, calls, throws, has_error_ceiling);
-            }
-        }
-        Expr::CondBranch(arms, _) => {
-            for arm in arms {
-                if let Some(cond) = &arm.condition {
-                    collect_from_expr(cond, func_names, calls, throws, has_error_ceiling);
+        });
+    }
+    let mut collector = FactsCollector {
+        top_level: known,
+        nested,
+        bindings: walk::Bindings::default(),
+        facts: BodyFacts::default(),
+    };
+    collector.bindings.bind_params(params);
+    for stmt in body {
+        collector.stmt(stmt);
+    }
+    let mut facts = collector.facts;
+    let mut seen = HashSet::new();
+    facts.calls.retain(|c| seen.insert(c.clone()));
+    facts
+}
+
+struct FactsCollector<'a> {
+    /// The functions callable by name at the top level.
+    top_level: &'a HashSet<String>,
+    /// The functions nested in the body.
+    nested: HashSet<String>,
+    /// The names bound at the point being walked.
+    bindings: walk::Bindings,
+    facts: BodyFacts,
+}
+
+impl FactsCollector<'_> {
+    fn is_known(&self, name: &str) -> bool {
+        !self.bindings.is_bound(name)
+            && (self.top_level.contains(name) || self.nested.contains(name))
+    }
+
+    fn stmt(&mut self, stmt: &Statement) {
+        match stmt {
+            Statement::ErrorCeiling(ceiling) => {
+                self.facts.has_error_ceiling = true;
+                let mark = self.bindings.mark();
+                self.bindings.bind(&ceiling.error_param);
+                for handler_stmt in &ceiling.handler_body {
+                    self.stmt(handler_stmt);
                 }
-                for body_stmt in &arm.body {
-                    collect_calls_and_throws(
-                        std::slice::from_ref(body_stmt),
-                        func_names,
-                        calls,
-                        throws,
-                        has_error_ceiling,
-                    );
+                self.bindings.release(mark);
+            }
+            // The value is read before the name is bound.
+            Statement::Assignment(assign) => {
+                self.expr(&assign.value);
+                self.bindings.bind(&assign.target);
+            }
+            Statement::UnmoldForward(unmold) => {
+                self.expr(&unmold.source);
+                self.bindings.bind(&unmold.target);
+            }
+            Statement::UnmoldBackward(unmold) => {
+                self.expr(&unmold.source);
+                self.bindings.bind(&unmold.target);
+            }
+            Statement::FuncDef(fd) => {
+                let mark = self.bindings.mark();
+                self.bindings.bind_params(&fd.params);
+                walk::for_each_child_of_func(fd, &mut |child| self.node(child));
+                self.bindings.release(mark);
+            }
+            // A type defined in the body: its methods bind their own
+            // parameters and locals.
+            Statement::ClassLikeDef(def) => {
+                for field in &def.fields {
+                    if let Some(default) = &field.default_value {
+                        self.expr(default);
+                    }
+                    if let Some(method) = &field.method_def {
+                        let mark = self.bindings.mark();
+                        self.bindings.bind_params(&method.params);
+                        walk::for_each_child_of_func(method, &mut |child| self.node(child));
+                        self.bindings.release(mark);
+                    }
                 }
             }
+            _ => walk::for_each_child_of_stmt(stmt, &mut |child| self.node(child)),
         }
-        Expr::Lambda(_, body, _) => {
-            collect_from_expr(body, func_names, calls, throws, has_error_ceiling);
+    }
+
+    fn node(&mut self, child: Node<'_>) {
+        match child {
+            Node::Stmt(stmt) => self.stmt(stmt),
+            Node::Expr(expr) => self.expr(expr),
         }
-        Expr::MoldInst(_, args, fields, _) => {
-            for arg in args {
-                collect_from_expr(arg, func_names, calls, throws, has_error_ceiling);
+    }
+
+    fn expr(&mut self, expr: &Expr) {
+        match expr {
+            Expr::FuncCall(callee, args, _) => {
+                match callee.as_ref() {
+                    Expr::Ident(name, _) => {
+                        if self.is_known(name) {
+                            self.facts.calls.push(name.clone());
+                        }
+                    }
+                    other => self.expr(other),
+                }
+                for arg in args {
+                    self.expr(arg);
+                }
             }
-            for field in fields {
-                collect_from_expr(&field.value, func_names, calls, throws, has_error_ceiling);
+            // A function named as a value (`Map[xs, inc]()`) is used by the body.
+            Expr::Ident(name, _) => {
+                if self.is_known(name) {
+                    self.facts.calls.push(name.clone());
+                }
             }
+            Expr::Throw(inner, _) => {
+                self.facts.throws = true;
+                self.expr(inner);
+            }
+            Expr::Lambda(params, body, _) => {
+                let mark = self.bindings.mark();
+                self.bindings.bind_params(params);
+                for param in params {
+                    if let Some(default) = &param.default_value {
+                        self.expr(default);
+                    }
+                }
+                self.expr(body);
+                self.bindings.release(mark);
+            }
+            // What a block or an arm binds is not visible after it.
+            Expr::Block(stmts, _) => {
+                let mark = self.bindings.mark();
+                for stmt in stmts {
+                    self.stmt(stmt);
+                }
+                self.bindings.release(mark);
+            }
+            Expr::CondBranch(arms, _) => {
+                for arm in arms {
+                    if let Some(condition) = &arm.condition {
+                        self.expr(condition);
+                    }
+                    let mark = self.bindings.mark();
+                    for stmt in &arm.body {
+                        self.stmt(stmt);
+                    }
+                    self.bindings.release(mark);
+                }
+            }
+            _ => walk::for_each_child_of_expr(expr, &mut |child| self.node(child)),
         }
-        Expr::Unmold(inner, _) => {
-            collect_from_expr(inner, func_names, calls, throws, has_error_ceiling);
-        }
-        Expr::FieldAccess(inner, _, _) => {
-            collect_from_expr(inner, func_names, calls, throws, has_error_ceiling);
-        }
-        _ => {}
     }
 }
 
@@ -580,9 +688,7 @@ fn summarize_body(stmts: &[Statement]) -> String {
 
 fn summarize_stmt(stmt: &Statement) -> String {
     match stmt {
-        Statement::Assignment(assign) => {
-            format!("{} <= {}", assign.target, summarize_expr(&assign.value))
-        }
+        Statement::Assignment(assign) => summarize_assignment(assign),
         Statement::Expr(expr) => summarize_expr(expr),
         Statement::UnmoldForward(uf) => {
             format!("{} >=> {}", summarize_expr(&uf.source), uf.target)
@@ -618,6 +724,23 @@ fn summarize_stmt(stmt: &Statement) -> String {
     }
 }
 
+/// Render a binding with the arrow it was written with: `expr => name` and
+/// `name <= expr` never mix in one statement. A pipeline value is stored
+/// data-first for both forms, so the `<=` chain (`name <= f(_) <= data`) is
+/// rendered with its stages reversed.
+fn summarize_assignment(assign: &Assignment) -> String {
+    if assign.forward {
+        return format!("{} => {}", summarize_expr(&assign.value), assign.target);
+    }
+    match &assign.value {
+        Expr::Pipeline(stages, _) => {
+            let parts: Vec<String> = stages.iter().rev().map(summarize_expr).collect();
+            format!("{} <= {}", assign.target, parts.join(" <= "))
+        }
+        other => format!("{} <= {}", assign.target, summarize_expr(other)),
+    }
+}
+
 fn summarize_expr(expr: &Expr) -> String {
     match expr {
         Expr::IntLit(n, _) => n.to_string(),
@@ -635,8 +758,11 @@ fn summarize_expr(expr: &Expr) -> String {
         Expr::Hole(_) => "_hole".to_string(),
 
         Expr::BuchiPack(fields, _) => {
-            let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
-            format!("@({})", names.join(", "))
+            let entries: Vec<String> = fields
+                .iter()
+                .map(|f| format!("{} <= {}", f.name, summarize_expr(&f.value)))
+                .collect();
+            format!("@({})", entries.join(", "))
         }
         Expr::ListLit(items, _) => {
             if items.len() <= 3 {
@@ -808,6 +934,11 @@ fn render_module_body(out: &mut String, ai: &AiGraph, indent: usize) {
 
     out.push_str(&format!("{}\"exports\": ", prefix));
     render_string_array(out, &ai.exports, indent);
+    if let Some(unresolved) = &ai.unresolved_imports {
+        out.push_str(",\n");
+        out.push_str(&format!("{}\"unresolved_imports\": ", prefix));
+        render_string_array(out, unresolved, indent);
+    }
     out.push('\n');
 }
 

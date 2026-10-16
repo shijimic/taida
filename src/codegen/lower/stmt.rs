@@ -5,7 +5,7 @@
 // placement table). All methods keep their
 // original signatures, bodies, and privacy; only the enclosing file changes.
 
-use super::{ImportedSymbolKind, LowerError, Lowering, simple_hash};
+use super::{HIDDEN, ImportedSymbolKind, LowerError, Lowering, simple_hash};
 use crate::codegen::ir::*;
 use crate::net_surface::NET_HTTP_PROTOCOL_SYMBOL;
 use crate::parser::*;
@@ -44,8 +44,36 @@ impl Lowering {
         let mut module = IrModule::new();
         module.module_key = Some(self.current_module_key().to_string());
 
-        // 1st pass: 関数定義、型定義、エクスポート/インポートを収集
+        // The types this module declares: their instances carry the
+        // declaration's tag (see `emit_type_name_tag`).
         for stmt in &program.statements {
+            if let Statement::ClassLikeDef(cl) = stmt
+                && matches!(
+                    cl.kind,
+                    crate::parser::ClassLikeKind::BuchiPack
+                        | crate::parser::ClassLikeKind::Inheritance { .. }
+                )
+            {
+                let key = format!("{}:{}", self.current_module_key(), cl.name);
+                self.type_decl_keys.insert(cl.name.clone(), key);
+            }
+        }
+
+        // 1st pass: 関数定義、型定義、エクスポート/インポートを収集
+        // An import's inits and value bindings are recorded once the next
+        // statement starts (an arm below may `continue`).
+        let mut pending_import_site: Option<(usize, usize, usize)> = None;
+        for stmt in &program.statements {
+            if let Some(site) = pending_import_site.take() {
+                self.record_import_site(site);
+            }
+            if let Statement::Import(import_stmt) = stmt {
+                pending_import_site = Some((
+                    Self::import_site_key(import_stmt),
+                    self.module_inits_needed.len(),
+                    self.imported_value_symbols.len(),
+                ));
+            }
             match stmt {
                 Statement::FuncDef(func_def) => {
                     self.user_funcs.insert(func_def.name.clone());
@@ -484,6 +512,10 @@ impl Lowering {
                         };
 
                         if let Some(rt_name) = runtime_name {
+                            if rt_name == "__os_mold__" && alias != *orig_name {
+                                self.core_mold_aliases
+                                    .insert(alias.clone(), orig_name.clone());
+                            }
                             self.stdlib_runtime_funcs.insert(alias, rt_name.to_string());
                         } else if path == "taida-lang/net" && orig_name == NET_HTTP_PROTOCOL_SYMBOL
                         {
@@ -536,6 +568,17 @@ impl Lowering {
                                     self.register_imported_typedef(
                                         path, orig_name, &alias, version,
                                     );
+                                    // A type whose methods or field defaults
+                                    // read names is built by its module.
+                                    if self.type_needs_ctor(&alias) {
+                                        let ctor = Self::type_ctor_symbol(&module_key, orig_name);
+                                        self.imported_type_ctors
+                                            .insert(alias.clone(), ctor.clone());
+                                        import_link_symbols.push(ctor);
+                                        if !self.module_inits_needed.contains(&init_symbol) {
+                                            self.module_inits_needed.push(init_symbol);
+                                        }
+                                    }
                                 }
                                 ImportedSymbolKind::Function => {
                                     // 通常の関数 export
@@ -544,6 +587,19 @@ impl Lowering {
                                     self.user_funcs.insert(alias.clone());
                                     self.imported_func_links
                                         .insert(alias.clone(), link_name.clone());
+                                    // A call that omits trailing arguments goes
+                                    // through the exporting module's default
+                                    // entries, which evaluate the defaults in
+                                    // that module.
+                                    if let Some(params) =
+                                        self.imported_function_params(path, orig_name, version)
+                                    {
+                                        for argc in Self::default_arity_range(&params) {
+                                            import_link_symbols
+                                                .push(Self::default_arity_symbol(&link_name, argc));
+                                        }
+                                        self.func_param_defs.insert(alias.clone(), params);
+                                    }
                                     import_link_symbols.push(link_name);
                                     // 関数 import がある場合も init 関数を呼ぶ必要がある
                                     // （関数が参照する private value の初期化のため）
@@ -566,6 +622,9 @@ impl Lowering {
                 }
                 _ => {}
             }
+        }
+        if let Some(site) = pending_import_site.take() {
+            self.record_import_site(site);
         }
 
         self.register_mold_solidify_helpers()?;
@@ -708,7 +767,72 @@ impl Lowering {
         for stmt in &program.statements {
             if let Statement::FuncDef(func_def) = stmt {
                 let ir_func = self.lower_func_def(func_def)?;
+                let target = ir_func.name.clone();
                 module.functions.push(ir_func);
+                let exported = module.exports.contains(&target);
+                for entry in self.lower_default_arity_entries(func_def, &target)? {
+                    if exported {
+                        module.exports.push(entry.name.clone());
+                    }
+                    module.functions.push(entry);
+                }
+            }
+        }
+
+        // Re-exports: a function this module imports and exports again is
+        // reached through this module's export symbol, which forwards to the
+        // defining module (with its default entries).
+        let local_funcs: std::collections::HashSet<&str> = program
+            .statements
+            .iter()
+            .filter_map(|stmt| match stmt {
+                Statement::FuncDef(fd) => Some(fd.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        let mut reexported: Vec<String> = self
+            .exported_symbols
+            .iter()
+            .filter(|sym| !local_funcs.contains(sym.as_str()))
+            .filter(|sym| self.imported_func_links.contains_key(sym.as_str()))
+            // Only functions: the parameters were found in the defining module.
+            .filter(|sym| self.func_param_defs.contains_key(sym.as_str()))
+            .cloned()
+            .collect();
+        reexported.sort();
+        for sym in reexported {
+            let link = self.imported_func_links[&sym].clone();
+            let export = self.export_func_symbol(&sym);
+            if export == link {
+                continue;
+            }
+            let params = self.func_param_defs.get(&sym).cloned().unwrap_or_default();
+            let mut argcs: Vec<usize> = Self::default_arity_range(&params).collect();
+            argcs.push(params.len());
+            for argc in argcs {
+                let (name, target) = if argc == params.len() {
+                    (export.clone(), link.clone())
+                } else {
+                    (
+                        Self::default_arity_symbol(&export, argc),
+                        Self::default_arity_symbol(&link, argc),
+                    )
+                };
+                let arg_names: Vec<String> = (0..argc).map(|i| format!("__arg_{i}")).collect();
+                let mut forward = IrFunction::new_with_params(name.clone(), arg_names.clone());
+                let mut args = Vec::with_capacity(argc);
+                for arg in &arg_names {
+                    let v = forward.alloc_var();
+                    forward.push(IrInst::UseVar(v, arg.clone()));
+                    args.push(v);
+                }
+                let result = forward.alloc_var();
+                forward.push(IrInst::CallUser(result, target, args));
+                forward.push(IrInst::Return(result));
+                if !module.exports.contains(&name) {
+                    module.exports.push(name);
+                }
+                module.functions.push(forward);
             }
         }
 
@@ -739,13 +863,33 @@ impl Lowering {
                 self.imported_func_links
                     .insert(func_def.name.clone(), mangled.clone());
             }
-            let ir_func = self.lower_func_def(func_def)?;
-            module.functions.push(ir_func);
+            self.lowering_facade_func = true;
+            let ir_func = self.lower_func_def(func_def);
+            self.lowering_facade_func = false;
+            module.functions.push(ir_func?);
         }
         // Put the harvested list back so post-lowering consumers
         // (e.g. driver.rs diagnostics, potential test harnesses)
         // can still observe what was emitted.
         self.addon_facade_funcs = facade_funcs;
+
+        // An exported type whose methods or field defaults read this
+        // module's names is built here for importers (before the init, so
+        // the values the constructor reads are published).
+        if module.is_library {
+            let mut ctor_types: Vec<String> = self
+                .exported_symbols
+                .iter()
+                .filter(|name| self.type_needs_ctor(name))
+                .cloned()
+                .collect();
+            ctor_types.sort();
+            for type_name in ctor_types {
+                let ctor = self.lower_type_ctor(&type_name)?;
+                module.exports.push(ctor.name.clone());
+                module.functions.push(ctor);
+            }
+        }
 
         // ライブラリモジュールの場合、モジュール単位の init 関数を生成
         if module.is_library {
@@ -757,6 +901,7 @@ impl Lowering {
             self.current_heap_vars.clear();
             let mut main_fn = IrFunction::new("_taida_main".to_string());
 
+            self.emit_type_tag_globals(&mut main_fn);
             self.emit_imported_module_inits(&mut main_fn);
             self.bind_imported_values(&mut main_fn);
 
@@ -779,7 +924,7 @@ impl Lowering {
             // uninitialised global slot and behave as if the
             // binding never existed.
             let facade_bindings = std::mem::take(&mut self.addon_facade_pack_bindings);
-            for (name, expr) in &facade_bindings {
+            for (name, expr) in &self.facade_bindings_in_dependency_order(&facade_bindings) {
                 let val = self.lower_expr(&mut main_fn, expr)?;
                 main_fn.push(IrInst::DefVar(name.clone(), val));
                 let hash = self.global_var_hash(name);
@@ -882,7 +1027,128 @@ impl Lowering {
         Ok(module)
     }
 
+    /// IR symbol of the entry that calls `target` with its first `argc`
+    /// arguments given and the rest filled from their declared defaults.
+    pub(super) fn default_arity_symbol(target: &str, argc: usize) -> String {
+        format!("{target}__argc{argc}")
+    }
+
+    /// The argument counts a call may omit trailing parameters down to: from
+    /// the first parameter that declares a default up to one short of all.
+    pub(super) fn default_arity_range(params: &[crate::parser::Param]) -> std::ops::Range<usize> {
+        match params.iter().position(|p| p.default_value.is_some()) {
+            Some(first) => first..params.len(),
+            None => 0..0,
+        }
+    }
+
+    /// Entries for the calls that omit trailing parameters of `func_def`
+    /// (see [`Self::default_arity_symbol`]). Each evaluates the omitted
+    /// parameters' defaults in the defining function's own scope — earlier
+    /// parameters and the module's top-level values — and calls `target`
+    /// with every argument, so a call from another scope or another module
+    /// gets the same defaults.
+    pub(super) fn lower_default_arity_entries(
+        &mut self,
+        func_def: &FuncDef,
+        target: &str,
+    ) -> Result<Vec<IrFunction>, LowerError> {
+        let mut entries = Vec::new();
+        for argc in Self::default_arity_range(&func_def.params) {
+            let given: Vec<String> = func_def.params[..argc]
+                .iter()
+                .map(|p| p.name.clone())
+                .collect();
+            let mut entry = IrFunction::new_with_params(
+                Self::default_arity_symbol(target, argc),
+                given.clone(),
+            );
+            let saved_heap_vars = std::mem::take(&mut self.current_heap_vars);
+            let default_stmts: Vec<Statement> = func_def.params[argc..]
+                .iter()
+                .filter_map(|p| p.default_value.clone().map(Statement::Expr))
+                .collect();
+            let all_param_names: Vec<String> =
+                func_def.params.iter().map(|p| p.name.clone()).collect();
+            for var_name in self.collect_free_vars_in_body(&default_stmts, &all_param_names) {
+                self.globals_referenced.insert(var_name.clone());
+                let hash = self.global_var_hash(&var_name);
+                let dst = entry.alloc_var();
+                entry.push(IrInst::GlobalGet(dst, hash));
+                entry.push(IrInst::DefVar(var_name, dst));
+            }
+            let mut args = Vec::with_capacity(func_def.params.len());
+            for name in &given {
+                let v = entry.alloc_var();
+                entry.push(IrInst::UseVar(v, name.clone()));
+                args.push(v);
+            }
+            for param in &func_def.params[argc..] {
+                let value = if let Some(default_expr) = &param.default_value {
+                    let v = self.lower_expr(&mut entry, default_expr)?;
+                    self.coerce_to_declared(
+                        &mut entry,
+                        param.type_annotation.as_ref(),
+                        default_expr,
+                        v,
+                    )
+                } else if let Some(type_expr) = &param.type_annotation {
+                    let mut visiting = std::collections::HashSet::new();
+                    self.lower_default_for_type_expr(&mut entry, type_expr, &mut visiting)?
+                } else {
+                    let zero = entry.alloc_var();
+                    entry.push(IrInst::ConstInt(zero, 0));
+                    zero
+                };
+                entry.push(IrInst::DefVar(param.name.clone(), value));
+                args.push(value);
+            }
+            self.current_heap_vars = saved_heap_vars;
+            let result = entry.alloc_var();
+            entry.push(IrInst::CallUser(result, target.to_string(), args));
+            let tag = entry.alloc_var();
+            entry.push(IrInst::Call(
+                tag,
+                "taida_get_return_tag".to_string(),
+                vec![],
+            ));
+            let dummy = entry.alloc_var();
+            entry.push(IrInst::Call(
+                dummy,
+                "taida_set_return_tag".to_string(),
+                vec![tag],
+            ));
+            entry.push(IrInst::Return(result));
+            entries.push(entry);
+        }
+        Ok(entries)
+    }
+
     pub(super) fn lower_func_def(&mut self, func_def: &FuncDef) -> Result<IrFunction, LowerError> {
+        // The function's own local function definitions are visible only
+        // inside its body.
+        self.inner_func_scopes
+            .push(std::collections::HashMap::new());
+        self.local_closure_scopes
+            .push(std::collections::HashMap::new());
+        self.inner_funcs_ahead
+            .push(std::collections::HashSet::new());
+        let prev_closure_self = self.closure_self.take();
+        // A parameter hides an outer name bound to an addon return value.
+        let prev_untyped_addon_vars = self.untyped_addon_vars.clone();
+        for param in &func_def.params {
+            self.untyped_addon_vars.remove(&param.name);
+        }
+        let lowered = self.lower_func_def_in_scope(func_def);
+        self.untyped_addon_vars = prev_untyped_addon_vars;
+        self.closure_self = prev_closure_self;
+        self.inner_funcs_ahead.pop();
+        self.local_closure_scopes.pop();
+        self.inner_func_scopes.pop();
+        lowered
+    }
+
+    fn lower_func_def_in_scope(&mut self, func_def: &FuncDef) -> Result<IrFunction, LowerError> {
         let mut params: Vec<String> = func_def.params.iter().map(|p| p.name.clone()).collect();
         // F62B-021: a schema-passing generic gains hidden string parameters
         // carrying the host-call Out schema descriptors. Call sites with
@@ -891,7 +1157,7 @@ impl Lowering {
         let prev_schema_params = std::mem::take(&mut self.current_schema_params);
         if let Some(needed) = self.generic_schema_params.get(&func_def.name).cloned() {
             for type_param in needed {
-                let hidden = format!("__taida_schema_{type_param}");
+                let hidden = format!("{HIDDEN}schema_{type_param}");
                 params.push(hidden.clone());
                 self.current_schema_params.insert(type_param, hidden);
             }
@@ -914,6 +1180,7 @@ impl Lowering {
         let prev_shadow_kinds = std::mem::take(&mut self.shadow_kind_vars);
         let prev_lambda_vars = self.lambda_vars.clone();
         let prev_closure_vars = self.closure_vars.clone();
+        let prev_function_ref_vars = self.function_ref_vars.clone();
         for p in &func_def.params {
             if Self::NET_BUILTIN_NAMES.contains(&p.name.as_str()) {
                 self.shadowed_net_builtins.insert(p.name.clone());
@@ -925,6 +1192,7 @@ impl Lowering {
             self.lambda_param_counts.remove(&p.name);
             self.lambda_vars.remove(&p.name);
             self.closure_vars.remove(&p.name);
+            self.function_ref_vars.remove(&p.name);
         }
 
         // ヒープ変数トラッカーをリセット
@@ -1048,105 +1316,8 @@ impl Lowering {
 
         // ローカル関数定義の前処理: 関数本体内の FuncDef を先に IR 化して登録する。
         // 内部関数が親スコープの変数を参照する場合はクロージャとして生成する。
-        for stmt in &func_def.body {
-            if let Statement::FuncDef(inner_func_def) = stmt {
-                // 内部関数の自由変数を検出
-                let inner_params: std::collections::HashSet<&str> = inner_func_def
-                    .params
-                    .iter()
-                    .map(|p| p.name.as_str())
-                    .collect();
-                let inner_free_vars = self
-                    .collect_free_vars_in_func_body_unfiltered(&inner_func_def.body, &inner_params);
-                // 親スコープの変数のみをキャプチャ対象とする
-                // （トップレベル変数は GlobalGet で解決されるので除外）
-                let parent_scope_set: std::collections::HashSet<&str> =
-                    parent_scope_vars.iter().map(|s| s.as_str()).collect();
-                let captures: Vec<String> = inner_free_vars
-                    .into_iter()
-                    .filter(|v| parent_scope_set.contains(v.as_str()))
-                    .collect();
-
-                if captures.is_empty() {
-                    // キャプチャなし: 通常のユーザー関数として登録
-                    self.user_funcs.insert(inner_func_def.name.clone());
-                    self.func_param_defs
-                        .insert(inner_func_def.name.clone(), inner_func_def.params.clone());
-                    let inner_ir = self.lower_func_def(inner_func_def)?;
-                    self.lambda_funcs.push(inner_ir);
-                } else {
-                    // キャプチャあり: クロージャとして生成
-                    let lambda_name = self.next_lambda_symbol("lambda");
-
-                    // lambda_vars と closure_vars に登録
-                    self.lambda_vars
-                        .insert(inner_func_def.name.clone(), lambda_name.clone());
-                    self.closure_vars.insert(inner_func_def.name.clone());
-
-                    // __env + 元のパラメータ
-                    let mut closure_params: Vec<String> = vec!["__env".to_string()];
-                    closure_params.extend(inner_func_def.params.iter().map(|p| p.name.clone()));
-                    let mut lambda_fn =
-                        IrFunction::new_with_params(lambda_name.clone(), closure_params);
-                    let parent_heap_vars = std::mem::take(&mut self.current_heap_vars);
-
-                    // 環境からキャプチャ変数を復元
-                    let env_var = 0u32;
-                    for (i, cap_name) in captures.iter().enumerate() {
-                        let get_dst = lambda_fn.alloc_var();
-                        lambda_fn.push(IrInst::PackGet(get_dst, env_var, i));
-                        lambda_fn.push(IrInst::DefVar(cap_name.clone(), get_dst));
-                    }
-
-                    // 内部関数の前処理: クロージャ本体内のネストされた FuncDef を検出し処理する
-                    // (deep nesting: f1 → f2(closure) → f3 → f4 → f5 のパターンに対応)
-                    {
-                        let scope_vars = self.collect_nested_scope_vars(
-                            captures
-                                .iter()
-                                .cloned()
-                                .chain(inner_func_def.params.iter().map(|p| p.name.clone())),
-                            &inner_func_def.body,
-                        );
-                        self.preprocess_inner_funcdefs(&inner_func_def.body, &scope_vars)?;
-                    }
-
-                    // 関数本体を処理
-                    let mut last_var = None;
-                    for (i, inner_stmt) in inner_func_def.body.iter().enumerate() {
-                        let is_last = i == inner_func_def.body.len() - 1;
-                        match inner_stmt {
-                            Statement::Expr(expr) => {
-                                let var = self.lower_expr(&mut lambda_fn, expr)?;
-                                if is_last {
-                                    last_var = Some(var);
-                                }
-                            }
-                            _ => {
-                                self.lower_statement(&mut lambda_fn, inner_stmt)?;
-                            }
-                        }
-                    }
-
-                    if let Some(ret) = last_var {
-                        lambda_fn.push(IrInst::Return(ret));
-                    } else {
-                        let zero = lambda_fn.alloc_var();
-                        lambda_fn.push(IrInst::ConstInt(zero, 0));
-                        lambda_fn.push(IrInst::Return(zero));
-                    }
-
-                    self.user_funcs.insert(lambda_name.clone());
-                    self.lambda_funcs.push(lambda_fn);
-
-                    self.current_heap_vars = parent_heap_vars;
-
-                    // MakeClosure は本体処理時に発行する（下記 lower_statement で処理）
-                    self.pending_local_closures
-                        .insert(inner_func_def.name.clone(), (lambda_name, captures));
-                }
-            }
-        }
+        // 内部関数の名前はこの関数のスコープ（lower_func_def が積む）に入る。
+        self.preprocess_inner_funcdefs(&func_def.body, &parent_scope_vars)?;
 
         // グローバル変数復元: 関数本体で参照されるトップレベル変数/インポート値を GlobalGet で復元
         let global_refs = self.collect_free_vars_in_body(&func_def.body, &params);
@@ -1231,7 +1402,34 @@ impl Lowering {
         }
 
         // 暗黙の戻り値
-        if let Some(ret) = last_var {
+        // A tail Int the checker accepted for a declared Float return is
+        // converted here, like an Int argument for a Float parameter.
+        let coerced_ret = match (last_var, last_expr) {
+            (Some(ret), Some(ret_expr)) => {
+                let coerced = self.coerce_to_declared(
+                    &mut ir_func,
+                    func_def.return_type.as_ref(),
+                    ret_expr,
+                    ret,
+                );
+                (coerced != ret).then_some(coerced)
+            }
+            _ => None,
+        };
+        if let Some(coerced) = coerced_ret {
+            let tag_var = ir_func.alloc_var();
+            ir_func.push(IrInst::ConstInt(
+                tag_var,
+                crate::codegen::tag_prop::TAG_FLOAT,
+            ));
+            let dummy = ir_func.alloc_var();
+            ir_func.push(IrInst::Call(
+                dummy,
+                "taida_set_return_tag".to_string(),
+                vec![tag_var],
+            ));
+            ir_func.push(IrInst::Return(coerced));
+        } else if let Some(ret) = last_var {
             // NB-14: Set return type tag so callers can propagate it.
             // This enables type info to survive through generic functions like `id x = x`
             // and transitive chains like `g x = f(x)`.
@@ -1291,6 +1489,7 @@ impl Lowering {
         self.lambda_param_counts = prev_lambda_param_counts;
         self.lambda_vars = prev_lambda_vars;
         self.closure_vars = prev_closure_vars;
+        self.function_ref_vars = prev_function_ref_vars;
         // Value-tag track: restore the caller scope's shadow kinds.
         self.shadow_kind_vars = prev_shadow_kinds;
 
@@ -1504,7 +1703,10 @@ impl Lowering {
     /// always done this; every other binding form (the `>=>` / `<=<`
     /// unmolds) must apply the same rule.
     fn maybe_globalize_toplevel_binding(&mut self, func: &mut IrFunction, name: &str, val: IrVar) {
-        if self.current_func_name.is_none() && self.globals_referenced.contains(name) {
+        if self.current_func_name.is_none()
+            && self.local_body_depth == 0
+            && self.globals_referenced.contains(name)
+        {
             let hash = self.global_var_hash(name);
             func.push(IrInst::GlobalSet(hash, val));
         }
@@ -1550,11 +1752,23 @@ impl Lowering {
             actrace!("body does not end in Return");
             return;
         };
-        let IrInst::CondBranch(_, arms) = &body_snapshot[n_body - 2] else {
+        // The return-kind announcement (`taida_set_return_tag` of a
+        // constant) may sit between the CondBranch and the Return.
+        let mut branch_pos = n_body - 2;
+        if branch_pos >= 2
+            && matches!(
+                &body_snapshot[branch_pos],
+                IrInst::Call(_, name, _) if name == "taida_set_return_tag"
+            )
+            && matches!(&body_snapshot[branch_pos - 1], IrInst::ConstInt(_, _))
+        {
+            branch_pos -= 2;
+        }
+        let IrInst::CondBranch(_, arms) = &body_snapshot[branch_pos] else {
             actrace!("no CondBranch before the Return");
             return;
         };
-        let prelude = &body_snapshot[..n_body - 2];
+        let prelude = &body_snapshot[..branch_pos];
 
         let param_names: Vec<&str> = func_def.params.iter().map(|p| p.name.as_str()).collect();
 
@@ -1611,8 +1825,8 @@ impl Lowering {
         // every self tail-call): a named IR variable cannot carry a
         // loop-mutable value on native, where DefVar/UseVar resolve
         // statically at emission time.
-        let ret_inst = ir_func.body[n_body - 1].clone();
-        let IrInst::CondBranch(result, arms) = ir_func.body[n_body - 2].clone() else {
+        let epilogue = ir_func.body[branch_pos + 1..].to_vec();
+        let IrInst::CondBranch(result, arms) = ir_func.body[branch_pos].clone() else {
             unreachable!("checked above");
         };
         let mut new_body: Vec<IrInst> = prelude.to_vec();
@@ -1653,7 +1867,7 @@ impl Lowering {
             });
         }
         new_body.push(IrInst::CondBranch(result, new_arms));
-        new_body.push(ret_inst);
+        new_body.extend(epilogue);
         ir_func.body = new_body;
         ir_func.append_consume_owned = true;
     }
@@ -2113,6 +2327,13 @@ impl Lowering {
         ec: &crate::parser::ErrorCeiling,
         subsequent_stmts: &[&Statement],
     ) -> Result<(), LowerError> {
+        // A caught error has `kind` (Str) and `code` (Int) even when its
+        // type declares neither; their names and types are registered so
+        // jsonEncode writes them.
+        self.field_names.insert("kind".to_string());
+        self.field_names.insert("code".to_string());
+        self.register_field_type_tag("kind", 3);
+        self.register_field_type_tag("code", 1);
         // 後続文を別関数に抽出（setjmp は呼び出し元の C 関数内で行う）
         // F62B-018: module-keyed like every synthetic symbol — per-module
         // counters made two modules' error-ceiling bodies collide in the
@@ -2121,12 +2342,24 @@ impl Lowering {
 
         // Collect variables from parent scope that _taida_try_N needs access to.
         // This includes function parameters and any DefVar'd variables before the ErrorCeiling.
+        // Names bound inside a condition arm are out of scope here (and their
+        // values do not dominate this point), so only the body's own
+        // bindings are captured.
         let mut captured_vars: Vec<String> = func.params.clone();
-        for name in Self::collect_defvar_names(&func.body) {
-            if !captured_vars.contains(&name) {
-                captured_vars.push(name);
+        for inst in &func.body {
+            if let IrInst::DefVar(name, _) = inst
+                && !captured_vars.contains(name)
+            {
+                captured_vars.push(name.clone());
             }
         }
+
+        // When the ceiling opens the function's body, the environment holds
+        // exactly the parameters, and a self tail call in the guarded body
+        // can loop under this ceiling (see `ceiling_tail_params`).
+        let ceiling_opens_body = self.current_func_name.is_some()
+            && captured_vars.len() == func.params.len()
+            && captured_vars.iter().zip(&func.params).all(|(c, p)| c == p);
 
         // 後続文の関数を生成（1引数: env パック）
         let mut try_fn =
@@ -2151,7 +2384,14 @@ impl Lowering {
                 if idx == last_idx {
                     // Last statement: if it's an expression, capture its value
                     if let Statement::Expr(expr) = stmt {
-                        last_try_var = Some(self.lower_expr(&mut try_fn, expr)?);
+                        last_try_var = Some(if ceiling_opens_body {
+                            let saved = self.ceiling_tail_params.replace(func.params.len());
+                            let lowered = self.lower_expr_tail(&mut try_fn, expr);
+                            self.ceiling_tail_params = saved;
+                            lowered?
+                        } else {
+                            self.lower_expr(&mut try_fn, expr)?
+                        });
                     } else {
                         self.lower_statement(&mut try_fn, stmt)?;
                         if let Some(bound_var) = Self::tail_binding_var(&try_fn, stmt) {
@@ -2245,8 +2485,7 @@ impl Lowering {
                 crate::parser::TypeExpr::Named(name) => name.clone(),
                 _ => "Error".to_string(),
             };
-            let handler_type_str = func.alloc_var();
-            func.push(IrInst::ConstStr(handler_type_str, handler_type_name));
+            let handler_type_str = self.emit_type_name_tag(func, &handler_type_name);
             let checked_err = func.alloc_var();
             func.push(IrInst::Call(
                 checked_err,
@@ -2254,6 +2493,16 @@ impl Lowering {
                 vec![err_var, handler_type_str],
             ));
             func.push(IrInst::DefVar(ec.error_param.clone(), checked_err));
+            // The guarded body may have looped with updated parameters: the
+            // handler sees those of the iteration that threw, as it would
+            // in the innermost of the nested calls.
+            if ceiling_opens_body {
+                for (i, name) in captured_vars.iter().enumerate() {
+                    let current = func.alloc_var();
+                    func.push(IrInst::PackGet(current, env_pack, i));
+                    func.push(IrInst::DefVar(name.clone(), current));
+                }
+            }
             // Lower handler body, capturing the last expression's result.
             // C13-1: If the last statement is a tail binding, yield the
             // bound value as the handler result.
@@ -2341,6 +2590,20 @@ impl Lowering {
                 Ok(())
             }
             Statement::Assignment(assign) => {
+                // A name bound to an addon return value without a type
+                // carries that to its uses ([E1414]); another binding of the
+                // name does not.
+                match (
+                    &assign.type_annotation,
+                    self.untyped_addon_value(func, &assign.value),
+                ) {
+                    (None, Some(addon)) => {
+                        self.untyped_addon_vars.insert(assign.target.clone(), addon);
+                    }
+                    _ => {
+                        self.untyped_addon_vars.remove(&assign.target);
+                    }
+                }
                 // ラムダが変数に代入される場合、マッピングを記録
                 if let Expr::Lambda(params, body, _) = &assign.value {
                     // Must mirror the name `lower_lambda` will allocate for
@@ -2366,7 +2629,13 @@ impl Lowering {
                     self.var_aliases
                         .insert(assign.target.clone(), source_name.clone());
                 }
-                let val = self.lower_expr(func, &assign.value)?;
+                // A lambda bound to a name may call itself by that name.
+                if matches!(assign.value, Expr::Lambda(..)) {
+                    self.lambda_binding_name = Some(assign.target.clone());
+                }
+                let val = self.lower_expr(func, &assign.value);
+                self.lambda_binding_name = None;
+                let val = val?;
                 func.push(IrInst::DefVar(assign.target.clone(), val));
 
                 // トップレベル変数をグローバルテーブルにも格納
@@ -2414,6 +2683,13 @@ impl Lowering {
                 // Value-tag track: a plain rebind invalidates any runtime
                 // shadow kind the name previously carried.
                 self.shadow_kind_vars.remove(&assign.target);
+                if self.typed_expr_table.is_function_ref(&assign.value)
+                    || matches!(&assign.value, Expr::Ident(src, _) if self.function_ref_vars.contains(src))
+                {
+                    self.function_ref_vars.insert(assign.target.clone());
+                } else {
+                    self.function_ref_vars.remove(&assign.target);
+                }
                 // C18-2: Enum-variant literal / known Enum var / annotation で
                 // 束縛された変数を enum_vars に記録する。
                 // `state <= HiveState:Policy()` や `state: HiveState <= ...`
@@ -2459,6 +2735,10 @@ impl Lowering {
                 // トップレベルの定義は1st passで処理済み。
                 // ローカル関数でキャプチャが必要なものは前処理で pending_local_closures に
                 // 登録されているので、ここで MakeClosure + DefVar を発行する。
+                // From here on, the body calls the local function by its name.
+                if let Some(ahead) = self.inner_funcs_ahead.last_mut() {
+                    ahead.remove(&func_def_stmt.name);
+                }
                 if let Some((lambda_name, captures)) =
                     self.pending_local_closures.remove(&func_def_stmt.name)
                 {
@@ -2583,10 +2863,8 @@ impl Lowering {
                     }
                     self.type_parents
                         .insert(inh_child.clone(), inh_parent.clone());
-                    let child_str_var = func.alloc_var();
-                    func.push(IrInst::ConstStr(child_str_var, inh_child.clone()));
-                    let parent_str_var = func.alloc_var();
-                    func.push(IrInst::ConstStr(parent_str_var, inh_parent.clone()));
+                    let child_str_var = self.emit_type_name_tag(func, inh_child);
+                    let parent_str_var = self.emit_type_name_tag(func, inh_parent);
                     let reg_dummy = func.alloc_var();
                     func.push(IrInst::Call(
                         reg_dummy,
@@ -2636,11 +2914,18 @@ impl Lowering {
                 // 直接呼ばれた場合は後続文なしで処理（フォールバック）
                 self.lower_error_ceiling_with_body(func, ec, &[])
             }
-            Statement::Export(_) | Statement::Import(_) => {
+            Statement::Export(_) => {
                 // モジュールレベルで処理済み
                 Ok(())
             }
+            Statement::Import(import_stmt) => {
+                // The imported module runs and its values are bound here,
+                // where the import stands.
+                self.emit_import_site(func, import_stmt);
+                Ok(())
+            }
             Statement::UnmoldForward(uf) => {
+                self.untyped_addon_vars.remove(&uf.target);
                 // expr >=> name : Async のアンモールド
                 // F58 P2-4 (first stage of the escape-analysis design):
                 // direct-form unmold fusion. In `Mold[...]() >=> v` the
@@ -2664,7 +2949,7 @@ impl Lowering {
                 let result = func.alloc_var();
                 func.push(IrInst::Call(
                     result,
-                    "taida_generic_unmold".to_string(),
+                    Self::unmold_helper(&uf.source).to_string(),
                     vec![source_var],
                 ));
                 func.push(IrInst::DefVar(uf.target.clone(), result));
@@ -2679,6 +2964,7 @@ impl Lowering {
                 Ok(())
             }
             Statement::UnmoldBackward(ub) => {
+                self.untyped_addon_vars.remove(&ub.target);
                 // name <=< expr : Async のアンモールド（逆方向）
                 // F58 P2-4: same direct-form fusion as UnmoldForward.
                 if let Some(result) = self.try_lower_fused_unmold(func, &ub.source)? {
@@ -2695,7 +2981,7 @@ impl Lowering {
                 let result = func.alloc_var();
                 func.push(IrInst::Call(
                     result,
-                    "taida_generic_unmold".to_string(),
+                    Self::unmold_helper(&ub.source).to_string(),
                     vec![source_var],
                 ));
                 func.push(IrInst::DefVar(ub.target.clone(), result));
@@ -2764,6 +3050,16 @@ impl Lowering {
         }
     }
 
+    /// The runtime helper that unmolds `source`. A `Div` / `Mod` result is
+    /// always a Lax, so it skips the generic helper, whose Result branch
+    /// would link the whole value display into the smallest WASM profile.
+    fn unmold_helper(source: &Expr) -> &'static str {
+        match source {
+            Expr::MoldInst(name, _, _, _) if name == "Div" || name == "Mod" => "taida_lax_unmold",
+            _ => "taida_generic_unmold",
+        }
+    }
+
     /// Divisor proof for the Div/Mod fusion: a non-zero Int literal
     /// (optionally negated).
     fn nonzero_int_literal(e: &Expr) -> bool {
@@ -2788,112 +3084,225 @@ impl Lowering {
     ) -> Result<(), LowerError> {
         let scope_set: std::collections::HashSet<&str> =
             scope_vars.iter().map(|s| s.as_str()).collect();
-
-        for stmt in body {
-            if let Statement::FuncDef(fd) = stmt {
+        let inner_defs: Vec<&FuncDef> = body
+            .iter()
+            .filter_map(|stmt| match stmt {
+                Statement::FuncDef(fd) => Some(fd),
+                _ => None,
+            })
+            .collect();
+        if inner_defs.is_empty() {
+            return Ok(());
+        }
+        let inner_names: std::collections::HashSet<&str> =
+            inner_defs.iter().map(|fd| fd.name.as_str()).collect();
+        let free_sets: Vec<Vec<String>> = inner_defs
+            .iter()
+            .map(|fd| {
                 let fd_params: std::collections::HashSet<&str> =
                     fd.params.iter().map(|p| p.name.as_str()).collect();
-                let free = self.collect_free_vars_in_func_body_unfiltered(&fd.body, &fd_params);
-                let captures: Vec<String> = free
-                    .into_iter()
-                    .filter(|v| scope_set.contains(v.as_str()))
-                    .collect();
-
-                if captures.is_empty() {
-                    // キャプチャなし: 通常のユーザー関数として登録
-                    self.user_funcs.insert(fd.name.clone());
-                    self.func_param_defs
-                        .insert(fd.name.clone(), fd.params.clone());
-                    let ir = self.lower_func_def(fd)?;
-                    self.lambda_funcs.push(ir);
-                } else {
-                    // キャプチャあり: クロージャとして生成
-                    let lambda_name = self.next_lambda_symbol("lambda");
-
-                    self.lambda_vars
-                        .insert(fd.name.clone(), lambda_name.clone());
-                    self.closure_vars.insert(fd.name.clone());
-
-                    let mut closure_params: Vec<String> = vec!["__env".to_string()];
-                    closure_params.extend(fd.params.iter().map(|p| p.name.clone()));
-                    let mut lambda_fn =
-                        IrFunction::new_with_params(lambda_name.clone(), closure_params);
-                    let parent_heap_vars = std::mem::take(&mut self.current_heap_vars);
-
-                    // 環境からキャプチャ変数を復元
-                    let env_var = 0u32;
-                    for (i, cap_name) in captures.iter().enumerate() {
-                        let get_dst = lambda_fn.alloc_var();
-                        lambda_fn.push(IrInst::PackGet(get_dst, env_var, i));
-                        lambda_fn.push(IrInst::DefVar(cap_name.clone(), get_dst));
-                    }
-
-                    // グローバル変数復元
-                    let param_names: Vec<String> =
-                        fd.params.iter().map(|p| p.name.clone()).collect();
-                    let global_refs = self.collect_free_vars_in_body(&fd.body, &param_names);
-                    for var_name in &global_refs {
-                        if !captures.contains(var_name) {
-                            self.globals_referenced.insert(var_name.clone());
-                            let hash = self.global_var_hash(var_name);
-                            let dst = lambda_fn.alloc_var();
-                            lambda_fn.push(IrInst::GlobalGet(dst, hash));
-                            lambda_fn.push(IrInst::DefVar(var_name.clone(), dst));
-                        }
-                    }
-
-                    // 再帰的に内部 FuncDef を前処理（深いネスト対応）
-                    let inner_scope = self.collect_nested_scope_vars(
-                        captures
-                            .iter()
-                            .cloned()
-                            .chain(fd.params.iter().map(|p| p.name.clone())),
-                        &fd.body,
-                    );
-                    self.preprocess_inner_funcdefs(&fd.body, &inner_scope)?;
-
-                    // 関数本体を処理
-                    let body_refs: Vec<&Statement> = fd.body.iter().collect();
-                    let has_ec = body_refs
-                        .iter()
-                        .any(|s| matches!(s, Statement::ErrorCeiling(_)));
-                    if has_ec {
-                        self.lower_statement_sequence(&mut lambda_fn, &body_refs)?;
-                    } else {
-                        let mut last_var = None;
-                        for (j, s) in fd.body.iter().enumerate() {
-                            let is_last = j == fd.body.len() - 1;
-                            match s {
-                                Statement::Expr(expr) => {
-                                    let var = self.lower_expr(&mut lambda_fn, expr)?;
-                                    if is_last {
-                                        last_var = Some(var);
-                                    }
-                                }
-                                _ => {
-                                    self.lower_statement(&mut lambda_fn, s)?;
-                                }
+                let mut free = self.collect_free_vars_in_func_body_unfiltered(&fd.body, &fd_params);
+                // A parameter default reads the enclosing scope too.
+                for param in &fd.params {
+                    if let Some(default) = &param.default_value {
+                        for name in self.collect_free_vars(default, &fd_params) {
+                            if !free.contains(&name) {
+                                free.push(name);
                             }
                         }
-
-                        if let Some(ret) = last_var {
-                            lambda_fn.push(IrInst::Return(ret));
-                        } else {
-                            let zero = lambda_fn.alloc_var();
-                            lambda_fn.push(IrInst::ConstInt(zero, 0));
-                            lambda_fn.push(IrInst::Return(zero));
-                        }
                     }
+                }
+                free
+            })
+            .collect();
 
-                    self.user_funcs.insert(lambda_name.clone());
-                    self.lambda_funcs.push(lambda_fn);
-
-                    self.current_heap_vars = parent_heap_vars;
-
-                    self.pending_local_closures
-                        .insert(fd.name.clone(), (lambda_name, captures));
+        // A local function is compiled as a closure when it reads a variable
+        // of the enclosing scope, or a sibling that is itself a closure (the
+        // closure value has to be captured). Calls to itself and to plain
+        // siblings resolve by name and capture nothing.
+        let mut closure_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        loop {
+            let mut changed = false;
+            for (fd, free) in inner_defs.iter().zip(&free_sets) {
+                if closure_names.contains(fd.name.as_str()) {
+                    continue;
+                }
+                let captures_any = free.iter().any(|v| {
+                    v != &fd.name
+                        && scope_set.contains(v.as_str())
+                        && (!inner_names.contains(v.as_str()) || closure_names.contains(v.as_str()))
+                });
+                if captures_any {
+                    closure_names.insert(fd.name.as_str());
+                    changed = true;
                 }
             }
+            if !changed {
+                break;
+            }
+        }
+
+        // The body that defines them reaches each definition in order.
+        if let Some(ahead) = self.inner_funcs_ahead.last_mut() {
+            ahead.extend(inner_defs.iter().map(|fd| fd.name.clone()));
+        }
+
+        // Register every plain local function first so siblings can call
+        // each other regardless of definition order.
+        for fd in &inner_defs {
+            if closure_names.contains(fd.name.as_str()) {
+                continue;
+            }
+            let symbol = format!("{}_{}", self.next_lambda_symbol("inner"), fd.name);
+            if let Some(scope) = self.inner_func_scopes.last_mut() {
+                scope.insert(fd.name.clone(), symbol.clone());
+            }
+            self.func_param_defs.insert(symbol, fd.params.clone());
+        }
+
+        for (fd, free) in inner_defs.iter().zip(&free_sets) {
+            if !closure_names.contains(fd.name.as_str()) {
+                let ir = self.lower_func_def(fd)?;
+                let target = ir.name.clone();
+                self.lambda_funcs.push(ir);
+                let entries = self.lower_default_arity_entries(fd, &target)?;
+                self.lambda_funcs.extend(entries);
+                continue;
+            }
+            let captures: Vec<String> = free
+                .iter()
+                .filter(|v| {
+                    *v != &fd.name
+                        && scope_set.contains(v.as_str())
+                        && (!inner_names.contains(v.as_str()) || closure_names.contains(v.as_str()))
+                })
+                .cloned()
+                .collect();
+
+            // キャプチャあり: クロージャとして生成
+            let lambda_name = self.next_lambda_symbol("lambda");
+
+            self.lambda_vars
+                .insert(fd.name.clone(), lambda_name.clone());
+            self.closure_vars.insert(fd.name.clone());
+            if let Some(scope) = self.local_closure_scopes.last_mut() {
+                scope.insert(fd.name.clone(), lambda_name.clone());
+            }
+            self.func_param_defs
+                .insert(lambda_name.clone(), fd.params.clone());
+
+            let mut closure_params: Vec<String> = vec!["__env".to_string()];
+            closure_params.extend(fd.params.iter().map(|p| p.name.clone()));
+            let mut lambda_fn = IrFunction::new_with_params(lambda_name.clone(), closure_params);
+            let parent_heap_vars = std::mem::take(&mut self.current_heap_vars);
+
+            // 環境からキャプチャ変数を復元
+            let env_var = 0u32;
+            for (i, cap_name) in captures.iter().enumerate() {
+                let get_dst = lambda_fn.alloc_var();
+                lambda_fn.push(IrInst::PackGet(get_dst, env_var, i));
+                lambda_fn.push(IrInst::DefVar(cap_name.clone(), get_dst));
+            }
+
+            // グローバル変数復元
+            let param_names: Vec<String> = fd.params.iter().map(|p| p.name.clone()).collect();
+            let global_refs = self.collect_free_vars_in_body(&fd.body, &param_names);
+            for var_name in &global_refs {
+                if !captures.contains(var_name) {
+                    self.globals_referenced.insert(var_name.clone());
+                    let hash = self.global_var_hash(var_name);
+                    let dst = lambda_fn.alloc_var();
+                    lambda_fn.push(IrInst::GlobalGet(dst, hash));
+                    lambda_fn.push(IrInst::DefVar(var_name.clone(), dst));
+                }
+            }
+
+            // The closure body: its own local functions are scoped to it, a
+            // call to its own name re-enters it with the same environment,
+            // and a tail call to the enclosing function is an ordinary call.
+            self.inner_func_scopes
+                .push(std::collections::HashMap::new());
+            self.local_closure_scopes
+                .push(std::collections::HashMap::new());
+            self.inner_funcs_ahead
+                .push(std::collections::HashSet::new());
+            let prev_closure_self = self
+                .closure_self
+                .replace((fd.name.clone(), lambda_name.clone()));
+            let prev_func_name = self.current_func_name.take();
+            self.local_body_depth += 1;
+            let lowered = self.lower_closure_body(&mut lambda_fn, fd, &captures);
+            self.local_body_depth -= 1;
+            self.current_func_name = prev_func_name;
+            self.closure_self = prev_closure_self;
+            self.inner_funcs_ahead.pop();
+            self.local_closure_scopes.pop();
+            self.inner_func_scopes.pop();
+            lowered?;
+
+            self.user_funcs.insert(lambda_name.clone());
+            self.lambda_funcs.push(lambda_fn);
+
+            self.current_heap_vars = parent_heap_vars;
+
+            self.pending_local_closures
+                .insert(fd.name.clone(), (lambda_name, captures));
+        }
+        Ok(())
+    }
+
+    /// Lower the statements of a local function compiled as a closure into
+    /// `lambda_fn`, whose environment has already been restored.
+    fn lower_closure_body(
+        &mut self,
+        lambda_fn: &mut IrFunction,
+        fd: &FuncDef,
+        captures: &[String],
+    ) -> Result<(), LowerError> {
+        // 再帰的に内部 FuncDef を前処理（深いネスト対応）
+        let inner_scope = self.collect_nested_scope_vars(
+            captures
+                .iter()
+                .cloned()
+                .chain(fd.params.iter().map(|p| p.name.clone())),
+            &fd.body,
+        );
+        self.preprocess_inner_funcdefs(&fd.body, &inner_scope)?;
+
+        // 関数本体を処理
+        let body_refs: Vec<&Statement> = fd.body.iter().collect();
+        let has_ec = body_refs
+            .iter()
+            .any(|s| matches!(s, Statement::ErrorCeiling(_)));
+        if has_ec {
+            self.lower_statement_sequence(lambda_fn, &body_refs)?;
+            return Ok(());
+        }
+        let mut last_var = None;
+        for (j, s) in fd.body.iter().enumerate() {
+            let is_last = j == fd.body.len() - 1;
+            match s {
+                Statement::Expr(expr) => {
+                    let var = self.lower_expr(lambda_fn, expr)?;
+                    if is_last {
+                        last_var = Some(var);
+                    }
+                }
+                _ => {
+                    self.lower_statement(lambda_fn, s)?;
+                    // A tail binding yields the bound value.
+                    if is_last && let Some(bound_var) = Self::tail_binding_var(lambda_fn, s) {
+                        last_var = Some(bound_var);
+                    }
+                }
+            }
+        }
+        if let Some(ret) = last_var {
+            lambda_fn.push(IrInst::Return(ret));
+        } else {
+            let zero = lambda_fn.alloc_var();
+            lambda_fn.push(IrInst::ConstInt(zero, 0));
+            lambda_fn.push(IrInst::Return(zero));
         }
         Ok(())
     }
@@ -2932,6 +3341,50 @@ impl Lowering {
     }
 
     /// 式中の自由変数を収集する
+    /// An addon facade's value bindings in an order where each comes after
+    /// the bindings its value reads (`DiffOp <= @(kind <= DiffOpKind.write)`
+    /// after `DiffOpKind`), as the facade itself evaluates them; the order
+    /// they were collected in decides among the others.
+    pub(super) fn facade_bindings_in_dependency_order(
+        &self,
+        bindings: &[(String, Expr)],
+    ) -> Vec<(String, Expr)> {
+        let index: std::collections::HashMap<&str, usize> = bindings
+            .iter()
+            .enumerate()
+            .map(|(i, (name, _))| (name.as_str(), i))
+            .collect();
+        let deps: Vec<Vec<usize>> = bindings
+            .iter()
+            .map(|(name, expr)| {
+                self.collect_free_vars(expr, &std::collections::HashSet::new())
+                    .iter()
+                    .filter(|free| *free != name)
+                    .filter_map(|free| index.get(free.as_str()).copied())
+                    .collect()
+            })
+            .collect();
+        // 0: not placed, 1: being placed (a cycle is left as collected),
+        // 2: placed.
+        let mut state = vec![0u8; bindings.len()];
+        let mut order = Vec::with_capacity(bindings.len());
+        fn place(i: usize, deps: &[Vec<usize>], state: &mut [u8], order: &mut Vec<usize>) {
+            if state[i] != 0 {
+                return;
+            }
+            state[i] = 1;
+            for &dep in &deps[i] {
+                place(dep, deps, state, order);
+            }
+            state[i] = 2;
+            order.push(i);
+        }
+        for i in 0..bindings.len() {
+            place(i, &deps, &mut state, &mut order);
+        }
+        order.into_iter().map(|i| bindings[i].clone()).collect()
+    }
+
     pub(super) fn collect_free_vars(
         &self,
         expr: &Expr,
@@ -3418,8 +3871,30 @@ impl Lowering {
         let result_var = func.alloc_var();
         let mut ir_arms = Vec::new();
 
-        for arm in arms {
+        for (i, arm) in arms.iter().enumerate() {
+            // Every condition is computed before the branch. A later guard
+            // that could have an effect must run only when the arms before
+            // it did not match, so it and the arms after it move into a
+            // nested branch in the default position.
+            if i > 0
+                && arm
+                    .condition
+                    .as_ref()
+                    .is_some_and(|cond| !Self::expr_is_effect_free(cond))
+            {
+                let saved = std::mem::take(&mut func.body);
+                let nested = self.lower_cond_branch(func, &arms[i..])?;
+                let insts = std::mem::replace(&mut func.body, saved);
+                ir_arms.push(IrCondArm {
+                    condition: None,
+                    body: insts,
+                    result: nested,
+                });
+                break;
+            }
             let condition = match &arm.condition {
+                // `| true |>` is a default arm.
+                Some(Expr::BoolLit(true, _)) => None,
                 Some(cond_expr) => {
                     let cond_var = self.lower_expr(func, cond_expr)?;
                     Some(cond_var)
@@ -3435,11 +3910,16 @@ impl Lowering {
                 (insts, body_result)
             };
 
+            let is_default = condition.is_none();
             ir_arms.push(IrCondArm {
                 condition,
                 body: body_insts,
                 result: body_var,
             });
+            // Arms after a default arm are never reached.
+            if is_default {
+                break;
+            }
         }
 
         func.push(IrInst::CondBranch(result_var, ir_arms));
@@ -3527,7 +4007,7 @@ impl Lowering {
     /// `Assignment` / `UnmoldForward` / `UnmoldBackward`, so peeking at the
     /// last `DefVar` whose name matches the binding target reliably
     /// recovers the IR value.
-    fn tail_binding_var(func: &IrFunction, stmt: &Statement) -> Option<IrVar> {
+    pub(super) fn tail_binding_var(func: &IrFunction, stmt: &Statement) -> Option<IrVar> {
         let target = match stmt {
             Statement::Assignment(a) => &a.target,
             Statement::UnmoldForward(u) => &u.target,

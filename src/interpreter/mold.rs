@@ -285,6 +285,46 @@ fn to_radix_i64(value: i64, base: u32) -> String {
     chars.iter().rev().collect()
 }
 
+/// `Float` NaN (the value `Sort` places last).
+fn is_nan_value(value: &Value) -> bool {
+    matches!(value, Value::Float(f) if f.is_nan())
+}
+
+/// The order `Sort` uses: a total order, so sorting never panics. Numbers
+/// (Int, Float, enum ordinals) compare by value; values of different
+/// kinds keep a fixed kind order. NaN never reaches it (`Sort` sets NaN
+/// aside first).
+fn sort_order(a: &Value, b: &Value) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    fn number(v: &Value) -> Option<f64> {
+        match v {
+            Value::Int(n) => Some(*n as f64),
+            Value::Float(f) => Some(*f),
+            Value::EnumVal(_, n) => Some(*n as f64),
+            _ => None,
+        }
+    }
+    fn kind(v: &Value) -> u8 {
+        match v {
+            Value::Int(_) | Value::Float(_) | Value::EnumVal(_, _) => 0,
+            Value::Str(_) => 1,
+            Value::Bool(_) => 2,
+            _ => 3,
+        }
+    }
+    if let (Value::Int(x), Value::Int(y)) = (a, b) {
+        return x.cmp(y);
+    }
+    if let (Some(x), Some(y)) = (number(a), number(b)) {
+        return x.partial_cmp(&y).unwrap_or(Ordering::Equal);
+    }
+    match (a, b) {
+        (Value::Str(x), Value::Str(y)) => x.cmp(y),
+        (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
+        _ => kind(a).cmp(&kind(b)),
+    }
+}
+
 impl Interpreter {
     fn todo_default_from_type_arg(&mut self, arg: &Expr) -> Result<Value, RuntimeError> {
         match arg {
@@ -554,7 +594,8 @@ impl Interpreter {
                 let start = if type_args.len() >= 2 {
                     match self.eval_expr(&type_args[1])? {
                         Signal::Value(Value::Int(n)) => n,
-                        _ => 0,
+                        Signal::Value(_) => 0,
+                        other => return Ok(Some(other)),
                     }
                 } else {
                     self.eval_mold_option(fields, "start")?
@@ -571,7 +612,8 @@ impl Interpreter {
                         let end = if type_args.len() >= 3 {
                             match self.eval_expr(&type_args[2])? {
                                 Signal::Value(Value::Int(n)) => n,
-                                _ => char_count as i64,
+                                Signal::Value(_) => char_count as i64,
+                                other => return Ok(Some(other)),
                             }
                         } else {
                             self.eval_mold_option(fields, "end")?
@@ -588,7 +630,8 @@ impl Interpreter {
                         let end = if type_args.len() >= 3 {
                             match self.eval_expr(&type_args[2])? {
                                 Signal::Value(Value::Int(n)) => n,
-                                _ => bytes.len() as i64,
+                                Signal::Value(_) => bytes.len() as i64,
+                                other => return Ok(Some(other)),
                             }
                         } else {
                             self.eval_mold_option(fields, "end")?
@@ -617,7 +660,8 @@ impl Interpreter {
                         let end = if type_args.len() >= 3 {
                             match self.eval_expr(&type_args[2])? {
                                 Signal::Value(Value::Int(n)) => n,
-                                _ => items.len() as i64,
+                                Signal::Value(_) => items.len() as i64,
+                                other => return Ok(Some(other)),
                             }
                         } else {
                             self.eval_mold_option(fields, "end")?
@@ -739,11 +783,16 @@ impl Interpreter {
                         message: "ByteAt requires 2 arguments: ByteAt[str, idx]()".into(),
                     });
                 }
-                let s = match self.eval_expr(&type_args[0])? {
-                    Signal::Value(Value::Str(s)) => s,
+                // The UTF-8 bytes of a Str, or the bytes of a Bytes value.
+                let source = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(Value::Str(s)) => s.as_bytes().to_vec(),
+                    Signal::Value(Value::Bytes(b)) => b.as_slice().to_vec(),
                     Signal::Value(v) => {
                         return Err(RuntimeError {
-                            message: format!("ByteAt: first argument must be a string, got {}", v),
+                            message: format!(
+                                "ByteAt: first argument must be a Str or Bytes, got {}",
+                                v
+                            ),
                         });
                     }
                     other => return Ok(Some(other)),
@@ -760,7 +809,7 @@ impl Interpreter {
                     }
                     other => return Ok(Some(other)),
                 };
-                let bytes = s.as_bytes();
+                let bytes = source.as_slice();
                 if idx < 0 || (idx as usize) >= bytes.len() {
                     Ok(Some(Signal::Value(make_lax_value(
                         false,
@@ -783,12 +832,14 @@ impl Interpreter {
                             .into(),
                     });
                 }
-                let s = match self.eval_expr(&type_args[0])? {
-                    Signal::Value(Value::Str(s)) => s,
+                // The UTF-8 bytes of a Str, or the bytes of a Bytes value.
+                let source = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(Value::Str(s)) => s.as_bytes().to_vec(),
+                    Signal::Value(Value::Bytes(b)) => b.as_slice().to_vec(),
                     Signal::Value(v) => {
                         return Err(RuntimeError {
                             message: format!(
-                                "ByteSlice: first argument must be a string, got {}",
+                                "ByteSlice: first argument must be a Str or Bytes, got {}",
                                 v
                             ),
                         });
@@ -819,7 +870,7 @@ impl Interpreter {
                     }
                     other => return Ok(Some(other)),
                 };
-                let bytes = s.as_bytes();
+                let bytes = source.as_slice();
                 let len = bytes.len() as i64;
                 let s_i = start.clamp(0, len) as usize;
                 let e_i = end.clamp(0, len) as usize;
@@ -842,16 +893,21 @@ impl Interpreter {
                         message: "ByteLength requires 1 argument: ByteLength[str]()".into(),
                     });
                 }
-                let s = match self.eval_expr(&type_args[0])? {
-                    Signal::Value(Value::Str(s)) => s,
+                // A Str's UTF-8 byte length, or a Bytes value's length.
+                let len = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(Value::Str(s)) => s.len(),
+                    Signal::Value(Value::Bytes(b)) => b.len(),
                     Signal::Value(v) => {
                         return Err(RuntimeError {
-                            message: format!("ByteLength: argument must be a string, got {}", v),
+                            message: format!(
+                                "ByteLength: argument must be a Str or Bytes, got {}",
+                                v
+                            ),
                         });
                     }
                     other => return Ok(Some(other)),
                 };
-                Ok(Some(Signal::Value(Value::Int(s.len() as i64))))
+                Ok(Some(Signal::Value(Value::Int(len as i64))))
             }
             // ── C26B-018 (C) StringRepeatJoin ─────────────────────────
             // Single-allocation repeat + join primitive. Surface-level
@@ -1288,24 +1344,25 @@ impl Interpreter {
             // Transcendentals (`Sin` / `Cos` / etc.) had no registration
             // at all and therefore required the `__value` unwrap.
             //
-            // These interpreter implementations delegate to `f64::sqrt`,
-            // `f64::powf`, etc. NaN / ±Infinity / denormal are preserved
-            // as Rust's `f64` semantics. Accepting `Int` widens to `f64`
-            // first; `Pow[Int, Int]` returns Float per `mold_specs.rs`.
+            // The transcendental molds return the correctly rounded value
+            // (`crate::crmath`, shared with the native and WASM runtimes);
+            // `Sqrt` is IEEE-exact. NaN / ±Infinity / subnormals follow
+            // C99 Annex F. Accepting `Int` widens to `f64` first;
+            // `Pow[Int, Int]` returns Float per `mold_specs.rs`.
             "Sqrt" => eval_unary_math(self, type_args, "Sqrt", f64::sqrt),
-            "Exp" => eval_unary_math(self, type_args, "Exp", f64::exp),
-            "Ln" => eval_unary_math(self, type_args, "Ln", f64::ln),
-            "Log2" => eval_unary_math(self, type_args, "Log2", f64::log2),
-            "Log10" => eval_unary_math(self, type_args, "Log10", f64::log10),
-            "Sin" => eval_unary_math(self, type_args, "Sin", f64::sin),
-            "Cos" => eval_unary_math(self, type_args, "Cos", f64::cos),
-            "Tan" => eval_unary_math(self, type_args, "Tan", f64::tan),
-            "Asin" => eval_unary_math(self, type_args, "Asin", f64::asin),
-            "Acos" => eval_unary_math(self, type_args, "Acos", f64::acos),
-            "Atan" => eval_unary_math(self, type_args, "Atan", f64::atan),
-            "Sinh" => eval_unary_math(self, type_args, "Sinh", f64::sinh),
-            "Cosh" => eval_unary_math(self, type_args, "Cosh", f64::cosh),
-            "Tanh" => eval_unary_math(self, type_args, "Tanh", f64::tanh),
+            "Exp" => eval_unary_math(self, type_args, "Exp", crate::crmath::exp),
+            "Ln" => eval_unary_math(self, type_args, "Ln", crate::crmath::ln),
+            "Log2" => eval_unary_math(self, type_args, "Log2", crate::crmath::log2),
+            "Log10" => eval_unary_math(self, type_args, "Log10", crate::crmath::log10),
+            "Sin" => eval_unary_math(self, type_args, "Sin", crate::crmath::sin),
+            "Cos" => eval_unary_math(self, type_args, "Cos", crate::crmath::cos),
+            "Tan" => eval_unary_math(self, type_args, "Tan", crate::crmath::tan),
+            "Asin" => eval_unary_math(self, type_args, "Asin", crate::crmath::asin),
+            "Acos" => eval_unary_math(self, type_args, "Acos", crate::crmath::acos),
+            "Atan" => eval_unary_math(self, type_args, "Atan", crate::crmath::atan),
+            "Sinh" => eval_unary_math(self, type_args, "Sinh", crate::crmath::sinh),
+            "Cosh" => eval_unary_math(self, type_args, "Cosh", crate::crmath::cosh),
+            "Tanh" => eval_unary_math(self, type_args, "Tanh", crate::crmath::tanh),
             "Pow" => {
                 if type_args.len() < 2 {
                     return Err(RuntimeError {
@@ -1332,7 +1389,9 @@ impl Interpreter {
                     }
                     other => return Ok(Some(other)),
                 };
-                Ok(Some(Signal::Value(Value::Float(base.powf(exp_val)))))
+                Ok(Some(Signal::Value(Value::Float(crate::crmath::pow(
+                    base, exp_val,
+                )))))
             }
             "Log" => {
                 // Log[value, base]() — explicit base. Base defaults to e
@@ -1364,9 +1423,9 @@ impl Interpreter {
                         }
                         other => return Ok(Some(other)),
                     };
-                    val.log(base)
+                    crate::crmath::ln(val) / crate::crmath::ln(base)
                 } else {
-                    val.ln()
+                    crate::crmath::ln(val)
                 };
                 Ok(Some(Signal::Value(Value::Float(result))))
             }
@@ -1396,7 +1455,9 @@ impl Interpreter {
                     }
                     other => return Ok(Some(other)),
                 };
-                Ok(Some(Signal::Value(Value::Float(y.atan2(x)))))
+                Ok(Some(Signal::Value(Value::Float(crate::crmath::atan2(
+                    y, x,
+                )))))
             }
             "Clamp" => {
                 if type_args.len() < 3 {
@@ -1409,8 +1470,7 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let min_val = match self.eval_expr(&type_args[1])? {
-                    Signal::Value(Value::Int(n)) => n as f64,
-                    Signal::Value(Value::Float(n)) => n,
+                    Signal::Value(v @ (Value::Int(_) | Value::Float(_))) => v,
                     Signal::Value(v) => {
                         return Err(RuntimeError {
                             message: format!("Clamp: min must be numeric, got {}", v),
@@ -1419,8 +1479,7 @@ impl Interpreter {
                     other => return Ok(Some(other)),
                 };
                 let max_val = match self.eval_expr(&type_args[2])? {
-                    Signal::Value(Value::Int(n)) => n as f64,
-                    Signal::Value(Value::Float(n)) => n,
+                    Signal::Value(v @ (Value::Int(_) | Value::Float(_))) => v,
                     Signal::Value(v) => {
                         return Err(RuntimeError {
                             message: format!("Clamp: max must be numeric, got {}", v),
@@ -1428,6 +1487,26 @@ impl Interpreter {
                     }
                     other => return Ok(Some(other)),
                 };
+                // When the bounds are reversed (min > max) the result is
+                // `min`. Int bounds on an Int stay exact (no trip through
+                // Float).
+                if let (Value::Int(n), Value::Int(lo), Value::Int(hi)) = (&val, &min_val, &max_val)
+                {
+                    let clamped = if lo > hi || n < lo {
+                        *lo
+                    } else if n > hi {
+                        *hi
+                    } else {
+                        *n
+                    };
+                    return Ok(Some(Signal::Value(Value::Int(clamped))));
+                }
+                let as_float = |v: &Value| match v {
+                    Value::Int(n) => *n as f64,
+                    Value::Float(n) => *n,
+                    _ => 0.0,
+                };
+                let (lo, hi) = (as_float(&min_val), as_float(&max_val));
                 let float_val = match &val {
                     Value::Int(n) => *n as f64,
                     Value::Float(n) => *n,
@@ -1437,7 +1516,15 @@ impl Interpreter {
                         });
                     }
                 };
-                let clamped = float_val.clamp(min_val, max_val);
+                // A NaN bound never matches a comparison, so it leaves the
+                // value as is (never a panic).
+                let clamped = if lo > hi || float_val < lo {
+                    lo
+                } else if float_val > hi {
+                    hi
+                } else {
+                    float_val
+                };
                 if matches!(val, Value::Int(_)) && clamped == clamped.floor() {
                     Ok(Some(Signal::Value(Value::Int(clamped as i64))))
                 } else {
@@ -2230,26 +2317,36 @@ impl Interpreter {
                 let reverse = reverse || desc;
                 let by_fn = self.eval_mold_option(fields, "by")?;
 
-                let mut sorted: Vec<Value> = if let Some(Value::Function(func)) = by_fn {
-                    // Sort by key extraction function
-                    let mut keyed: Vec<(Value, Value)> = Vec::new();
-                    for item in list.iter() {
-                        let key =
-                            self.call_function_with_values(&func, std::slice::from_ref(item))?;
-                        keyed.push((item.clone(), key));
-                    }
-                    keyed.sort_by(|(_, ka), (_, kb)| {
-                        ka.partial_cmp(kb).unwrap_or(std::cmp::Ordering::Equal)
-                    });
-                    keyed.into_iter().map(|(item, _)| item).collect()
-                } else {
-                    let mut items = Value::list_take(list);
-                    items.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                    items
-                };
+                // Items (or keys) that are NaN go after everything else,
+                // in their original order, in either direction.
+                let (mut sorted, nan_tail): (Vec<Value>, Vec<Value>) =
+                    if let Some(Value::Function(func)) = by_fn {
+                        // Sort by key extraction function
+                        let mut keyed: Vec<(Value, Value)> = Vec::new();
+                        let mut nan_tail = Vec::new();
+                        for item in list.iter() {
+                            let key =
+                                self.call_function_with_values(&func, std::slice::from_ref(item))?;
+                            if is_nan_value(&key) {
+                                nan_tail.push(item.clone());
+                            } else {
+                                keyed.push((item.clone(), key));
+                            }
+                        }
+                        keyed.sort_by(|(_, ka), (_, kb)| sort_order(ka, kb));
+                        (keyed.into_iter().map(|(item, _)| item).collect(), nan_tail)
+                    } else {
+                        let (mut items, nan_tail): (Vec<Value>, Vec<Value>) =
+                            Value::list_take(list)
+                                .into_iter()
+                                .partition(|item| !is_nan_value(item));
+                        items.sort_by(sort_order);
+                        (items, nan_tail)
+                    };
                 if reverse {
                     sorted.reverse();
                 }
+                sorted.extend(nan_tail);
                 Ok(Some(Signal::Value(Value::list(sorted))))
             }
             "Unique" => {
@@ -2416,8 +2513,15 @@ impl Interpreter {
                         ]))));
                     }
                 }
-                // Not found — return Lax with has_value=false
-                let default_val = if let Some(first) = list.first() {
+                // Not found — return Lax with has_value=false, holding the
+                // default of the element's static type when it is known.
+                let static_default = match self.static_type_of(&type_args[0]).cloned() {
+                    Some(crate::types::Type::List(elem)) => self.default_for_static_type(&elem),
+                    _ => None,
+                };
+                let default_val = if let Some(default) = static_default {
+                    default
+                } else if let Some(first) = list.first() {
                     Self::default_for_value(first)
                 } else {
                     Value::Int(0)
@@ -2509,6 +2613,25 @@ impl Interpreter {
                     }
                 }
                 Ok(Some(Signal::Value(super::methods::make_int_lax(found))))
+            }
+            // Length[list](): element count (the `.length()` of the value:
+            // list elements, Str characters, Bytes bytes).
+            "Length" if type_args.len() == 1 => {
+                let n = match self.eval_expr(&type_args[0])? {
+                    Signal::Value(Value::List(items)) => items.len(),
+                    Signal::Value(Value::Str(s)) => s.cached_char_count(),
+                    Signal::Value(Value::Bytes(b)) => b.len(),
+                    Signal::Value(v) => {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "Length: argument must be a list, Str or Bytes, got {}",
+                                v
+                            ),
+                        });
+                    }
+                    other => return Ok(Some(other)),
+                };
+                Ok(Some(Signal::Value(Value::Int(n as i64))))
             }
             "Count" => {
                 if type_args.len() < 2 {
@@ -2839,19 +2962,13 @@ impl Interpreter {
                 } else {
                     Value::Unit
                 };
-                let throw_value = fields
-                    .iter()
-                    .find(|f| f.name == "throw")
-                    .map(|f| self.eval_expr(&f.value))
-                    .transpose()?
-                    .and_then(|s| {
-                        if let Signal::Value(v) = s {
-                            Some(v)
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or(Value::Unit);
+                let throw_value = match fields.iter().find(|f| f.name == "throw") {
+                    Some(field) => match self.eval_expr(&field.value)? {
+                        Signal::Value(v) => v,
+                        other => return Ok(Some(other)),
+                    },
+                    None => Value::Unit,
+                };
                 Ok(Some(Signal::Value(Value::pack(vec![
                     ("__value".into(), inner_value),
                     ("__predicate".into(), predicate),
@@ -3287,26 +3404,24 @@ impl Interpreter {
                     Signal::Value(v) => v,
                     other => return Ok(Some(other)),
                 };
-                let custom_default = fields
-                    .iter()
-                    .find(|f| f.name == "default")
-                    .map(|f| self.eval_expr(&f.value))
-                    .transpose()?
-                    .and_then(|s| {
-                        if let Signal::Value(v) = s {
-                            Some(v)
-                        } else {
-                            None
-                        }
-                    });
+                // A throw (or the gorilla) in the `default` option reaches
+                // the caller like any other argument's.
+                let custom_default = match fields.iter().find(|f| f.name == "default") {
+                    Some(field) => match self.eval_expr(&field.value)? {
+                        Signal::Value(v) => Some(v),
+                        other => return Ok(Some(other)),
+                    },
+                    None => None,
+                };
 
                 let (has_value, result_val, default_val) = match (&dividend, &divisor) {
                     (Value::Int(a), Value::Int(b)) => {
                         let def = custom_default.unwrap_or(Value::Int(0));
-                        if *b == 0 {
-                            (false, Value::Int(0), def)
-                        } else {
-                            (true, Value::Int(a / b), def)
+                        // A zero divisor, or the smallest Int by -1 (the
+                        // quotient does not fit), is a failed Lax.
+                        match a.checked_div(*b) {
+                            Some(q) => (true, Value::Int(q), def),
+                            None => (false, Value::Int(0), def),
                         }
                     }
                     (Value::Float(a), Value::Float(b)) => {
@@ -3363,26 +3478,24 @@ impl Interpreter {
                     Signal::Value(v) => v,
                     other => return Ok(Some(other)),
                 };
-                let custom_default = fields
-                    .iter()
-                    .find(|f| f.name == "default")
-                    .map(|f| self.eval_expr(&f.value))
-                    .transpose()?
-                    .and_then(|s| {
-                        if let Signal::Value(v) = s {
-                            Some(v)
-                        } else {
-                            None
-                        }
-                    });
+                // A throw (or the gorilla) in the `default` option reaches
+                // the caller like any other argument's.
+                let custom_default = match fields.iter().find(|f| f.name == "default") {
+                    Some(field) => match self.eval_expr(&field.value)? {
+                        Signal::Value(v) => Some(v),
+                        other => return Ok(Some(other)),
+                    },
+                    None => None,
+                };
 
                 let (has_value, result_val, default_val) = match (&dividend, &divisor) {
                     (Value::Int(a), Value::Int(b)) => {
                         let def = custom_default.unwrap_or(Value::Int(0));
-                        if *b == 0 {
-                            (false, Value::Int(0), def)
-                        } else {
-                            (true, Value::Int(a % b), def)
+                        // A zero divisor, or the smallest Int by -1, is a
+                        // failed Lax (the same cases as Div).
+                        match a.checked_rem(*b) {
+                            Some(r) => (true, Value::Int(r), def),
+                            None => (false, Value::Int(0), def),
                         }
                     }
                     (Value::Float(a), Value::Float(b)) => {
@@ -3459,10 +3572,10 @@ impl Interpreter {
                     if !(2..=36).contains(&base) {
                         (false, Value::Int(0))
                     } else if let Value::Str(s) = &input {
-                        let negative = s.starts_with('-');
-                        let digits = if negative { &s[1..] } else { s.as_str() };
-                        match i64::from_str_radix(digits, base as u32) {
-                            Ok(n) => (true, Value::Int(if negative { -n } else { n })),
+                        // One optional sign, then digits of the base: the
+                        // smallest Int parses, a doubled sign does not.
+                        match i64::from_str_radix(s, base as u32) {
+                            Ok(n) => (true, Value::Int(n)),
                             Err(_) => (false, Value::Int(0)),
                         }
                     } else {
@@ -3563,19 +3676,14 @@ impl Interpreter {
                     Signal::Value(v) => v,
                     other => return Ok(Some(other)),
                 };
-                let fill = fields
-                    .iter()
-                    .find(|f| f.name == "fill")
-                    .map(|f| self.eval_expr(&f.value))
-                    .transpose()?
-                    .and_then(|s| {
-                        if let Signal::Value(Value::Int(n)) = s {
-                            Some(n)
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or(0);
+                let fill = match fields.iter().find(|f| f.name == "fill") {
+                    Some(field) => match self.eval_expr(&field.value)? {
+                        Signal::Value(Value::Int(n)) => n,
+                        Signal::Value(_) => 0,
+                        other => return Ok(Some(other)),
+                    },
+                    None => 0,
+                };
 
                 let bytes_opt: Option<Vec<u8>> = match input {
                     Value::Bytes(v) => Some(Value::bytes_take(v)),
@@ -3584,7 +3692,16 @@ impl Interpreter {
                         if len < 0 || !(0..=255).contains(&fill) {
                             None
                         } else {
-                            Some(vec![fill as u8; len as usize])
+                            // A length the process cannot allocate is a
+                            // failed Lax, not an abort.
+                            let mut out = Vec::new();
+                            match out.try_reserve_exact(len as usize) {
+                                Ok(()) => {
+                                    out.resize(len as usize, fill as u8);
+                                    Some(out)
+                                }
+                                Err(_) => None,
+                            }
                         }
                     }
                     Value::List(items) => {
@@ -4728,7 +4845,9 @@ impl Interpreter {
                         Value::Async(a) => {
                             if a.status == AsyncStatus::Rejected {
                                 // Propagate rejection as a throw
-                                return Ok(Some(Signal::Throw((*a.error).clone())));
+                                return Ok(Some(Signal::Throw(Self::async_rejection_error(
+                                    (*a.error).clone(),
+                                ))));
                             }
                             results.push((*a.value).clone());
                         }
@@ -4789,7 +4908,9 @@ impl Interpreter {
                         Value::Async(a) => {
                             let resolved = self.resolve_async(a)?;
                             if resolved.status == AsyncStatus::Rejected {
-                                return Ok(Some(Signal::Throw((*resolved.error).clone())));
+                                return Ok(Some(Signal::Throw(Self::async_rejection_error(
+                                    (*resolved.error).clone(),
+                                ))));
                             }
                             Ok(Some(Signal::Value(Value::Async(AsyncValue {
                                 status: AsyncStatus::Fulfilled,
@@ -5025,7 +5146,8 @@ impl Interpreter {
                                 match &val {
                                     Value::Int(n) => *n == ordinal as i64,
                                     Value::EnumVal(n_enum, n) => {
-                                        n_enum == enum_name && *n == ordinal as i64
+                                        *n_enum == self.enum_key_of(enum_name)
+                                            && *n == ordinal as i64
                                     }
                                     _ => false,
                                 }
@@ -5061,10 +5183,10 @@ impl Interpreter {
                         // B11B-015: Named type check via __type field + inheritance chain
                         other => match &val {
                             Value::BuchiPack(fields) => {
-                                if let Some((_, Value::Str(t))) =
+                                if let Some((_, tag @ Value::Str(t))) =
                                     fields.iter().find(|(n, _)| n == "__type")
                                 {
-                                    t.as_str() == other || self.check_type_extends(t, other)
+                                    self.tag_extends(Some(tag), t, other)
                                 } else {
                                     false
                                 }
@@ -5130,7 +5252,7 @@ impl Interpreter {
                         ("Int", "Num") | ("Float", "Num") | ("Int", "Float") => true,
                         _ => {
                             // Check inheritance chain using type_defs_inherited
-                            self.check_type_extends(&type_a, &type_b)
+                            self.name_extends(&type_a, &type_b)
                         }
                     }
                 };

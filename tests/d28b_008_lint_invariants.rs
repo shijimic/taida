@@ -264,7 +264,7 @@ fn d28b_008_curated_user_facing_examples_lint_clean() {
         }
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         // Same exclusion list as CI workflow
-        if name.starts_with("compile_") || name == "addon_terminal.td" {
+        if name.starts_with("compile_") {
             continue;
         }
         let source = match std::fs::read_to_string(&path) {

@@ -51,7 +51,7 @@ impl Lowering {
             "udpRecvFrom" => Some("taida_os_udp_recv_from"),
             "socketClose" => Some("taida_os_socket_close"),
             "listenerClose" => Some("taida_os_listener_close"),
-            "udpClose" => Some("taida_os_socket_close"),
+            "udpClose" => Some("taida_os_udp_close"),
             // Mold names (Read, ListDir, Stat, Exists, EnvVar, ReadAsync, Http*) are handled in lower/molds_inst.rs
             "Read" | "ListDir" | "Stat" | "Exists" | "EnvVar" | "ReadAsync" | "HttpGet"
             | "HttpPost" | "HttpRequest" => Some("__os_mold__"),

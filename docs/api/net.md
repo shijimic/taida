@@ -47,6 +47,8 @@ httpServe port: Int  handler: HandlerFn  opts: ServeOpts => :Async[Result[@(ok: 
 **Example**:
 
 ```taida
+>>> taida-lang/net => @(httpServe)
+
 handler req: Request =
   "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello"
 => :Str
@@ -636,6 +638,8 @@ handler req: Request  writer: Writer =
 ### 8.2 アンチパターン — `req.body` の直接読み出し
 
 ```taida
+>>> taida-lang/net => @(startResponse, writeChunk, endResponse)
+
 // NG: 双引数ハンドラでは req.body の span が空 (len = 0) なので、何を経由しても body は取れない
 handler req: Request  writer: Writer =
   bodyStr <= StrOf[req.body, req.raw]()
@@ -657,6 +661,8 @@ span を持つ) では正しく動くため、単引数→双引数の移行時�
 形になります。
 
 ```taida
+>>> taida-lang/net => @(startResponse, endResponse, readBodyChunk, writeChunk)
+
 handler req: Request  writer: Writer =
   startResponse(writer, 200, @[@(name <= "content-type", value <= "text/plain")])
   forwardChunks(req, writer)

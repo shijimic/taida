@@ -1699,7 +1699,7 @@ fn e32b_055_closure_module_parse_error_rejected() {
     let dir = project("e32b_055_closure_parse_error");
     write_file(
         &dir.join("net_helper.td"),
-        ">>> taida-lang/net@a.1 => @(httpServe)\nlet bad = (\n",
+        ">>> taida-lang/net => @(httpServe)\nlet bad = (\n",
     );
     write_file(
         &dir.join("frontend.td"),
@@ -1747,7 +1747,7 @@ fn e32b_067_all_wasm_targets_reject_net_in_descriptor_closure() {
         let dir = project(&format!("e32b_067_{}", target.replace('-', "_")));
         write_file(
             &dir.join("frontend.td"),
-            ">>> taida-lang/net@a.1 => @(httpServe)\nstdout(\"frontend\")\n",
+            ">>> taida-lang/net => @(httpServe)\nstdout(\"frontend\")\n",
         );
         write_file(
             &dir.join("main.td"),

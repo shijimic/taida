@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicI64;
 use std::sync::{Arc, Mutex};
 
-use super::env::Environment;
-use super::value::{FuncValue, Value};
+use super::env::{Environment, Link};
+use super::value::{FuncValue, ModuleId, PRELUDE_FUNCTION_PREFIX, Value};
 use crate::parser::*;
 
 /// Maximum function call depth before RuntimeError.
@@ -53,6 +53,8 @@ pub(crate) enum Signal {
 /// Cached module: exported symbols from a loaded.td file.
 #[derive(Debug, Clone)]
 pub(crate) struct LoadedModule {
+    /// The module the file ran as.
+    pub(crate) module: ModuleId,
     /// Exported symbols (name -> value)
     pub(crate) exports: HashMap<String, Value>,
     /// QF-17: TypeDef field definitions exported from this module
@@ -63,6 +65,64 @@ pub(crate) struct LoadedModule {
     pub(crate) enum_defs: HashMap<String, Vec<String>>,
     /// QF-17: TypeDef methods exported from this module
     pub(crate) type_methods: HashMap<String, HashMap<String, FuncDef>>,
+}
+
+/// Type registries of one module: what its code sees when it names a
+/// type, a mold, or an enum. The registries of the module whose code is
+/// running live in the interpreter's own fields (`type_defs`, ...); the
+/// other modules keep theirs here.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct TypeRegistry {
+    pub(crate) type_defs: HashMap<String, Vec<FieldDef>>,
+    pub(crate) enum_defs: HashMap<String, Vec<String>>,
+    pub(crate) mold_defs: HashMap<String, Vec<FieldDef>>,
+    pub(crate) type_methods: HashMap<String, HashMap<String, FuncDef>>,
+    pub(crate) type_tags: HashMap<String, Value>,
+    pub(crate) enum_keys: HashMap<String, String>,
+}
+
+/// A module the interpreter has executed (or is executing).
+#[derive(Debug, Default)]
+pub(crate) struct ModuleRecord {
+    /// Top-level bindings, once the module has finished running. Until
+    /// then (and for the main program) they are the environment's module
+    /// scope.
+    pub(crate) scope: Option<Arc<HashMap<String, Value>>>,
+    /// The module's type registries while another module's code runs.
+    pub(crate) registry: TypeRegistry,
+    /// The checker's types for the module's expressions, when the program
+    /// was checked. Keyed by node id, which every parsed file numbers from
+    /// 1 — so only the running module's own table is ever consulted.
+    pub(crate) typed: Option<Arc<crate::types::TypedExprTable>>,
+}
+
+/// Where a user-defined type comes from: the module that declared it, its
+/// name there, and — for a type declared inside a function body — the
+/// frame it was declared in.
+#[derive(Debug, Clone)]
+pub(crate) struct TypeOrigin {
+    pub(crate) module: ModuleId,
+    pub(crate) name: String,
+    pub(crate) def_site: Option<(usize, u64)>,
+    /// The tag itself; holding it keeps its address unique.
+    pub(crate) tag: Value,
+    /// The declaration's own tag (as opposed to one an aliased import
+    /// made so its instances display the alias).
+    pub(crate) tag_owner: bool,
+}
+
+/// A type declaration: its module, its name there and the frame of a
+/// function-local declaration. A built-in type the program did not declare
+/// (the root `Error`) is keyed by its name under [`BUILTIN_TYPE_MODULE`].
+pub(crate) type TypeDeclKey = (ModuleId, String, Option<(usize, u64)>);
+
+/// The module of [`TypeDeclKey`]s naming built-in types.
+pub(crate) const BUILTIN_TYPE_MODULE: ModuleId = ModuleId::MAX;
+
+impl TypeOrigin {
+    pub(crate) fn decl_key(&self) -> TypeDeclKey {
+        (self.module, self.name.clone(), self.def_site)
+    }
 }
 
 /// Idle resource entry tracked by pool runtime state.
@@ -139,11 +199,15 @@ pub struct Interpreter {
     pub(crate) loaded_modules: HashMap<PathBuf, LoadedModule>,
     /// Set of modules currently being loaded (for circular import detection)
     pub(crate) loading_modules: HashSet<PathBuf>,
+    /// Imported modules are checked as they load, so their code also sees
+    /// static types (set with the main program's table).
+    pub(crate) check_imports: bool,
     /// Currently executing function name (for tail call optimization)
     active_function: Option<String>,
-    /// When a mutual tail call is detected, this holds the target function name.
-    /// Used by call_function's trampoline loop to switch to a different function.
-    mutual_tail_call_target: Option<String>,
+    /// When a mutual tail call is detected, this holds the target function,
+    /// resolved where the call was written. Used by call_function's
+    /// trampoline loop to switch to a different function.
+    mutual_tail_call_target: Option<FuncValue>,
     /// `node_id`s of `Append[p, item]()` sites in the currently
     /// executing function that passed the shared consume analysis
     /// (`parser::append_consume_plan`). When such a site evaluates, the
@@ -161,6 +225,40 @@ pub struct Interpreter {
     pub(crate) enum_defs: HashMap<String, Vec<String>>,
     /// MoldDef field definitions: mold_name -> Vec<FieldDef> (for filling/unmold lookup)
     pub(crate) mold_defs: HashMap<String, Vec<FieldDef>>,
+    /// The `__type` tag string of each visible user type (by the name the
+    /// running module uses). Instances share the tag's allocation, which
+    /// is how a value remembers which declaration it came from even when
+    /// another module declares a type of the same name.
+    pub(crate) type_tags: HashMap<String, Value>,
+    /// Enum name in the running module -> the enum's key. Enum values
+    /// carry the key, which is unique across modules (see `enum_variants`).
+    pub(crate) enum_keys: HashMap<String, String>,
+    /// Every module executed so far, indexed by `ModuleId`. The main
+    /// program is module 0.
+    pub(crate) modules: Vec<ModuleRecord>,
+    /// The module whose top-level scope is the environment's module scope.
+    pub(crate) top_module: ModuleId,
+    /// The module the innermost running code belongs to. Its type
+    /// registries are the live fields above.
+    pub(crate) active_module: ModuleId,
+    /// Declaration behind each type tag, keyed by the tag's address.
+    pub(crate) type_origins: HashMap<usize, TypeOrigin>,
+    /// Variants of every enum, by enum key.
+    pub(crate) enum_variants: HashMap<String, Vec<String>>,
+    /// Owner of each enum key: the (module, name, variants) it was made
+    /// for, so a declaration evaluated again (inside a function body)
+    /// keeps its key.
+    pub(crate) enum_key_owners: HashMap<String, (ModuleId, String, Vec<String>)>,
+    /// Tag of each type declaration, by (module, name), so a declaration
+    /// evaluated again (inside a function body) keeps its tag.
+    pub(crate) declared_type_tags: HashMap<(ModuleId, String), Value>,
+    /// A `><` fired inside a callback and is on its way out as a
+    /// `RuntimeError` (see `gorilla_escape`).
+    pub(crate) pending_gorilla: bool,
+    /// Only self tail calls may leave as `TailCall` (inside the protected
+    /// statements of an error ceiling that starts a function body; see
+    /// `eval_function_body`).
+    tail_self_only: bool,
     /// Symbols declared via `<<<` during module execution.
     /// Empty means no `<<<` was encountered (all symbols exported for backward compat).
     pub(crate) module_exported_symbols: Vec<String>,
@@ -197,6 +295,10 @@ pub struct Interpreter {
     /// Inheritance parent map (child_name -> parent_name).
     /// Used by error ceiling to check if a thrown error type IS-A the handler type.
     pub(crate) type_parents: HashMap<String, String>,
+    /// The same map by declaration, for parents the program declared: two
+    /// modules may each declare a type of the same name, and each keeps
+    /// its own parent.
+    pub(crate) type_parent_decls: HashMap<TypeDeclKey, TypeDeclKey>,
     /// Current function call depth for stack overflow prevention.
     /// Incremented on each non-TCO function call, decremented on return.
     call_depth: usize,
@@ -226,10 +328,13 @@ pub struct Interpreter {
     pub(crate) loading_addon_facade_ctx: Option<(String, std::collections::BTreeMap<String, u32>)>,
 }
 
-/// Snapshot of the typedef/enum registries captured for a TCO trampoline's
-/// module-context overlay restore (see `push_func_module_scope_tracked`).
-#[allow(clippy::type_complexity)]
-type ModuleRegistrySnapshot = (HashMap<String, Vec<FieldDef>>, HashMap<String, Vec<String>>);
+/// What `leave_call_scope` restores: the frame-stack height and the
+/// module that was active before a call (or declaration) scope was
+/// entered.
+pub(crate) struct CallScope {
+    mark: usize,
+    prev_module: ModuleId,
+}
 
 impl Interpreter {
     /// Synthetic defaultFn sentinel name.
@@ -241,6 +346,11 @@ impl Interpreter {
     /// before entering the trampoline loop and returns the **return
     /// type's default value** without executing any AST body.
     pub(crate) const DEFAULT_FN_SENTINEL_NAME: &'static str = "__taida_default_fn";
+
+    /// The closure slot of a synthetic defaultFn that holds its result when
+    /// it was made from a checker type rather than a type annotation (`#`
+    /// keeps it apart from every Taida name).
+    pub(crate) const DEFAULT_FN_RESULT_SLOT: &'static str = "#default";
 
     pub fn new() -> Self {
         // Create a dedicated current-thread tokio runtime for the interpreter.
@@ -270,6 +380,18 @@ impl Interpreter {
             type_defs: HashMap::new(),
             enum_defs: HashMap::new(),
             mold_defs: HashMap::new(),
+            type_tags: HashMap::new(),
+            enum_keys: HashMap::new(),
+            modules: vec![ModuleRecord::default()],
+            top_module: 0,
+            active_module: 0,
+            check_imports: false,
+            type_origins: HashMap::new(),
+            enum_variants: HashMap::new(),
+            enum_key_owners: HashMap::new(),
+            declared_type_tags: HashMap::new(),
+            pending_gorilla: false,
+            tail_self_only: false,
             module_exported_symbols: Vec::new(),
             tokio_runtime,
             socket_handles: Arc::new(Mutex::new(HashMap::new())),
@@ -282,6 +404,7 @@ impl Interpreter {
             host_capability_mocks: HashMap::new(),
             pending_throw: None,
             type_parents: HashMap::new(),
+            type_parent_decls: HashMap::new(),
             call_depth: 0,
             active_streaming_writer: None,
             loading_addon_facade_ctx: None,
@@ -348,6 +471,57 @@ impl Interpreter {
         false
     }
 
+    /// The declaration behind the type the active module calls `name`, when
+    /// the program declared it (a built-in type has none).
+    pub(crate) fn declared_type_origin(&self, name: &str) -> Option<&TypeOrigin> {
+        self.type_tags
+            .get(name)
+            .and_then(|tag| self.origin_of_tag(tag))
+    }
+
+    /// The declaration the active module means by the type name `name`, or
+    /// the built-in type of that name.
+    fn type_decl_key_of_name(&self, name: &str) -> TypeDeclKey {
+        match self.declared_type_origin(name) {
+            Some(origin) => origin.decl_key(),
+            None => (BUILTIN_TYPE_MODULE, name.to_string(), None),
+        }
+    }
+
+    /// Whether a value whose `__type` is `tag` (named `name`) is the type
+    /// the active module calls `target`, or extends it. Declared types are
+    /// told apart by their declaration, so same-named types of two modules
+    /// are different types; a value of a type the program did not declare
+    /// (a built-in error) is compared by name.
+    pub(crate) fn tag_extends(&self, tag: Option<&Value>, name: &str, target: &str) -> bool {
+        match tag.and_then(|tag| self.origin_of_tag(tag)) {
+            Some(start) => self.decl_extends(start.decl_key(), &self.type_decl_key_of_name(target)),
+            None => name == target || self.check_type_extends(name, target),
+        }
+    }
+
+    /// Whether the type the active module calls `child` is `parent` or
+    /// extends it (`TypeExtends`), by declaration when `child` is declared.
+    pub(crate) fn name_extends(&self, child: &str, parent: &str) -> bool {
+        match self.declared_type_origin(child) {
+            Some(child) => self.decl_extends(child.decl_key(), &self.type_decl_key_of_name(parent)),
+            None => child == parent || self.check_type_extends(child, parent),
+        }
+    }
+
+    fn decl_extends(&self, mut current: TypeDeclKey, target: &TypeDeclKey) -> bool {
+        for _ in 0..64 {
+            if current == *target {
+                return true;
+            }
+            match self.type_parent_decls.get(&current) {
+                Some(parent) => current = parent.clone(),
+                None => return false,
+            }
+        }
+        false
+    }
+
     /// B11-6b: Check if `child_type` extends `parent_type` by walking the inheritance chain.
     /// Used by TypeExtends mold.
     pub(crate) fn check_type_extends(&self, child_type: &str, parent_type: &str) -> bool {
@@ -374,9 +548,33 @@ impl Interpreter {
         self.current_file = Some(path.to_path_buf());
     }
 
+    /// Give the main program the checker's types for its expressions; the
+    /// modules it imports are then checked as they load. A lookup that finds
+    /// nothing yields the default of the element's static type with them.
+    pub fn set_typed_table(&mut self, table: crate::types::TypedExprTable) {
+        let module = self.top_module;
+        self.modules[module].typed = Some(Arc::new(table));
+        self.check_imports = true;
+    }
+
+    /// The checker's type of `expr` in the running module, if it was checked.
+    pub(crate) fn static_type_of(&self, expr: &Expr) -> Option<&crate::types::Type> {
+        self.modules
+            .get(self.active_module)?
+            .typed
+            .as_ref()?
+            .lookup(expr)
+    }
+
     /// Evaluate an entire program.
     pub fn eval_program(&mut self, program: &Program) -> Result<Value, RuntimeError> {
-        match self.eval_statements(&program.statements)? {
+        let outcome = self.eval_statements(&program.statements);
+        // A `><` inside a callback travels out as a RuntimeError; it ends
+        // the program exactly like a top-level `><`.
+        if std::mem::take(&mut self.pending_gorilla) {
+            return Ok(Value::Gorilla);
+        }
+        match outcome? {
             Signal::Value(v) => Ok(v),
             Signal::TailCall(_) => {
                 // TailCall should not escape to program level
@@ -422,15 +620,15 @@ impl Interpreter {
             }
             Value::BuchiPack(fields) => {
                 // `str_field` returns `Some("")` for an empty string literal;
-                // filter those so empty `type <= ""` / `message <= ""` get
-                // the same AnonymousError / Unknown treatment as missing fields.
+                // an empty `type <= ""` gets the same AnonymousError
+                // treatment as a missing type.
                 let error_type = str_field(fields, "type")
                     .or_else(|| str_field(fields, "__type"))
                     .filter(|s| !s.is_empty())
                     .unwrap_or("AnonymousError");
-                let message = str_field(fields, "message")
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or("Unknown");
+                // An explicit `message <= ""` is shown as it is; an omitted
+                // message shows the type name (`docs/guide/08_error_handling.md`).
+                let message = str_field(fields, "message").unwrap_or(error_type);
                 format!("Error[{}]: {}", error_type, message)
             }
             other => other.to_display_string(),
@@ -443,6 +641,27 @@ impl Interpreter {
     /// become "protected" code. Any Throw signal from the protected code is
     /// caught and the error ceiling's handler body is executed.
     pub(crate) fn eval_statements(&mut self, stmts: &[Statement]) -> Result<Signal, RuntimeError> {
+        self.eval_statements_from(stmts, false)
+    }
+
+    /// Evaluate a function body. When the body starts with an error
+    /// ceiling, a self tail call in its protected statements still loops
+    /// (`docs/guide/09_functions.md`): the trampoline re-runs the body, so
+    /// every iteration sits inside the same ceiling, and a caught error
+    /// runs the handler with the innermost call's arguments.
+    pub(crate) fn eval_function_body(
+        &mut self,
+        stmts: &[Statement],
+    ) -> Result<Signal, RuntimeError> {
+        let leading_ceiling = matches!(stmts.first(), Some(Statement::ErrorCeiling(_)));
+        self.eval_statements_from(stmts, leading_ceiling)
+    }
+
+    fn eval_statements_from(
+        &mut self,
+        stmts: &[Statement],
+        leading_ceiling: bool,
+    ) -> Result<Signal, RuntimeError> {
         let mut last_value = Value::Unit;
         let mut i = 0;
 
@@ -469,9 +688,18 @@ impl Interpreter {
                 //
                 // If a RuntimeError occurs that wraps a Taida throw (from a HOF callback),
                 // recover the thrown value from pending_throw and handle it as Signal::Throw.
-                let protected_result = match self.eval_statements_no_tco(protected_stmts) {
+                let protected_outcome = if leading_ceiling && i == 0 {
+                    self.eval_protected_self_tail(protected_stmts)
+                } else {
+                    self.eval_statements_no_tco(protected_stmts)
+                };
+                let protected_result = match protected_outcome {
                     Ok(signal) => signal,
                     Err(runtime_err) => {
+                        if self.pending_gorilla {
+                            // The gorilla is never caught.
+                            return Err(runtime_err);
+                        }
                         if let Some(thrown_val) = self.pending_throw.take() {
                             // Recover the Taida throw that was wrapped in a RuntimeError
                             Signal::Throw(thrown_val)
@@ -492,19 +720,18 @@ impl Interpreter {
                         };
 
                         // Extract the actual error type from the thrown value.
+                        let thrown_tag = match &err {
+                            Value::BuchiPack(fields) => {
+                                fields.iter().find(|(n, _)| n == "__type").map(|(_, v)| v)
+                            }
+                            _ => None,
+                        };
                         let thrown_type = match &err {
                             Value::Error(e) => Some(e.error_type.as_str()),
-                            Value::BuchiPack(fields) => fields
-                                .iter()
-                                .find(|(n, _)| n == "__type")
-                                .and_then(|(_, v)| {
-                                    if let Value::Str(s) = v {
-                                        Some(s.as_str())
-                                    } else {
-                                        None
-                                    }
-                                }),
-                            _ => None,
+                            _ => match thrown_tag {
+                                Some(Value::Str(s)) => Some(s.as_str()),
+                                _ => None,
+                            },
                         };
 
                         // Check if the thrown type IS-A the handler type.
@@ -513,7 +740,7 @@ impl Interpreter {
                         let type_matches = if handler_type == "Error" {
                             true
                         } else if let Some(thrown) = thrown_type {
-                            self.is_error_subtype(thrown, handler_type)
+                            self.tag_extends(thrown_tag, thrown, handler_type)
                         } else {
                             // Unknown thrown value type — do NOT catch-all.
                             // Only the "Error" base handler (checked above) should catch everything.
@@ -604,13 +831,14 @@ impl Interpreter {
                 ) {
                     return Err(RuntimeError { message: e });
                 }
-                self.enum_defs.insert(
-                    ed.name.clone(),
-                    ed.variants
-                        .iter()
-                        .map(|variant| variant.name.clone())
-                        .collect(),
-                );
+                let variants: Vec<String> = ed
+                    .variants
+                    .iter()
+                    .map(|variant| variant.name.clone())
+                    .collect();
+                let key = self.enum_key_for(&ed.name, &variants);
+                self.enum_keys.insert(ed.name.clone(), key);
+                self.enum_defs.insert(ed.name.clone(), variants);
                 Ok(Signal::Value(Value::Unit))
             }
 
@@ -642,6 +870,7 @@ impl Interpreter {
                         self.type_methods.insert(td.name.clone(), methods);
                     }
                     self.type_defs.insert(td.name.clone(), td.fields.clone());
+                    self.declare_type_tag(&td.name);
                     Ok(Signal::Value(Value::Unit))
                 }
                 crate::parser::ClassLikeKind::Alias { .. } => {
@@ -687,6 +916,7 @@ impl Interpreter {
                     }
                     self.type_defs.insert(md.name.clone(), md.fields.clone());
                     self.mold_defs.insert(md.name.clone(), md.fields.clone());
+                    self.declare_type_tag(&md.name);
                     Ok(Signal::Value(Value::Unit))
                 }
                 crate::parser::ClassLikeKind::Inheritance { parent, .. } => {
@@ -742,6 +972,12 @@ impl Interpreter {
                     }
                     self.type_parents
                         .insert(inh_child.clone(), inh_parent.clone());
+                    self.declare_type_tag(inh_child);
+                    if let Some(child) = self.declared_type_origin(inh_child) {
+                        let child = child.decl_key();
+                        let parent = self.type_decl_key_of_name(inh_parent);
+                        self.type_parent_decls.insert(child, parent);
+                    }
                     Ok(Signal::Value(Value::Unit))
                 }
             },
@@ -755,9 +991,8 @@ impl Interpreter {
                     body: fd.body.clone(),
                     closure,
                     return_type: fd.return_type.clone(),
-                    module_type_defs: None,
-                    module_enum_defs: None,
-                    module_symbols: None,
+                    module: self.active_module,
+                    def_site: self.env.definition_site(),
                 });
                 // Use define() to prevent overwriting existing variables/functions.
                 // define_force is reserved for internal use only (pipeline, closures, params, prelude).
@@ -880,6 +1115,9 @@ impl Interpreter {
                 // step, so preserve classic semantics.
                 true
             }
+            // An unbound prelude function name is a function too
+            // (`x => debug => y` prints `x`).
+            None => Self::PRELUDE_FUNCTION_VALUES.contains(&name),
             _ => false,
         }
     }
@@ -908,6 +1146,34 @@ impl Interpreter {
         Ok(Signal::Value(last_value))
     }
 
+    /// Evaluate the protected statements of an error ceiling that starts a
+    /// function body. Like `eval_statements_no_tco`, except that the last
+    /// statement may end in a *self* tail call: the trampoline then runs
+    /// the body again, inside a fresh instance of the same ceiling. Calls
+    /// to other functions still run here, under this ceiling.
+    fn eval_protected_self_tail(&mut self, stmts: &[Statement]) -> Result<Signal, RuntimeError> {
+        let mut last_value = Value::Unit;
+        for (i, stmt) in stmts.iter().enumerate() {
+            // Check for nested error ceilings (delegate to full eval_statements)
+            if let Statement::ErrorCeiling(_) = stmt {
+                return self.eval_statements(&stmts[i..]);
+            }
+            let signal = if i + 1 == stmts.len() {
+                let prev = std::mem::replace(&mut self.tail_self_only, true);
+                let result = self.eval_statement_tail(stmt);
+                self.tail_self_only = prev;
+                result?
+            } else {
+                self.eval_statement(stmt)?
+            };
+            match signal {
+                Signal::Value(v) => last_value = v,
+                other => return Ok(other),
+            }
+        }
+        Ok(Signal::Value(last_value))
+    }
+
     /// Evaluate a statement in tail position.
     /// The only difference from eval_statement is that expression statements
     /// are evaluated with tail-call awareness.
@@ -921,10 +1187,22 @@ impl Interpreter {
 
     /// Evaluate a condition arm body (Vec<Statement>) in tail position.
     /// Non-last statements are evaluated normally; the last is evaluated with tail-call awareness.
+    /// The arm body is a scope of its own (see `eval_cond_arm_body`).
     fn eval_cond_arm_body_tail(&mut self, body: &[Statement]) -> Result<Signal, RuntimeError> {
         if body.is_empty() {
             return Ok(Signal::Value(Value::Unit));
         }
+        let mark = self.env.mark();
+        self.env.push_scope();
+        let result = self.eval_cond_arm_statements_tail(body);
+        self.env.truncate(mark);
+        result
+    }
+
+    fn eval_cond_arm_statements_tail(
+        &mut self,
+        body: &[Statement],
+    ) -> Result<Signal, RuntimeError> {
         // Evaluate all statements except the last one normally
         for stmt in &body[..body.len() - 1] {
             match self.eval_statement(stmt)? {
@@ -965,13 +1243,24 @@ impl Interpreter {
                         && matches!(self.env.get(name), Some(Value::Function(_)));
                     // Check if the callee is a user-defined function (for mutual recursion).
                     // Only attempt mutual TCO when inside a function context AND the
-                    // function is NOT defined in the current (innermost) scope. Locally
-                    // defined functions / lambdas are not mutual recursion targets —
-                    // they would not be reachable from the trampoline after scope pop.
-                    let is_user_func = !is_self_call
+                    // function is NOT defined in the current (innermost) scope.
+                    // The target is resolved here, where the call is written:
+                    // the trampoline runs after this body's scopes are gone,
+                    // so resolving the name there would reach the caller's
+                    // bindings instead.
+                    let mutual_target = if !is_self_call
+                        && !self.tail_self_only
                         && self.active_function.is_some()
-                        && matches!(self.env.get(name), Some(Value::Function(_)))
-                        && !self.env.is_defined_in_current_scope(name);
+                        && !self.env.is_defined_in_current_scope(name)
+                    {
+                        match self.env.get(name) {
+                            Some(Value::Function(target)) => Some(target.clone()),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    let is_user_func = mutual_target.is_some();
 
                     if is_self_call || is_user_func {
                         // Tail call detected! Evaluate args and return TailCall signal
@@ -985,9 +1274,10 @@ impl Interpreter {
                             };
                             arg_values.push(val);
                         }
-                        if is_user_func {
-                            // Mutual tail call: set the target function name
-                            self.mutual_tail_call_target = Some(name.clone());
+                        if let Some(target) = mutual_target {
+                            // Mutual tail call: hand the resolved target to
+                            // the trampoline.
+                            self.mutual_tail_call_target = Some(target);
                         }
                         return Ok(Signal::TailCall(arg_values));
                     }
@@ -1017,6 +1307,15 @@ impl Interpreter {
                 }
                 // No branch matched
                 Ok(Signal::Value(Value::Unit))
+            }
+
+            // A pipeline in tail position: a last stage that calls a function
+            // with the piped value at its `_` is that call, in tail position.
+            Expr::Pipeline(exprs, _) => {
+                let mark = self.env.mark();
+                let result = self.eval_pipeline(exprs, true);
+                self.env.truncate(mark);
+                result
             }
 
             // All other expressions: not tail-optimizable, evaluate normally
@@ -1051,9 +1350,10 @@ impl Interpreter {
             // standalone — scoped statement evaluation keeps the semantics
             // identical either way.
             Expr::Block(stmts, _) => {
+                let mark = self.env.mark();
                 self.env.push_scope();
                 let result = self.eval_statements_no_tco(stmts);
-                self.env.pop_scope();
+                self.env.truncate(mark);
                 result
             }
             // B11-6a: TypeLiteral is only valid inside TypeIs/TypeExtends — handled by mold
@@ -1067,6 +1367,8 @@ impl Interpreter {
             Expr::Ident(name, _) => {
                 if let Some(val) = self.env.get(name) {
                     Ok(Signal::Value(val.clone()))
+                } else if let Some(val) = self.prelude_function_value(name) {
+                    Ok(Signal::Value(val))
                 } else {
                     // E30B-007 sub-step B-5 / Lock-G Sub-G4: when an
                     // undefined identifier matches the surrounding addon
@@ -1127,6 +1429,17 @@ impl Interpreter {
                     Signal::Value(v) => v,
                     other => return Ok(other),
                 };
+                // `&&` / `||` short-circuit: the right operand is evaluated
+                // only when the left one does not decide the result.
+                match op {
+                    BinOp::And if !left_val.is_truthy() => {
+                        return Ok(Signal::Value(Value::Bool(false)));
+                    }
+                    BinOp::Or if left_val.is_truthy() => {
+                        return Ok(Signal::Value(Value::Bool(true)));
+                    }
+                    _ => {}
+                }
                 let right_val = match self.eval_expr(right)? {
                     Signal::Value(v) => v,
                     other => return Ok(other),
@@ -1165,11 +1478,25 @@ impl Interpreter {
                     return self.eval_partial_application(callee, args, span);
                 }
 
-                // Check built-in functions FIRST (before evaluating callee)
-                if let Expr::Ident(name, _) = callee.as_ref()
-                    && let Some(result) = self.try_builtin_func(name, args)?
-                {
-                    return Ok(result);
+                // The prelude and the core packages behave as the outermost
+                // scope: a name the program binds itself (a function, a
+                // parameter, a local) shadows the builtin of the same name,
+                // exactly as the checker types the call. Builtins are
+                // consulted only for names with no binding, and for the
+                // dispatch sentinels an import binds (possibly under an
+                // alias).
+                if let Expr::Ident(name, _) = callee.as_ref() {
+                    let dispatched = match self.env.get(name) {
+                        None => self.try_builtin_func(name, args)?,
+                        Some(Value::Str(tag)) if tag.starts_with("__") => {
+                            let tag = tag.to_string();
+                            self.try_imported_builtin(name, &tag, args)?
+                        }
+                        Some(_) => None,
+                    };
+                    if let Some(result) = dispatched {
+                        return Ok(result);
+                    }
                 }
 
                 let callee_val = match self.eval_expr(callee)? {
@@ -1177,6 +1504,22 @@ impl Interpreter {
                     other => return Ok(other),
                 };
 
+                // `Pilot()`: a declared type called with no fields is the
+                // instance of its defaults, as `Pilot(...)` with every field
+                // omitted is.
+                if args.is_empty()
+                    && let Expr::Ident(type_name, type_span) = callee.as_ref()
+                    && let Value::BuchiPack(fields) = &callee_val
+                    && fields.iter().any(|(n, v)| {
+                        n == "__type" && matches!(v, Value::Str(s) if s.as_str() == "TypeDef")
+                    })
+                {
+                    return self.eval_expr(&Expr::TypeInst(
+                        type_name.clone(),
+                        Vec::new(),
+                        type_span.clone(),
+                    ));
+                }
                 match callee_val {
                     Value::Function(func) => self.call_function(&func, args),
                     _ => Err(RuntimeError {
@@ -1193,7 +1536,8 @@ impl Interpreter {
                     Signal::Value(v) => v,
                     other => return Ok(other),
                 };
-                self.eval_method_call(&obj_val, method, args)
+                let result = self.eval_method_call(&obj_val, method, args)?;
+                Ok(self.with_static_miss_default(obj, method, result))
             }
 
             Expr::FieldAccess(obj, field, _) => {
@@ -1212,7 +1556,20 @@ impl Interpreter {
                 match &obj_val {
                     Value::BuchiPack(fields) => {
                         if let Some((_, val)) = fields.iter().find(|(n, _)| n == field) {
+                            // A Result given no error reads its `throw` as
+                            // the empty Error.
+                            if field == "throw"
+                                && matches!(val, Value::Unit)
+                                && fields.iter().any(|(n, v)| {
+                                    n == "__type"
+                                        && matches!(v, Value::Str(s) if s.as_str() == "Result")
+                                })
+                            {
+                                return Ok(Signal::Value(Value::empty_error()));
+                            }
                             Ok(Signal::Value(val.clone()))
+                        } else if let Some(val) = self.omitted_error_field(fields, field) {
+                            Ok(Signal::Value(val))
                         } else {
                             Err(RuntimeError {
                                 message: format!("Field '{}' does not exist", field),
@@ -1260,78 +1617,13 @@ impl Interpreter {
                 // classic auto-injection of `current` as the first argument
                 // is suppressed — the user has taken explicit control via
                 // the named binding.
-                let last_idx = exprs.len().saturating_sub(1);
-                let mut bound_any = false;
-                let mut bound_names: Vec<String> = Vec::new();
-                let mut current = Value::Unit;
-                for (i, expr) in exprs.iter().enumerate() {
-                    if i == 0 {
-                        current = match self.eval_expr(expr)? {
-                            Signal::Value(v) => v,
-                            other => {
-                                if bound_any {
-                                    self.env.pop_scope();
-                                }
-                                return Ok(other);
-                            }
-                        };
-                    } else if i < last_idx
-                        && let Expr::Ident(name, _) = expr
-                        && !self.is_pipeline_bindable_callable(name)
-                    {
-                        // Intermediate `=> name`: bind-and-forward.
-                        if !bound_any {
-                            self.env.push_scope();
-                            bound_any = true;
-                        }
-                        self.env.define_force(name, current.clone());
-                        bound_names.push(name.clone());
-                        // current is unchanged; continue to next step.
-                    } else if !bound_names.is_empty()
-                        && Self::expr_references_any(expr, &bound_names)
-                    {
-                        // The user explicitly references one of the
-                        // pipeline-scope bindings inside this step. Evaluate
-                        // the step as-written without auto-injecting
-                        // `current` as an extra argument. A `_` here has
-                        // nothing to inject (review C-4) — reject instead
-                        // of leaking a raw placeholder into evaluation.
-                        if expr_count_placeholders(expr) > 0 {
-                            if bound_any {
-                                self.env.pop_scope();
-                            }
-                            return Err(RuntimeError {
-                                message: "[E1543] A pipeline stage that references a `=> name` \
-                                          binding is evaluated as written — `_` has no injection \
-                                          value there. Use the bound name instead of `_`."
-                                    .to_string(),
-                            });
-                        }
-                        current = match self.eval_expr(expr)? {
-                            Signal::Value(v) => v,
-                            other => {
-                                if bound_any {
-                                    self.env.pop_scope();
-                                }
-                                return Ok(other);
-                            }
-                        };
-                    } else {
-                        current = match self.eval_pipeline_step(expr, current)? {
-                            Signal::Value(v) => v,
-                            other => {
-                                if bound_any {
-                                    self.env.pop_scope();
-                                }
-                                return Ok(other);
-                            }
-                        };
-                    }
-                }
-                if bound_any {
-                    self.env.pop_scope();
-                }
-                Ok(Signal::Value(current))
+                // The binding scope is dropped on every exit — a value, a
+                // signal, or a runtime error (a caught callback throw
+                // arrives as one) — so it never outlives the pipeline.
+                let mark = self.env.mark();
+                let result = self.eval_pipeline(exprs, false);
+                self.env.truncate(mark);
+                result
             }
 
             Expr::MoldInst(name, type_args, fields, span) => {
@@ -1380,6 +1672,19 @@ impl Interpreter {
                             // normal arm produce its error message.
                             self.env.define_force(pname, other_val);
                         }
+                    }
+                }
+
+                // A `taida-lang/os` mold imported under an alias
+                // (`>>> taida-lang/os => @(Exists => Present)`) is bound to
+                // the sentinel carrying its exported name.
+                if let Some(Value::Str(tag)) = self.env.get(name)
+                    && let Some(exported) = tag.strip_prefix("__os_builtin_")
+                    && exported != name
+                {
+                    let exported = exported.to_string();
+                    if let Some(result) = self.try_os_mold(&exported, type_args, fields)? {
+                        return Ok(result);
                     }
                 }
 
@@ -1533,6 +1838,9 @@ impl Interpreter {
                 }
                 let first_type_arg = positional_values.first().cloned();
                 let mut result_fields = Vec::<(String, Value)>::new();
+                // `unmold` / `solidify` bodies run in the mold's declaring
+                // module, like any function defined there.
+                let mold_origin = self.type_origin_of_name(name);
 
                 // Check MoldDef for `solidify` / `unmold` definitions
                 let mold_fields = self.mold_defs.get(name).cloned();
@@ -1640,15 +1948,14 @@ impl Interpreter {
                         body: func_def.body.clone(),
                         closure: Arc::new(closure),
                         return_type: func_def.return_type.clone(),
-                        module_type_defs: None,
-                        module_enum_defs: None,
-                        module_symbols: None,
+                        module: mold_origin.module,
+                        def_site: mold_origin.def_site,
                     });
                     result_fields.push(("__unmold".to_string(), unmold_func));
                 }
 
                 // Add a __type field to track the type
-                result_fields.push(("__type".to_string(), Value::str(name.clone())));
+                result_fields.push(("__type".to_string(), self.type_tag_value(name)));
                 let instance = Value::pack(result_fields.clone());
 
                 // `solidify` overrides what Name[args]() evaluates to.
@@ -1665,9 +1972,8 @@ impl Interpreter {
                         body: func_def.body.clone(),
                         closure: Arc::new(closure),
                         return_type: func_def.return_type.clone(),
-                        module_type_defs: None,
-                        module_enum_defs: None,
-                        module_symbols: None,
+                        module: mold_origin.module,
+                        def_site: mold_origin.def_site,
                     };
                     return self.call_function_preserving_signals(&solidify_func, &[]);
                 }
@@ -1699,9 +2005,8 @@ impl Interpreter {
                     body: lambda_body,
                     closure,
                     return_type: None,
-                    module_type_defs: None,
-                    module_enum_defs: None,
-                    module_symbols: None,
+                    module: self.active_module,
+                    def_site: self.env.definition_site(),
                 })))
             }
 
@@ -1724,7 +2029,7 @@ impl Interpreter {
                 // `Value::Int(ordinal)` (see `impl PartialEq`) so existing
                 // callers that compared against Int ordinals still work.
                 Ok(Signal::Value(Value::EnumVal(
-                    enum_name.clone(),
+                    self.enum_key_of(enum_name),
                     ordinal as i64,
                 )))
             }
@@ -1740,10 +2045,11 @@ impl Interpreter {
                 }
 
                 let mut result_fields = Vec::new();
+                let tag = self.type_tag_value(name);
                 // If TypeDef exists, inject defaults for omitted typed/defaulted fields.
                 if let Some(type_fields) = self.type_defs.get(name).cloned() {
                     let mut consumed = HashSet::new();
-                    let mut visiting = HashSet::new();
+                    let mut missing = Vec::new();
                     for field_def in type_fields.iter().filter(|f| !f.is_method) {
                         if let Some((_, provided)) = provided_fields
                             .iter()
@@ -1753,10 +2059,29 @@ impl Interpreter {
                             result_fields.push((field_def.name.clone(), provided.clone()));
                             consumed.insert(field_def.name.clone());
                         } else {
-                            let default_val =
-                                self.default_for_field_def(field_def, &mut visiting)?;
-                            result_fields.push((field_def.name.clone(), default_val));
+                            missing.push((result_fields.len(), field_def));
+                            result_fields.push((field_def.name.clone(), Value::Unit));
                         }
+                    }
+                    if !missing.is_empty() {
+                        // Defaults belong to the declaration: they are
+                        // computed where the type was declared, whichever
+                        // module constructs the value.
+                        let origin = self.type_origin_of_name(name);
+                        let context = self.enter_declaration_scope(&origin);
+                        let mut visiting = HashSet::new();
+                        let mut outcome = Ok(());
+                        for (index, field_def) in missing {
+                            match self.default_for_field_def(field_def, &mut visiting) {
+                                Ok(value) => result_fields[index].1 = value,
+                                Err(err) => {
+                                    outcome = Err(err);
+                                    break;
+                                }
+                            }
+                        }
+                        self.leave_call_scope(context);
+                        outcome?;
                     }
                     // Preserve extra undeclared fields for structural flexibility.
                     for (name, value) in provided_fields {
@@ -1767,7 +2092,7 @@ impl Interpreter {
                 } else {
                     result_fields = provided_fields;
                 }
-                result_fields.push(("__type".to_string(), Value::str(name.clone())));
+                result_fields.push(("__type".to_string(), tag));
                 Ok(Signal::Value(Value::pack(result_fields)))
             }
 
@@ -1779,6 +2104,140 @@ impl Interpreter {
                 Ok(Signal::Throw(val))
             }
         }
+    }
+
+    /// Evaluate the stages of a pipeline. An intermediate `=> name` binding
+    /// pushes one scope, which the caller drops.
+    /// `tail`: the pipeline is in tail position, so a last stage that calls a
+    /// function with the piped value (`x => f(a, _)`) is a tail call.
+    fn eval_pipeline(&mut self, exprs: &[Expr], tail: bool) -> Result<Signal, RuntimeError> {
+        let last_idx = exprs.len().saturating_sub(1);
+        let mut bound_any = false;
+        let mut bound_names: Vec<String> = Vec::new();
+        let mut current = Value::Unit;
+        for (i, expr) in exprs.iter().enumerate() {
+            if i == 0 {
+                current = match self.eval_expr(expr)? {
+                    Signal::Value(v) => v,
+                    other => return Ok(other),
+                };
+            } else if i < last_idx
+                && let Expr::Ident(name, _) = expr
+                && !self.is_pipeline_bindable_callable(name)
+            {
+                // Intermediate `=> name`: bind-and-forward.
+                if !bound_any {
+                    self.env.push_scope();
+                    bound_any = true;
+                }
+                self.env.define_force(name, current.clone());
+                bound_names.push(name.clone());
+                // current is unchanged; continue to next step.
+            } else if !bound_names.is_empty() && Self::expr_references_any(expr, &bound_names) {
+                // The user explicitly references one of the
+                // pipeline-scope bindings inside this step. Evaluate
+                // the step as-written without auto-injecting
+                // `current` as an extra argument. A `_` here has
+                // nothing to inject — reject instead
+                // of leaking a raw placeholder into evaluation.
+                if expr_count_placeholders(expr) > 0 {
+                    return Err(RuntimeError {
+                        message: "[E1543] A pipeline stage that references a `=> name` \
+                                  binding is evaluated as written — `_` has no injection \
+                                  value there. Use the bound name instead of `_`."
+                            .to_string(),
+                    });
+                }
+                current = match self.eval_expr(expr)? {
+                    Signal::Value(v) => v,
+                    other => return Ok(other),
+                };
+            } else if tail && i == last_idx && Self::is_piped_call(expr) {
+                // The call written out with the piped value at its `_`, in
+                // tail position (same substitution as `eval_pipeline_step`).
+                self.env.push_scope();
+                let pipe_val_name = "__pipe_current__";
+                self.env.define_force(pipe_val_name, current);
+                let dummy_span = crate::lexer::Span::new(0, 0, 0, 0);
+                let rewritten = super::control_flow::rewrite_nested_placeholder(
+                    expr,
+                    pipe_val_name,
+                    &dummy_span,
+                );
+                let result = self.eval_expr_tail(&rewritten);
+                self.env.pop_scope();
+                return result;
+            } else {
+                current = match self.eval_pipeline_step(expr, current)? {
+                    Signal::Value(v) => v,
+                    other => return Ok(other),
+                };
+            }
+        }
+        Ok(Signal::Value(current))
+    }
+
+    /// A pipeline stage that calls a named function with the piped value at
+    /// its one `_` (`x => f(a, _)`).
+    fn is_piped_call(expr: &Expr) -> bool {
+        match expr {
+            Expr::FuncCall(callee, args, _) => {
+                matches!(callee.as_ref(), Expr::Ident(..))
+                    && !args.iter().any(|arg| matches!(arg, Expr::Hole(_)))
+                    && expr_count_placeholders(expr) == 1
+            }
+            _ => false,
+        }
+    }
+
+    /// Error types the runtime itself raises. Their values are Error values
+    /// although no `Error => ...` declaration names them.
+    pub(crate) const BUILTIN_ERROR_TYPES: &'static [&'static str] = &[
+        "IoError",
+        "ProcessError",
+        "ResultError",
+        "RangeError",
+        "AsyncError",
+        "AsyncStateError",
+        "AsyncRaceError",
+        "TimeoutError",
+        "HttpError",
+        "CancelledError",
+        "AssertionError",
+        "ValueError",
+        "RelaxedGorillaEscaped",
+    ];
+
+    /// Whether values whose `__type` is `name` are Error values.
+    pub(crate) fn is_error_type_name(&self, name: &str) -> bool {
+        name == "Error"
+            || Self::BUILTIN_ERROR_TYPES.contains(&name)
+            || self.is_error_subtype(name, "Error")
+    }
+
+    /// `type` / `message` of an Error value that was built without them:
+    /// `type` reads as the type's name and `message` as `""`. The value
+    /// itself keeps the field omitted, so its display and `jsonEncode`
+    /// output stay as written, and an uncaught throw still shows the type
+    /// name instead of an empty message.
+    fn omitted_error_field(&self, fields: &[(String, Value)], field: &str) -> Option<Value> {
+        if field != "type" && field != "message" {
+            return None;
+        }
+        let (tag, type_name) = fields.iter().find_map(|(name, value)| match value {
+            Value::Str(s) if name == "__type" => Some((value, s.as_str().to_string())),
+            _ => None,
+        })?;
+        let declared_error =
+            self.origin_of_tag(tag).is_some() && self.tag_extends(Some(tag), &type_name, "Error");
+        if !declared_error && !self.is_error_type_name(&type_name) {
+            return None;
+        }
+        Some(if field == "type" {
+            Value::str(type_name)
+        } else {
+            Value::str(String::new())
+        })
     }
 
     fn default_for_field_def(
@@ -1817,6 +2276,125 @@ impl Interpreter {
         Ok(Value::Unit)
     }
 
+    /// The empty value of a built-in collection type.
+    /// A lookup that finds nothing — `get` / `first` / `last` on a list,
+    /// `get` on a HashMap — yields the default of the element's static type
+    /// (an empty `@[Str]` gives `""`, a list of packs a pack of defaults),
+    /// not of whatever the collection happens to hold. Without a static
+    /// type the lookup's own default stays.
+    fn with_static_miss_default(&mut self, obj: &Expr, method: &str, result: Signal) -> Signal {
+        use crate::types::Type;
+        if !matches!(method, "get" | "first" | "last") {
+            return result;
+        }
+        let Signal::Value(Value::BuchiPack(fields)) = &result else {
+            return result;
+        };
+        let is_failed_lax = fields
+            .iter()
+            .any(|(n, v)| n == "__type" && matches!(v, Value::Str(s) if s.as_str() == "Lax"))
+            && fields
+                .iter()
+                .any(|(n, v)| n == "has_value" && matches!(v, Value::Bool(false)));
+        if !is_failed_lax {
+            return result;
+        }
+        let elem_ty = match self.static_type_of(obj) {
+            Some(Type::List(elem)) => (**elem).clone(),
+            Some(Type::Generic(name, args))
+                if name == "HashMap" && args.len() == 2 && method == "get" =>
+            {
+                args[1].clone()
+            }
+            _ => return result,
+        };
+        match self.default_for_static_type(&elem_ty) {
+            Some(default) => Signal::Value(Value::pack(vec![
+                ("has_value".into(), Value::Bool(false)),
+                ("__value".into(), default.clone()),
+                ("__default".into(), default),
+                ("__type".into(), Value::str("Lax".into())),
+            ])),
+            None => result,
+        }
+    }
+
+    /// The default value of the checker type `ty`, or `None` when the type
+    /// does not fix one.
+    pub(crate) fn default_for_static_type(&mut self, ty: &crate::types::Type) -> Option<Value> {
+        use crate::types::Type;
+        match ty {
+            Type::Int => Some(Value::Int(0)),
+            Type::Float => Some(Value::Float(0.0)),
+            Type::Str => Some(Value::str(String::new())),
+            Type::Bool => Some(Value::Bool(false)),
+            Type::Bytes => Some(Value::bytes(Vec::new())),
+            Type::List(_) => Some(Value::list(Vec::new())),
+            Type::BuchiPack(fields) => {
+                let mut out = Vec::with_capacity(fields.len());
+                for (name, field_ty) in fields {
+                    out.push((name.clone(), self.default_for_static_type(field_ty)?));
+                }
+                Some(Value::pack(out))
+            }
+            Type::Named(name) => {
+                let value = self
+                    .default_for_type_expr(&TypeExpr::Named(name.clone()), &mut HashSet::new())
+                    .ok()?;
+                (!matches!(value, Value::Unit)).then_some(value)
+            }
+            Type::Generic(name, _) if name == "HashMap" || name == "Set" => {
+                Some(Self::default_collection(name))
+            }
+            // A function returning its return type's default, whatever it is
+            // given.
+            Type::Function(params, ret) => {
+                let ret_default = self.default_for_static_type(ret)?;
+                Some(self.default_fn_value(params.len(), ret_default))
+            }
+            _ => None,
+        }
+    }
+
+    /// The default of a function type: a function of `arity` parameters
+    /// that returns `ret_default` (see [`Self::DEFAULT_FN_SENTINEL_NAME`]).
+    fn default_fn_value(&self, arity: usize, ret_default: Value) -> Value {
+        let params = (0..arity)
+            .map(|i| Param {
+                name: format!("__arg_{}", i),
+                type_annotation: None,
+                default_value: None,
+                span: crate::lexer::Span::new(0, 0, 0, 0),
+            })
+            .collect();
+        let mut closure = HashMap::new();
+        closure.insert(Self::DEFAULT_FN_RESULT_SLOT.to_string(), ret_default);
+        Value::Function(FuncValue {
+            type_params_count: 0,
+            name: Self::DEFAULT_FN_SENTINEL_NAME.to_string(),
+            params,
+            body: Vec::new(),
+            closure: Arc::new(closure),
+            return_type: None,
+            module: self.active_module,
+            def_site: None,
+        })
+    }
+
+    fn default_collection(name: &str) -> Value {
+        match name {
+            "HashMap" => Value::pack(vec![
+                ("__entries".into(), Value::list(Vec::new())),
+                ("__type".into(), Value::str("HashMap".into())),
+            ]),
+            "Set" => Value::pack(vec![
+                ("__items".into(), Value::list(Vec::new())),
+                ("__type".into(), Value::str("Set".into())),
+            ]),
+            _ => Value::default_stream(),
+        }
+    }
+
     fn default_for_type_expr(
         &mut self,
         type_expr: &TypeExpr,
@@ -1831,6 +2409,7 @@ impl Interpreter {
                 "Bool" => Ok(Value::Bool(false)),
                 "JSON" => Ok(Value::default_json()),
                 "Molten" => Ok(Value::default_molten()),
+                "HashMap" | "Set" | "Stream" => Ok(Self::default_collection(name)),
                 _ => {
                     if visiting.contains(name) {
                         return Ok(Value::pack(vec![(
@@ -1846,10 +2425,10 @@ impl Interpreter {
                             fields.push((field_def.name.clone(), default_val));
                         }
                         visiting.remove(name);
-                        fields.push(("__type".to_string(), Value::str(name.clone())));
+                        fields.push(("__type".to_string(), self.type_tag_value(name)));
                         Ok(Value::pack(fields))
                     } else if self.enum_defs.contains_key(name) {
-                        Ok(Value::EnumVal(name.clone(), 0))
+                        Ok(Value::EnumVal(self.enum_key_of(name), 0))
                     } else {
                         Ok(Value::Unit)
                     }
@@ -1865,7 +2444,9 @@ impl Interpreter {
                 Ok(Value::pack(result))
             }
             TypeExpr::Generic(name, args) => {
-                if name == "Lax" {
+                // `Optional` is the removed predecessor of `Lax`; its values
+                // behave as `Lax`.
+                if name == "Lax" || name == "Optional" {
                     let inner = if let Some(inner_ty) = args.first() {
                         self.default_for_type_expr(inner_ty, visiting)?
                     } else {
@@ -1893,7 +2474,42 @@ impl Interpreter {
                         task: None,
                     }));
                 }
-                Ok(Value::Unit)
+                match name.as_str() {
+                    "HashMap" | "Set" | "Stream" => Ok(Self::default_collection(name)),
+                    // `Result[T, P]`: a success holding T's default.
+                    "Result" => {
+                        let inner = match args.first() {
+                            Some(inner_ty) => self.default_for_type_expr(inner_ty, visiting)?,
+                            None => Value::Unit,
+                        };
+                        Ok(Value::pack(vec![
+                            ("__value".into(), inner),
+                            ("__predicate".into(), Value::Unit),
+                            ("throw".into(), Value::Unit),
+                            ("__type".into(), Value::str("Result".into())),
+                        ]))
+                    }
+                    // `Gorillax[T]` has no fallback value: its default is the
+                    // empty Gorillax (unmolding it fires the gorilla).
+                    "Gorillax" => {
+                        let inner = match args.first() {
+                            Some(inner_ty) => self.default_for_type_expr(inner_ty, visiting)?,
+                            None => Value::Unit,
+                        };
+                        Ok(Value::pack(vec![
+                            ("has_value".into(), Value::Bool(false)),
+                            ("__value".into(), inner),
+                            ("__error".into(), Value::Unit),
+                            ("__type".into(), Value::str("Gorillax".into())),
+                        ]))
+                    }
+                    // A user-defined generic type (`Box[Int]`) defaults
+                    // like its plain name.
+                    _ if self.type_defs.contains_key(name) => {
+                        self.default_for_type_expr(&TypeExpr::Named(name.clone()), visiting)
+                    }
+                    _ => Ok(Value::Unit),
+                }
             }
             // E30 Phase 6 / E30B-004 / Lock-D verdict: synthesise a
             // `defaultFn` value for declare-only function fields. The
@@ -1925,9 +2541,8 @@ impl Interpreter {
                     body: Vec::new(),
                     closure: Arc::new(HashMap::new()),
                     return_type: Some((**ret).clone()),
-                    module_type_defs: None,
-                    module_enum_defs: None,
-                    module_symbols: None,
+                    module: self.active_module,
+                    def_site: None,
                 }))
             }
         }
@@ -1970,6 +2585,9 @@ impl Interpreter {
             })
             .collect();
 
+        // The partial is defined here; its captured arguments live in a
+        // scope of their own that only its closure keeps.
+        let def_site = self.env.definition_site();
         // Store pre-evaluated args in the environment so the closure can capture them
         self.env.push_scope();
         let mut captured_arg_names: Vec<Option<String>> = Vec::new();
@@ -2017,9 +2635,8 @@ impl Interpreter {
             body,
             closure,
             return_type: None,
-            module_type_defs: None,
-            module_enum_defs: None,
-            module_symbols: None,
+            module: self.active_module,
+            def_site,
         })))
     }
 
@@ -2044,6 +2661,33 @@ impl Interpreter {
     /// - Ident("User") → look up TypeDef by name
     /// - ListLit([Ident("Pilot")]) → list schema with element type
     pub(crate) fn resolve_json_schema(
+        &self,
+        expr: &Expr,
+    ) -> Result<crate::interpreter::json::JsonSchema, RuntimeError> {
+        let mut schema = self.resolve_json_schema_by_name(expr)?;
+        self.key_enum_schemas(&mut schema);
+        Ok(schema)
+    }
+
+    /// Enum schemas name enums the way the active module does; decoded
+    /// values carry the enum's key instead (see `enum_key_of`).
+    fn key_enum_schemas(&self, schema: &mut crate::interpreter::json::JsonSchema) {
+        use crate::interpreter::json::JsonSchema;
+        match schema {
+            JsonSchema::Enum(name, _) => *name = self.enum_key_of(name),
+            JsonSchema::List(inner) => self.key_enum_schemas(inner),
+            JsonSchema::TypeDef(_, fields) => {
+                for field in fields.iter_mut() {
+                    self.key_enum_schemas(&mut field.schema);
+                }
+            }
+            // A reference points back at a TypeDef keyed where it is
+            // expanded.
+            JsonSchema::Primitive(_) | JsonSchema::Ref(_) => {}
+        }
+    }
+
+    fn resolve_json_schema_by_name(
         &self,
         expr: &Expr,
     ) -> Result<crate::interpreter::json::JsonSchema, RuntimeError> {
@@ -2083,7 +2727,7 @@ impl Interpreter {
             // @[Schema] — list type
             Expr::ListLit(items, _) => {
                 if items.len() == 1 {
-                    let elem_schema = self.resolve_json_schema(&items[0])?;
+                    let elem_schema = self.resolve_json_schema_by_name(&items[0])?;
                     Ok(JsonSchema::List(Box::new(elem_schema)))
                 } else if items.is_empty() {
                     Err(RuntimeError {
@@ -2109,7 +2753,7 @@ impl Interpreter {
     fn bind_params_with_effective_defaults(
         &mut self,
         func: &FuncValue,
-        arg_values: &[Value],
+        arg_values: Vec<Value>,
     ) -> Result<Option<Signal>, RuntimeError> {
         let enforce_arity = func.name != "<lambda>" && func.name != "<partial>";
         if enforce_arity && arg_values.len() > func.params.len() {
@@ -2123,9 +2767,12 @@ impl Interpreter {
             });
         }
 
-        for (i, param) in func.params.iter().enumerate() {
-            let val = if i < arg_values.len() {
-                arg_values[i].clone()
+        // The argument values move into the environment (no second
+        // reference stays behind — see the Append consume fast path).
+        let mut args = arg_values.into_iter();
+        for param in func.params.iter() {
+            let val = if let Some(arg) = args.next() {
+                arg
             } else if let Some(default_expr) = &param.default_value {
                 match self.eval_expr(default_expr)? {
                     Signal::Value(v) => v,
@@ -2145,104 +2792,417 @@ impl Interpreter {
         Ok(None)
     }
 
-    fn needs_registry_snapshot(func: &FuncValue) -> bool {
-        fn defines_types(stmts: &[Statement]) -> bool {
+    // ── Modules and lexical scopes ──────────────────────────
+
+    /// Stash the live type registries into `module`'s record, or load them
+    /// back from it (the swap is its own inverse).
+    fn swap_registry(&mut self, module: ModuleId) {
+        let registry = &mut self.modules[module].registry;
+        std::mem::swap(&mut self.type_defs, &mut registry.type_defs);
+        std::mem::swap(&mut self.enum_defs, &mut registry.enum_defs);
+        std::mem::swap(&mut self.mold_defs, &mut registry.mold_defs);
+        std::mem::swap(&mut self.type_methods, &mut registry.type_methods);
+        std::mem::swap(&mut self.type_tags, &mut registry.type_tags);
+        std::mem::swap(&mut self.enum_keys, &mut registry.enum_keys);
+    }
+
+    /// Make `module` the active module: the code that runs next names
+    /// types, molds and enums through its registries. Returns the module
+    /// that was active, to switch back to.
+    pub(crate) fn switch_module(&mut self, module: ModuleId) -> ModuleId {
+        let prev = self.active_module;
+        if module != prev && module < self.modules.len() {
+            self.swap_registry(prev);
+            self.swap_registry(module);
+            self.active_module = module;
+        }
+        prev
+    }
+
+    /// Register a fresh module (a source file about to run). The main
+    /// program is module 0 from the start.
+    pub(crate) fn new_module(&mut self) -> ModuleId {
+        self.modules.push(ModuleRecord::default());
+        self.modules.len() - 1
+    }
+
+    /// The type registries of `module`: the live fields when it is the
+    /// active module, its record otherwise.
+    pub(crate) fn registry_of(&self, module: ModuleId) -> Option<&TypeRegistry> {
+        if module == self.active_module {
+            None
+        } else {
+            self.modules.get(module).map(|record| &record.registry)
+        }
+    }
+
+    /// Methods of the type `type_name` as `module` declares or imports it.
+    fn methods_in(&self, module: ModuleId, type_name: &str) -> Option<&HashMap<String, FuncDef>> {
+        match self.registry_of(module) {
+            None => self.type_methods.get(type_name),
+            Some(registry) => registry.type_methods.get(type_name),
+        }
+    }
+
+    /// Link to `module`'s top-level scope: the environment's module scope
+    /// when that module's top-level code is running, otherwise the
+    /// module's finished scope pushed as a frame.
+    pub(crate) fn module_scope_link(&mut self, module: ModuleId) -> Link {
+        if module == self.top_module {
+            return Link::Globals;
+        }
+        match self
+            .modules
+            .get(module)
+            .and_then(|record| record.scope.clone())
+        {
+            Some(scope) => self.env.push_module_scope(scope),
+            // Only the module whose top-level code is running has no
+            // finished scope yet.
+            None => Link::Globals,
+        }
+    }
+
+    /// Enter the scope a function body runs in: a fresh local scope whose
+    /// chain continues through the scopes around the function's
+    /// definition — never the caller's — and whose module is the
+    /// function's own.
+    ///
+    /// While the frame the function was defined in is still running, the
+    /// chain goes through that live frame, so local functions see
+    /// siblings defined after them. Afterwards the closure snapshot stands
+    /// in for it, and a named local function still sees itself (it can
+    /// recurse after being returned from its defining function).
+    pub(crate) fn enter_call_scope(&mut self, func: &FuncValue) -> CallScope {
+        let mark = self.env.mark();
+        let prev_module = self.switch_module(func.module);
+        let live_site = func.def_site.and_then(|site| self.env.live_site(site));
+        let local = match live_site {
+            // A partial application keeps its fixed arguments in a scope of
+            // its own, which the live frame does not hold.
+            Some(link) if func.name == "<partial>" => {
+                let captured: HashMap<String, Value> = func
+                    .closure
+                    .iter()
+                    .filter(|(name, _)| name.starts_with("__partial_captured_"))
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect();
+                self.env.push_linked_scope(captured, link)
+            }
+            Some(link) => link,
+            None => {
+                let mut link = self.module_scope_link(func.module);
+                if !func.closure.is_empty() {
+                    link = self.env.push_shared_scope(func.closure.clone(), link);
+                }
+                if func.def_site.is_some() && !func.name.starts_with('<') {
+                    let mut own = HashMap::new();
+                    own.insert(func.name.clone(), Value::Function(func.clone()));
+                    link = self.env.push_linked_scope(own, link);
+                }
+                link
+            }
+        };
+        self.env.push_linked_scope(HashMap::new(), local);
+        CallScope { mark, prev_module }
+    }
+
+    /// Enter the scope a declaration's own code runs in (field defaults,
+    /// method bodies): its module, and the frame it was declared in while
+    /// that frame still runs.
+    pub(crate) fn enter_declaration_scope(&mut self, origin: &TypeOrigin) -> CallScope {
+        let mark = self.env.mark();
+        let prev_module = self.switch_module(origin.module);
+        let link = match origin.def_site.and_then(|site| self.env.live_site(site)) {
+            Some(link) => link,
+            None => self.module_scope_link(origin.module),
+        };
+        self.env.push_linked_scope(HashMap::new(), link);
+        CallScope { mark, prev_module }
+    }
+
+    /// Enter the scope a method body runs in: the instance fields, then
+    /// the declaration's own scope (its module, or the frame the type was
+    /// declared in while it runs).
+    pub(crate) fn enter_method_scope(
+        &mut self,
+        origin: &TypeOrigin,
+        instance_fields: &[(String, Value)],
+    ) -> CallScope {
+        let mark = self.env.mark();
+        let prev_module = self.switch_module(origin.module);
+        let link = match origin.def_site.and_then(|site| self.env.live_site(site)) {
+            Some(link) => link,
+            None => self.module_scope_link(origin.module),
+        };
+        let instance: HashMap<String, Value> = instance_fields
+            .iter()
+            .filter(|(name, _)| name != "__type")
+            .map(|(name, val)| (name.clone(), val.clone()))
+            .collect();
+        let link = self.env.push_linked_scope(instance, link);
+        self.env.push_linked_scope(HashMap::new(), link);
+        CallScope { mark, prev_module }
+    }
+
+    /// Leave a scope entered by `enter_call_scope` / `enter_declaration_scope`.
+    pub(crate) fn leave_call_scope(&mut self, scope: CallScope) {
+        self.env.truncate(scope.mark);
+        self.switch_module(scope.prev_module);
+    }
+
+    /// Types, molds and enums a function body declares (or imports) are
+    /// local to one activation: save the active registries before such a
+    /// body runs. `None` for bodies that declare none.
+    fn save_local_types(&self, func: &FuncValue) -> Option<TypeRegistry> {
+        fn declares_types(stmts: &[Statement]) -> bool {
             stmts.iter().any(|stmt| match stmt {
                 Statement::EnumDef(_) | Statement::ClassLikeDef(_) | Statement::Import(_) => true,
-                Statement::ErrorCeiling(ec) => defines_types(&ec.handler_body),
+                Statement::ErrorCeiling(ec) => declares_types(&ec.handler_body),
                 _ => false,
             })
         }
-        func.module_type_defs.is_some()
-            || func.module_enum_defs.is_some()
-            || defines_types(&func.body)
+        if !declares_types(&func.body) {
+            return None;
+        }
+        Some(TypeRegistry {
+            type_defs: self.type_defs.clone(),
+            enum_defs: self.enum_defs.clone(),
+            mold_defs: self.mold_defs.clone(),
+            type_methods: self.type_methods.clone(),
+            type_tags: self.type_tags.clone(),
+            enum_keys: self.enum_keys.clone(),
+        })
     }
 
-    /// Overlay a function's defining-module TypeDef / enum
-    /// registries onto the interpreter's live registries before executing the
-    /// function body. Returns the previous state so the caller can restore it
-    /// after the body runs.
-    ///
-    /// Inline functions see the caller's registries. They need a snapshot
-    /// only when their body can introduce local type or enum definitions.
-    ///
-    /// Overlay semantics: defining-module entries are layered *under* the
-    /// current entries, i.e. a local TypeDef with the same name still wins.
-    /// This lets the caller's typedef shadow an imported one while ensuring
-    /// JSON schema resolution inside the imported function
-    /// body has access to every symbol the defining module saw.
-    #[allow(clippy::type_complexity)]
-    pub(crate) fn push_func_module_scope(
+    fn restore_local_types(&mut self, saved: Option<TypeRegistry>) {
+        if let Some(saved) = saved {
+            self.type_defs = saved.type_defs;
+            self.enum_defs = saved.enum_defs;
+            self.mold_defs = saved.mold_defs;
+            self.type_methods = saved.type_methods;
+            self.type_tags = saved.type_tags;
+            self.enum_keys = saved.enum_keys;
+        }
+    }
+
+    // ── Type and enum identity ──────────────────────────────
+
+    /// Declare the type `name` in the active module: give it a `__type`
+    /// tag that its instances share. A declaration evaluated again (inside
+    /// a function body) keeps its tag.
+    fn declare_type_tag(&mut self, name: &str) {
+        let module = self.active_module;
+        let def_site = self.env.definition_site();
+        let key = (module, name.to_string());
+        let tag = match self.declared_type_tags.get(&key).cloned() {
+            Some(tag) => {
+                if let Value::Str(s) = &tag
+                    && let Some(origin) = self.type_origins.get_mut(&(Arc::as_ptr(s) as usize))
+                {
+                    origin.def_site = def_site;
+                }
+                tag
+            }
+            None => {
+                let tag = self.new_type_tag(name, module, name, def_site, true);
+                self.declared_type_tags.insert(key, tag.clone());
+                tag
+            }
+        };
+        self.type_tags.insert(name.to_string(), tag);
+    }
+
+    /// Create a tag string `display` standing for the type `name` declared
+    /// in `module`. The tag is kept alive by its origin record, so its
+    /// address identifies the declaration for as long as the interpreter
+    /// runs.
+    pub(crate) fn new_type_tag(
         &mut self,
-        func: &FuncValue,
-    ) -> (
-        Option<HashMap<String, Vec<FieldDef>>>,
-        Option<HashMap<String, Vec<String>>>,
-        bool,
+        display: &str,
+        module: ModuleId,
+        name: &str,
+        def_site: Option<(usize, u64)>,
+        tag_owner: bool,
+    ) -> Value {
+        let tag = Value::str(display.to_string());
+        if let Value::Str(s) = &tag {
+            self.type_origins.insert(
+                Arc::as_ptr(s) as usize,
+                TypeOrigin {
+                    module,
+                    name: name.to_string(),
+                    def_site,
+                    tag: tag.clone(),
+                    tag_owner,
+                },
+            );
+        }
+        tag
+    }
+
+    /// A tag displaying `display` that stands for the type `name` declared
+    /// in `module` (an aliased import). The same alias of the same
+    /// declaration reuses its tag.
+    pub(crate) fn alias_type_tag(
+        &mut self,
+        display: &str,
+        module: ModuleId,
+        name: &str,
+        def_site: Option<(usize, u64)>,
+    ) -> Value {
+        let existing = self.type_origins.values().find(|origin| {
+            !origin.tag_owner
+                && origin.module == module
+                && origin.name == name
+                && matches!(&origin.tag, Value::Str(s) if s.as_str() == display)
+        });
+        if let Some(origin) = existing {
+            return origin.tag.clone();
+        }
+        self.new_type_tag(display, module, name, def_site, false)
+    }
+
+    /// Clear the tail-call context for code that is not part of the
+    /// running function (a module's top level); returns it for
+    /// `restore_active_function`.
+    pub(crate) fn take_active_function(&mut self) -> (Option<String>, HashSet<usize>, bool) {
+        (
+            self.active_function.take(),
+            std::mem::take(&mut self.append_consume_sites),
+            std::mem::replace(&mut self.tail_self_only, false),
+        )
+    }
+
+    pub(crate) fn restore_active_function(
+        &mut self,
+        saved: (Option<String>, HashSet<usize>, bool),
     ) {
-        // Ordinary functions neither overlay nor modify these registries,
-        // so callbacks can skip both potentially large registry clones.
-        if !Self::needs_registry_snapshot(func) {
-            return (None, None, false);
-        }
-        let prev_td = Some(self.type_defs.clone());
-        let prev_ed = Some(self.enum_defs.clone());
-        if let Some(mtd) = &func.module_type_defs {
-            for (k, v) in mtd.iter() {
-                self.type_defs.entry(k.clone()).or_insert_with(|| v.clone());
-            }
-        }
-        if let Some(med) = &func.module_enum_defs {
-            for (k, v) in med.iter() {
-                self.enum_defs.entry(k.clone()).or_insert_with(|| v.clone());
-            }
-        }
-        (prev_td, prev_ed, true)
+        self.active_function = saved.0;
+        self.append_consume_sites = saved.1;
+        self.tail_self_only = saved.2;
     }
 
-    /// Restore TypeDef / enum registries that were captured by
-    /// `push_func_module_scope`. No-op if `push_func_module_scope` reported
-    /// `changed == false`.
-    pub(crate) fn pop_func_module_scope(
-        &mut self,
-        prev_td: Option<HashMap<String, Vec<FieldDef>>>,
-        prev_ed: Option<HashMap<String, Vec<String>>>,
-        changed: bool,
-    ) {
-        if changed {
-            self.type_defs =
-                prev_td.expect("an overlay push always captures the previous registry");
-            self.enum_defs =
-                prev_ed.expect("an overlay push always captures the previous registry");
+    /// The `__type` value for an instance of the type the active module
+    /// calls `name`.
+    pub(crate) fn type_tag_value(&self, name: &str) -> Value {
+        self.type_tags
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| Value::str(name.to_string()))
+    }
+
+    /// The declaration a `__type` tag stands for.
+    pub(crate) fn origin_of_tag(&self, tag: &Value) -> Option<&TypeOrigin> {
+        match tag {
+            Value::Str(s) => self.type_origins.get(&(Arc::as_ptr(s) as usize)),
+            _ => None,
         }
     }
 
-    /// Lazy snapshot for a tail-call chain. Capture the caller's registries
-    /// before the first callee that overlays module context or can define
-    /// local types. Chains that cannot change the registries avoid cloning.
-    #[allow(clippy::type_complexity)]
-    pub(crate) fn push_func_module_scope_tracked(
-        &mut self,
-        func: &FuncValue,
-        saved_root: &mut Option<ModuleRegistrySnapshot>,
-    ) -> bool {
-        if !Self::needs_registry_snapshot(func) {
-            return false;
+    /// The declaration behind the name `name` in the active module; a name
+    /// with no recorded declaration is taken to be the active module's.
+    pub(crate) fn type_origin_of_name(&self, name: &str) -> TypeOrigin {
+        self.type_tags
+            .get(name)
+            .and_then(|tag| self.origin_of_tag(tag))
+            .cloned()
+            .unwrap_or_else(|| TypeOrigin {
+                module: self.active_module,
+                name: name.to_string(),
+                def_site: None,
+                tag: Value::str(name.to_string()),
+                tag_owner: false,
+            })
+    }
+
+    /// Find the method `method` of a pack whose `__type` is `tag`: in the
+    /// module that declared the pack's type, else by name in the active
+    /// module, else in the one module that declares a type of that name
+    /// with such a method. Returns the method and the declaration it runs
+    /// in.
+    pub(crate) fn resolve_user_method(
+        &self,
+        tag: &Value,
+        type_name: &str,
+        method: &str,
+    ) -> Option<(FuncDef, TypeOrigin)> {
+        if let Some(origin) = self.origin_of_tag(tag)
+            && let Some(func_def) = self
+                .methods_in(origin.module, &origin.name)
+                .and_then(|methods| methods.get(method))
+        {
+            return Some((func_def.clone(), origin.clone()));
         }
-        if saved_root.is_none() {
-            *saved_root = Some((self.type_defs.clone(), self.enum_defs.clone()));
+        if let Some(func_def) = self
+            .type_methods
+            .get(type_name)
+            .and_then(|methods| methods.get(method))
+        {
+            return Some((func_def.clone(), self.type_origin_of_name(type_name)));
         }
-        if let Some(mtd) = &func.module_type_defs {
-            for (k, v) in mtd.iter() {
-                self.type_defs.entry(k.clone()).or_insert_with(|| v.clone());
+        let mut found: Option<(FuncDef, TypeOrigin)> = None;
+        for origin in self.type_origins.values() {
+            if !origin.tag_owner || origin.name != type_name {
+                continue;
+            }
+            if let Some(func_def) = self
+                .methods_in(origin.module, &origin.name)
+                .and_then(|methods| methods.get(method))
+            {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some((func_def.clone(), origin.clone()));
             }
         }
-        if let Some(med) = &func.module_enum_defs {
-            for (k, v) in med.iter() {
-                self.enum_defs.entry(k.clone()).or_insert_with(|| v.clone());
+        found
+    }
+
+    /// Key for an enum the active module declares. Enum values carry the
+    /// key, so two modules' enums of the same name stay distinct values
+    /// while an aliased import (`Color => Tint`) still names the same one.
+    fn enum_key_for(&mut self, name: &str, variants: &[String]) -> String {
+        let module = self.active_module;
+        let mut candidate = name.to_string();
+        let mut n = 1;
+        loop {
+            match self.enum_key_owners.get(&candidate) {
+                Some((m, owner_name, owner_variants))
+                    if *m == module && owner_name == name && owner_variants == variants =>
+                {
+                    return candidate;
+                }
+                Some(_) => {
+                    n += 1;
+                    candidate = format!("{}#{}", name, n);
+                }
+                None => {
+                    self.enum_key_owners.insert(
+                        candidate.clone(),
+                        (module, name.to_string(), variants.to_vec()),
+                    );
+                    self.enum_variants
+                        .insert(candidate.clone(), variants.to_vec());
+                    return candidate;
+                }
             }
         }
-        true
+    }
+
+    /// The key of the enum the active module calls `name`.
+    pub(crate) fn enum_key_of(&self, name: &str) -> String {
+        self.enum_keys
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| name.to_string())
+    }
+
+    /// Variants of the enum behind an enum value's key.
+    pub(crate) fn enum_variants_of(&self, key: &str) -> Option<&Vec<String>> {
+        self.enum_variants
+            .get(key)
+            .or_else(|| self.enum_defs.get(key))
     }
 
     /// Materialise the synthetic defaultFn return.
@@ -2252,12 +3212,57 @@ impl Interpreter {
     /// `name` equals `DEFAULT_FN_SENTINEL_NAME` is invoked. The body is
     /// intentionally empty; we only ever produce the return type's default.
     pub(crate) fn invoke_default_fn(&mut self, func: &FuncValue) -> Result<Value, RuntimeError> {
+        if let Some(result) = func.closure.get(Self::DEFAULT_FN_RESULT_SLOT) {
+            return Ok(result.clone());
+        }
         let ret_ty = match &func.return_type {
             Some(t) => t.clone(),
             None => return Ok(Value::Unit),
         };
         let mut visiting = HashSet::new();
         self.default_for_type_expr(&ret_ty, &mut visiting)
+    }
+
+    /// Run a function body with its arguments bound, in the function's own
+    /// scope. Shared by the call helpers below; the scope and any types
+    /// the body declares are gone when it returns.
+    fn run_function_body(
+        &mut self,
+        func: &FuncValue,
+        arg_values: Vec<Value>,
+    ) -> Result<Signal, RuntimeError> {
+        if let Some(builtin) = func.name.strip_prefix(PRELUDE_FUNCTION_PREFIX) {
+            return self.call_prelude_function_value(builtin, arg_values);
+        }
+        let scope = self.enter_call_scope(func);
+        let local_types = self.save_local_types(func);
+        let result = match self.bind_params_with_effective_defaults(func, arg_values) {
+            Ok(Some(signal)) => Ok(signal),
+            Ok(None) => self.eval_function_body(&func.body),
+            Err(err) => Err(err),
+        };
+        self.restore_local_types(local_types);
+        self.leave_call_scope(scope);
+        result
+    }
+
+    pub(crate) fn enter_call_depth(&mut self) -> Result<(), RuntimeError> {
+        // RCB-301: depth guard
+        self.call_depth += 1;
+        if self.call_depth > MAX_CALL_DEPTH {
+            self.call_depth -= 1;
+            return Err(RuntimeError {
+                message: format!(
+                    "Maximum call depth ({}) exceeded. Use tail recursion or restructure the code.",
+                    MAX_CALL_DEPTH
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn exit_call_depth(&mut self) {
+        self.call_depth -= 1;
     }
 
     /// Helper: call a function with pre-evaluated argument values,
@@ -2268,17 +3273,7 @@ impl Interpreter {
         func: &FuncValue,
         arg_values: &[Value],
     ) -> Result<Signal, RuntimeError> {
-        // RCB-301: depth guard
-        self.call_depth += 1;
-        if self.call_depth > MAX_CALL_DEPTH {
-            self.call_depth -= 1;
-            return Err(RuntimeError {
-                message: format!(
-                    "Maximum call depth ({}) exceeded. Use tail recursion or restructure the code.",
-                    MAX_CALL_DEPTH
-                ),
-            });
-        }
+        self.enter_call_depth()?;
 
         // E30 Phase 6 / E30B-004: synthetic defaultFn fast path.
         if func.name == Self::DEFAULT_FN_SENTINEL_NAME {
@@ -2289,59 +3284,26 @@ impl Interpreter {
         // Internal callback paths (list ops, unmold hooks) should not inherit
         // outer-function tail-call context.
         let prev_active = self.active_function.take();
-        // C20B-015 / ROOT-18: overlay defining-module typedef scope
-        let (prev_td, prev_ed, td_changed) = self.push_func_module_scope(func);
-        // Closure scope
-        self.env.push_scope();
-        for (name, val) in func.closure.iter() {
-            self.env.define_force(name, val.clone());
-        }
-        // Local scope for parameters and body
-        self.env.push_scope();
-        if let Some(signal) = self.bind_params_with_effective_defaults(func, arg_values)? {
-            self.env.pop_scope();
-            self.env.pop_scope();
-            self.pop_func_module_scope(prev_td, prev_ed, td_changed);
-            self.active_function = prev_active;
-            self.call_depth -= 1;
-            return Ok(signal);
-        }
-
-        // C20B-015 / ROOT-18 (3rd reopen): body evaluation must NOT use `?`.
-        // A `RuntimeError` from the body would skip every cleanup step below,
-        // leaving the overlayed TypeDef / enum registries, pushed scopes,
-        // saved `active_function` and bumped `call_depth` in place. In REPL
-        // mode the interpreter is reused across inputs, so the leak lets a
-        // subsequent `JSON[raw, Schema]()` silently resolve against an
-        // imported module's private typedefs. Capture the result, run the
-        // cleanup path unconditionally, then propagate.
-        let result = self.eval_statements(&func.body);
-        self.env.pop_scope(); // pop local scope
-        self.env.pop_scope(); // pop closure scope
-        self.pop_func_module_scope(prev_td, prev_ed, td_changed);
+        let prev_self_only = std::mem::replace(&mut self.tail_self_only, false);
+        let result = self.run_function_body(func, arg_values.to_vec());
+        self.tail_self_only = prev_self_only;
         self.active_function = prev_active;
         self.call_depth -= 1;
-
         result
     }
 
     /// Helper: call a function with pre-evaluated argument values.
+    ///
+    /// A throw inside the callback is parked in `pending_throw` and
+    /// surfaces as a `RuntimeError`, which the nearest error ceiling turns
+    /// back into the throw. The gorilla ends the program: it surfaces the
+    /// same way with `pending_gorilla` set, and no ceiling catches it.
     pub(crate) fn call_function_with_values(
         &mut self,
         func: &FuncValue,
         arg_values: &[Value],
     ) -> Result<Value, RuntimeError> {
-        // RCB-301: depth guard
-        self.call_depth += 1;
-        if self.call_depth > MAX_CALL_DEPTH {
-            self.call_depth -= 1;
-            return Err(RuntimeError {
-                message: format!(
-                    "Maximum call depth ({}) exceeded. Use tail recursion or restructure the code.",
-                    MAX_CALL_DEPTH
-                ),
-            });
-        }
+        self.enter_call_depth()?;
 
         // E30 Phase 6 / E30B-004: synthetic defaultFn fast path.
         if func.name == Self::DEFAULT_FN_SENTINEL_NAME {
@@ -2353,45 +3315,9 @@ impl Interpreter {
         // Internal callback paths (Map/Filter/etc.) should not inherit
         // outer-function tail-call context.
         let prev_active = self.active_function.take();
-        // C20B-015 / ROOT-18: overlay defining-module typedef scope
-        let (prev_td, prev_ed, td_changed) = self.push_func_module_scope(func);
-        // Closure scope
-        self.env.push_scope();
-        for (name, val) in func.closure.iter() {
-            self.env.define_force(name, val.clone());
-        }
-        // Local scope for parameters and body
-        self.env.push_scope();
-        if let Some(signal) = self.bind_params_with_effective_defaults(func, arg_values)? {
-            self.env.pop_scope(); // pop local scope
-            self.env.pop_scope(); // pop closure scope
-            self.pop_func_module_scope(prev_td, prev_ed, td_changed);
-            self.active_function = prev_active;
-            self.call_depth -= 1;
-            return match signal {
-                Signal::Value(v) => Ok(v),
-                Signal::TailCall(_) => Err(RuntimeError {
-                    message: "Unexpected tail call in list operation".to_string(),
-                }),
-                Signal::Throw(err) => {
-                    // Store thrown value so that error ceiling can recover it
-                    self.pending_throw = Some(err.clone());
-                    Err(RuntimeError {
-                        message: format!("Unhandled error in list operation: {}", err),
-                    })
-                }
-                Signal::Gorilla => Ok(Value::Gorilla),
-            };
-        }
-
-        // C20B-015 / ROOT-18 (3rd reopen): body evaluation must NOT use `?`.
-        // Same cleanup invariant as `call_function_preserving_signals`: the
-        // overlayed TypeDef / enum registries and pushed scopes must be
-        // torn down before propagating any `RuntimeError` from the body.
-        let body_result = self.eval_statements(&func.body);
-        self.env.pop_scope(); // pop local scope
-        self.env.pop_scope(); // pop closure scope
-        self.pop_func_module_scope(prev_td, prev_ed, td_changed);
+        let prev_self_only = std::mem::replace(&mut self.tail_self_only, false);
+        let body_result = self.run_function_body(func, arg_values.to_vec());
+        self.tail_self_only = prev_self_only;
         self.active_function = prev_active;
         self.call_depth -= 1;
 
@@ -2407,51 +3333,23 @@ impl Interpreter {
                     message: format!("Unhandled error in list operation: {}", err),
                 })
             }
-            Ok(Signal::Gorilla) => Ok(Value::Gorilla),
+            Ok(Signal::Gorilla) => Err(self.gorilla_escape()),
             Err(err) => Err(err),
         }
     }
 
-    // ── Function Calls ──────────────────────────────────────
-
-    /// F62B-001: propagate a module context onto a function value that has
-    /// none of its own.
-    ///
-    /// Function values stored inside closure snapshots and inside the module
-    /// symbol table are definition-time originals: their closures are
-    /// truncated to the symbols defined before them, and they carry no
-    /// module typedef / enum / symbol attachments. Calling such an original
-    /// directly loses the defining module's late-defined siblings (and JSON
-    /// schemas) at chain depth 3+. Whenever a function is resolved *through*
-    /// a module context (the closure scope of a module function, the module
-    /// symbol table, a trampoline retarget), re-attach that context so the
-    /// resolution is self-sustaining at any depth. Values that already carry
-    /// their own module context (e.g. functions imported from a different
-    /// module) are returned unchanged.
-    fn attach_module_context(val: &Value, ctx: &FuncValue) -> Value {
-        if ctx.module_symbols.is_none()
-            && ctx.module_type_defs.is_none()
-            && ctx.module_enum_defs.is_none()
-        {
-            return val.clone();
+    /// The `><` fired inside a callback: end the program. The builtin that
+    /// ran the callback cannot return a signal, so the gorilla travels as a
+    /// `RuntimeError`; `eval_program` turns it back into the gorilla and no
+    /// error ceiling catches it.
+    pub(crate) fn gorilla_escape(&mut self) -> RuntimeError {
+        self.pending_gorilla = true;
+        RuntimeError {
+            message: "Gorilla (><) terminated the program".to_string(),
         }
-        if let Value::Function(fv) = val
-            && fv.module_symbols.is_none()
-            && fv.name != "<lambda>"
-            && fv.name != "<partial>"
-        {
-            let mut attached = fv.clone();
-            attached.module_symbols = ctx.module_symbols.clone();
-            if attached.module_type_defs.is_none() {
-                attached.module_type_defs = ctx.module_type_defs.clone();
-            }
-            if attached.module_enum_defs.is_none() {
-                attached.module_enum_defs = ctx.module_enum_defs.clone();
-            }
-            return Value::Function(attached);
-        }
-        val.clone()
     }
+
+    // ── Function Calls ──────────────────────────────────────
 
     /// Call a function with arguments, with tail call optimization.
     ///
@@ -2460,29 +3358,21 @@ impl Interpreter {
     /// (trampoline) on TailCall signals instead of growing the stack.
     ///
     /// For mutual recursion, `mutual_tail_call_target` is set by eval_expr_tail
-    /// to indicate that the next iteration should execute a different function.
+    /// to the function to execute next.
     fn call_function(&mut self, func: &FuncValue, args: &[Expr]) -> Result<Signal, RuntimeError> {
-        // RCB-301: Guard against stack overflow from deeply recursive calls.
-        self.call_depth += 1;
-        if self.call_depth > MAX_CALL_DEPTH {
-            self.call_depth -= 1;
-            return Err(RuntimeError {
-                message: format!(
-                    "Maximum call depth ({}) exceeded. Use tail recursion or restructure the code.",
-                    MAX_CALL_DEPTH
-                ),
-            });
+        // Evaluate arguments before the call counts toward the depth
+        // limit: a throw while evaluating them leaves without ever entering
+        // the callee, so a caught throw cannot leak call depth.
+        let mut arg_values = Vec::with_capacity(args.len());
+        for arg in args {
+            match self.eval_expr(arg)? {
+                Signal::Value(v) => arg_values.push(v),
+                other => return Ok(other),
+            }
         }
 
-        // Evaluate arguments
-        let mut arg_values = Vec::new();
-        for arg in args {
-            let val = match self.eval_expr(arg)? {
-                Signal::Value(v) => v,
-                other => return Ok(other),
-            };
-            arg_values.push(val);
-        }
+        // RCB-301: Guard against stack overflow from deeply recursive calls.
+        self.enter_call_depth()?;
 
         // E30 Phase 6 / E30B-004: synthetic defaultFn fast path.
         //
@@ -2493,7 +3383,6 @@ impl Interpreter {
         // it materialises and returns the **return type's default value**
         // per Lock-D verdict (E30 Phase 0, 2026-04-28):
         //   - primitive return → primitive default
-        //   - `:Unit` → no-op (Value::Unit)
         //   - `:Async[T]` → resolved Async carrying T's default
         //   - registered class-like → default pack with cycle guard
         //   - opaque alias → not generatable (Phase 5 reject path)
@@ -2504,6 +3393,7 @@ impl Interpreter {
 
         // Save the previous active function name
         let prev_active = self.active_function.take();
+        let prev_self_only = std::mem::replace(&mut self.tail_self_only, false);
 
         // Set active function for tail call detection
         if func.name != "<lambda>" {
@@ -2527,237 +3417,41 @@ impl Interpreter {
             .map(|plan| plan.sites)
             .unwrap_or_default(),
         );
-        // C20B-015 / ROOT-18: overlay defining-module typedef scope.
-        //
-        // Invariant: on *every* exit path from this trampoline we restore
-        // `self.type_defs` / `self.enum_defs` to the snapshot captured here
-        // (`saved_td_root` / `saved_ed_root`), regardless of which callee
-        // within the tail-call chain actually required an overlay.
-        //
-        // Before the fix, the initial callee's `td_changed` flag gated the
-        // restore. When the initial callee was a *local* function
-        // (`td_changed == false`) and a mutual tail-call retargeted to an
-        // *imported* function (whose overlay push succeeded), the exit
-        // path skipped the restore and the imported function's private
-        // TypeDefs leaked into the caller's scope permanently. Pinned by
-        // `c20b_015_interpreter_mutual_tail_call_does_not_leak_overlay`.
-        //
-        // `push_func_module_scope_tracked` captures the caller's registries
-        // before the first callee that can overlay or modify them.
-        // When no callee in the chain requires a snapshot,
-        // the registries are never touched, `saved_root` stays `None`, and
-        // the exit paths below skip the restore entirely — no per-call
-        // `HashMap` deep-copy of the root registries.
-        let mut saved_root: Option<ModuleRegistrySnapshot> = None;
-        self.push_func_module_scope_tracked(&current_func, &mut saved_root);
-        loop {
-            // Create closure scope (separate from local scope so user variables
-            // can shadow captured names without "already defined" errors)
-            self.env.push_scope();
-            for (name, val) in current_func.closure.iter() {
-                // F62B-001: function values inside a closure snapshot are the
-                // definition-time originals — without a module context of
-                // their own, a nested call into them loses the module's
-                // late-defined siblings (and JSON schemas) from depth 3 on.
-                // Re-attach the current function's module context so the
-                // chain never degrades.
-                self.env
-                    .define_force(name, Self::attach_module_context(val, &current_func));
-            }
-            if let Some(mod_syms) = current_func.module_symbols.clone() {
-                // F62B-001: complete the scope with module-level siblings the
-                // definition-time closure missed (functions defined after this
-                // one). Closure entries win — they are the same module values,
-                // just captured earlier — so only fill the gaps.
-                for (name, val) in mod_syms.iter() {
-                    if !current_func.closure.contains_key(name) {
-                        self.env
-                            .define_force(name, Self::attach_module_context(val, &current_func));
-                    }
-                }
-            }
-
-            // Create local scope for parameters and function body
-            self.env.push_scope();
-            // Bind parameters using effective defaults.
-            //
-            // C25B-021 / Phase 5-F2-2 Stage B: after binding, release our
-            // hold on `current_args` so the env becomes the unique Arc
-            // owner for any Value::List passed as an argument. Without
-            // this, the Append / Prepend unique-ownership fast path
-            // always sees rc>=2 and falls back to a full Vec clone,
-            // making the tail-recursive Append loop O(N²).
-            //
-            // `bind_params_with_effective_defaults` still clones each
-            // slot internally, but once it returns the slots themselves
-            // are no longer needed for this trampoline iteration — we'll
-            // receive a fresh TailCall(new_args) if tail-recursion loops.
-            let bind_outcome =
-                self.bind_params_with_effective_defaults(&current_func, &current_args);
-            current_args.clear();
-            match bind_outcome {
-                Ok(Some(signal)) => {
-                    self.env.pop_scope(); // pop local scope
-                    self.env.pop_scope(); // pop closure scope
-                    if let Some((td, ed)) = saved_root.take() {
-                        self.type_defs = td;
-                        self.enum_defs = ed;
-                    }
-                    self.active_function = prev_active;
-                    self.append_consume_sites = saved_consume_sites;
-                    self.call_depth -= 1;
-                    return Ok(signal);
-                }
-                Ok(None) => {}
-                Err(err) => {
-                    self.env.pop_scope(); // pop local scope
-                    self.env.pop_scope(); // pop closure scope
-                    if let Some((td, ed)) = saved_root.take() {
-                        self.type_defs = td;
-                        self.enum_defs = ed;
-                    }
-                    self.active_function = prev_active;
-                    self.append_consume_sites = saved_consume_sites;
-                    self.call_depth -= 1;
-                    return Err(err);
-                }
-            }
-
-            // Execute body (with error ceiling support).
-            //
-            // C20B-015 / ROOT-18 (3rd reopen): body evaluation must NOT use
-            // `?`. A `RuntimeError` from the body would skip the pops and
-            // root-scope restore, leaving `self.type_defs` / `self.enum_defs`
-            // holding the defining-module overlay, the closure + local scopes
-            // pushed, and `self.active_function` / `self.call_depth` bumped.
-            // The REPL reuses this interpreter across inputs, so the leak
-            // would make a subsequent top-level `JSON[raw, Schema]()`
-            // silently resolve against an imported module's private schemas
-            // (or — for enum / TypeDef aliasing — quietly hit wrong data).
-            // Bind the result, run cleanup on every failure path, then
-            // propagate. On the non-error paths we still need the ability
-            // to continue the trampoline (self-TCO) or retarget (mutual
-            // TCO) without tearing down the root-scope snapshot, which is
-            // handled inside the `Ok(result)` match below.
-            let body_result = self.eval_statements(&current_func.body);
-            let result = match body_result {
-                Ok(signal) => signal,
-                Err(err) => {
-                    self.env.pop_scope(); // pop local scope
-                    self.env.pop_scope(); // pop closure scope
-                    if let Some((td, ed)) = saved_root.take() {
-                        self.type_defs = td;
-                        self.enum_defs = ed;
-                    }
-                    self.active_function = prev_active;
-                    self.append_consume_sites = saved_consume_sites;
-                    self.call_depth -= 1;
-                    return Err(err);
-                }
-            };
-
-            self.env.pop_scope(); // pop local scope
-            self.env.pop_scope(); // pop closure scope
-
-            match result {
-                Signal::TailCall(new_args) => {
-                    // Check if this is a mutual tail call (to a different function)
-                    if let Some(target_name) = self.mutual_tail_call_target.take() {
-                        // Mutual tail call: switch to the target function.
-                        // First check the current env scope (handles global/module-level functions).
-                        // If not found, check the closure of the current function (handles
-                        // imported functions captured in the closure scope, which was already
-                        // popped), then the defining module's symbol table (F62B-001:
-                        // siblings defined after the current function are not in its
-                        // definition-time closure).
-                        let target_val = self
-                            .env
-                            .get(&target_name)
-                            .cloned()
-                            .or_else(|| current_func.closure.get(&target_name).cloned())
-                            .or_else(|| {
-                                current_func
-                                    .module_symbols
-                                    .as_ref()
-                                    .and_then(|syms| syms.get(&target_name).cloned())
-                            })
-                            // F62B-001: a target fetched through the module context is a
-                            // definition-time original — inherit the chain's module
-                            // context so the next hop keeps resolving siblings.
-                            .map(|v| Self::attach_module_context(&v, &current_func));
-                        let target_func_opt = target_val.and_then(|v| match v {
-                            Value::Function(f) => Some(f),
-                            _ => None,
-                        });
-                        if let Some(target_func) = target_func_opt {
-                            current_func = target_func.clone();
-                            self.active_function = Some(target_name);
-                            current_args = new_args;
-                            // C20B-015 / ROOT-18: target function may be from
-                            // a different module. Reset to the caller's
-                            // saved root scope, then re-overlay with the new
-                            // function's defining-module scope. This keeps
-                            // overlays scoped to exactly the iterations that
-                            // need them and never leaks a previous iteration's
-                            // overlay into a later iteration's scope.
-                            if let Some((td, ed)) = saved_root.as_ref() {
-                                self.type_defs = td.clone();
-                                self.enum_defs = ed.clone();
-                            }
-                            // The retargeted function has its own consume
-                            // plan (usually none) — never carry the previous
-                            // function's sites across.
-                            self.append_consume_sites = crate::parser::append_consume_plan(
-                                &current_func.name,
-                                &current_func.params,
-                                &current_func.body,
-                            )
-                            .map(|plan| plan.sites)
-                            .unwrap_or_default();
-                            self.push_func_module_scope_tracked(&current_func, &mut saved_root);
-                            continue;
-                        } else {
-                            // Target function not found in any scope — fall back to
-                            // normal evaluation instead of erroring. This handles cases
-                            // where a non-recursive function call in tail position was
-                            // speculatively treated as a mutual tail call.
-                            self.active_function = prev_active.clone();
-                            if let Some((td, ed)) = saved_root.take() {
-                                self.type_defs = td;
-                                self.enum_defs = ed;
-                            }
-                            self.append_consume_sites = saved_consume_sites;
-                            // Re-evaluate the original function body without tail call optimization.
-                            // We need to re-execute the function with the original args but
-                            // as a normal call. Instead, we reconstruct the call.
-                            // The simplest safe fallback: look up the function and call it directly.
-                            // Since the target wasn't found, just error with a clear message.
-                            self.call_depth -= 1;
-                            return Err(RuntimeError {
-                                message: format!(
-                                    "Mutual tail call target '{}' not found",
-                                    target_name
-                                ),
-                            });
-                        }
+        let result = loop {
+            // The arguments move into the environment, which becomes the
+            // unique owner of any list argument — the Append / Prepend
+            // unique-ownership fast path turns a tail-recursive build loop
+            // from O(N²) into amortized O(N).
+            let args = std::mem::take(&mut current_args);
+            match self.run_function_body(&current_func, args) {
+                Ok(Signal::TailCall(new_args)) => {
+                    if let Some(target) = self.mutual_tail_call_target.take() {
+                        // Mutual tail call: switch to the target resolved
+                        // where the call was written.
+                        self.active_function = Some(target.name.clone());
+                        current_func = target;
+                        // The retargeted function has its own consume
+                        // plan (usually none) — never carry the previous
+                        // function's sites across.
+                        self.append_consume_sites = crate::parser::append_consume_plan(
+                            &current_func.name,
+                            &current_func.params,
+                            &current_func.body,
+                        )
+                        .map(|plan| plan.sites)
+                        .unwrap_or_default();
                     }
                     // Self tail call: loop with new arguments
                     current_args = new_args;
-                    continue;
                 }
-                other => {
-                    // Normal result: restore and return.
-                    if let Some((td, ed)) = saved_root.take() {
-                        self.type_defs = td;
-                        self.enum_defs = ed;
-                    }
-                    self.active_function = prev_active;
-                    self.append_consume_sites = saved_consume_sites;
-                    self.call_depth -= 1;
-                    return Ok(other);
-                }
+                other => break other,
             }
-        }
+        };
+        self.active_function = prev_active;
+        self.tail_self_only = prev_self_only;
+        self.append_consume_sites = saved_consume_sites;
+        self.call_depth -= 1;
+        result
     }
 
     /// Evaluate template string interpolation.

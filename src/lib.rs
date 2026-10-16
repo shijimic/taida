@@ -13,6 +13,7 @@ pub mod auth;
 pub mod codegen;
 #[cfg(feature = "community")]
 pub mod community;
+pub(crate) mod crmath;
 /// SHA-256 digest (hand-written, no external crate).
 pub mod crypto;
 pub mod diagnostics;
@@ -26,7 +27,7 @@ pub mod lsp;
 pub mod module_graph;
 pub mod net_surface;
 pub mod parser;
-pub(crate) mod project_root;
+pub mod project_root;
 // C25B-018: best-effort terminal-state restoration on panic / fatal
 // signal. See module docs for scope / non-negotiables.
 pub mod panic_cleanup;

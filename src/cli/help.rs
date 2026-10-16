@@ -94,8 +94,15 @@ Commands:
   todo     Scan TODO/Stub molds
 
 Notes:
-  `taida way <PATH>` is the full quality gate. It runs check, lint, and verify.
-  `--no-check` is not accepted under `taida way`."
+  `taida way <PATH>` is the full quality gate. It runs check, lint, and verify,
+  and ends at the first stage that fails. With `--format json` or `--format sarif`
+  it prints one document holding the stages it ran.
+  `--no-check` is not accepted under `taida way`.
+
+Exit codes:
+  0   Nothing to report as an ERROR (with `--strict`: no WARNING either).
+  1   At least one ERROR. A file that cannot be read or parsed is an ERROR.
+  2   Usage error (or, for `way lint`, a file that could not be read or parsed)."
     );
 }
 
@@ -396,8 +403,8 @@ Usage:
 Description:
   Run the naming-convention lint pass over <PATH>. <PATH> may be
   a single .td file or a directory (.td files are collected recursively).
-  The lint enforces category-based naming rules and emits diagnostics in the
-  E1801..E1809 band.
+  The lint enforces category-based naming rules (E1801..E1809) and the
+  format of the @Since doc tag (E1810).
 
 Exit codes:
   0   No lint diagnostics surfaced.
@@ -432,7 +439,7 @@ Notes:
   --gen and --label can be combined.
   --version is mutually exclusive with --gen/--label.
   By default, upgrades to the latest stable version.
-  AST rewrite flags (`--d28`, `--d29`, `--e30`) were removed in @e.X.
+  AST rewrite flags (`--d28`, `--d29`, `--e30`) were removed.
   No migration command is provided.
   Windows: only --check is supported (self-replace is not yet implemented).
 

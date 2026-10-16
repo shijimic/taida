@@ -153,7 +153,7 @@ bad <= HostStep["bad", @[@()]]()
 fn host_step_method_must_be_compile_time_string() {
     let source = r#">>> taida-lang/abi => @(HostStep)
 
-bad <= HostStep[toString("get"), @[]]()
+bad <= HostStep["ge" + "t", @[]]()
 "#;
 
     let (ok, output) = run_way_check(source, "host_step_dynamic_method");
@@ -396,7 +396,7 @@ cap <= HostCapability["MISSING", Kind]()
 fn host_capability_manifest_requires_compile_time_pair() {
     let source = r#">>> taida-lang/abi => @(HostCapability)
 
-cap <= HostCapability[toString("CAP"), "mock/kind"]()
+cap <= HostCapability["CA" + "P", "mock/kind"]()
 "#;
 
     let errors = typecheck_with_manifest(source, &[("CAP", "mock/kind")]);

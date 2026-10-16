@@ -506,6 +506,7 @@ impl Parser {
                     value,
                     doc_comments,
                     span: start_span,
+                    forward: false,
                 }))
             }
 
@@ -558,6 +559,7 @@ impl Parser {
                     value,
                     doc_comments,
                     span: start_span,
+                    forward: false,
                 }))
             }
 
@@ -2153,6 +2155,7 @@ impl Parser {
                     value,
                     doc_comments,
                     span: start_span,
+                    forward: true,
                 }));
             }
 
@@ -2202,7 +2205,22 @@ mod parser_expr;
 
 /// Convenience function: parse source code into a Program.
 pub fn parse(source: &str) -> (Program, Vec<ParseError>) {
-    let (tokens, lex_errors) = crate::lexer::tokenize(source);
+    parse_tokens(crate::lexer::tokenize(source), source)
+}
+
+/// [`parse`] for a fragment of a larger source, whose first line is line
+/// `first_line` of it: the spans carry the fragment's place in the file.
+pub fn parse_from_line(source: &str, first_line: usize) -> (Program, Vec<ParseError>) {
+    parse_tokens(
+        crate::lexer::Lexer::starting_at_line(source, first_line).tokenize(),
+        source,
+    )
+}
+
+fn parse_tokens(
+    (tokens, lex_errors): (Vec<crate::lexer::Token>, Vec<crate::lexer::LexError>),
+    source: &str,
+) -> (Program, Vec<ParseError>) {
     if !lex_errors.is_empty() {
         let parse_errors: Vec<ParseError> = lex_errors
             .into_iter()

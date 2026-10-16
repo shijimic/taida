@@ -107,7 +107,7 @@ getPilot id: Int includeDeleted: Bool =
 ///@ Since: e.32
 ```
 
-doc-comment の lint (`taida way lint`) は、`@Since:` の値が `[a-z]\.\d+(\.[a-z0-9]+)?` の正規表現に一致しない場合に、エラーとして処理します。
+doc-comment の lint (`taida way lint`) は、`@Since:` の値が `[a-z]\.\d+(\.[a-z0-9]+)?` の正規表現に一致しない場合に、`[E1810]` のエラーとして処理します。
 
 ### @Deprecated
 
@@ -510,3 +510,9 @@ createPilot name: Str =
 | `@AI-Complexity` | 計算量・複雑さ |
 | `@AI-SideEffects` | 副作用 |
 | `@AI-Hint` | 実装・利用時の補助ヒント |
+
+---
+
+## タグの読み方
+
+タグは、次のタグの行までの行をすべて含みます。値が数行に分かれていても、書いた行は欠けずにドキュメントへ出力されます。`@Purpose` / `@Returns` などの 1 つの値は、続く行を空白でつなげて 1 つの値として読みます。`@Params` / `@Throws` の箇条書きは、`-` で始まる行が 1 項目で、`-` で始まらない続きの行はその前の項目に足されます (`-` を 1 つも使わない場合は 1 行が 1 項目です)。`@AI-Context` / `@AI-Constraints` などの AI 協業タグは 1 行を 1 項目として読みます。`@Example` / `@AI-Examples` は、コードのインデントと空行をそのまま保ちます。

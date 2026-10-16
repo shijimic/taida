@@ -6,7 +6,7 @@
 // original signatures, bodies, and privacy; only the enclosing file changes.
 
 use super::{Lowering, simple_hash};
-use crate::codegen::ir::IrVar;
+use crate::codegen::ir::{IrFunction, IrInst, IrVar};
 
 impl Lowering {
     pub fn new() -> Self {
@@ -118,7 +118,7 @@ impl Lowering {
             "listenerClose".to_string(),
             "taida_os_listener_close".to_string(),
         );
-        stdlib_runtime_funcs.insert("udpClose".to_string(), "taida_os_socket_close".to_string());
+        stdlib_runtime_funcs.insert("udpClose".to_string(), "taida_os_udp_close".to_string());
         // Core-bundled pool functions
         stdlib_runtime_funcs.insert("poolCreate".to_string(), "taida_pool_create".to_string());
         stdlib_runtime_funcs.insert("poolAcquire".to_string(), "taida_pool_acquire".to_string());
@@ -140,14 +140,23 @@ impl Lowering {
             lambda_funcs: Vec::new(),
             lambda_vars: std::collections::HashMap::new(),
             closure_vars: std::collections::HashSet::new(),
+            function_ref_vars: std::collections::HashSet::new(),
             current_heap_vars: Vec::new(),
             stdlib_runtime_funcs,
             stdlib_constants: std::collections::HashMap::new(),
+            core_mold_aliases: std::collections::HashMap::new(),
             int_vars: std::collections::HashSet::new(),
             float_vars: std::collections::HashSet::new(),
             string_vars: std::collections::HashSet::new(),
             bool_vars: std::collections::HashSet::new(),
             current_func_name: None,
+            local_body_depth: 0,
+            inner_func_scopes: Vec::new(),
+            local_closure_scopes: Vec::new(),
+            inner_funcs_ahead: Vec::new(),
+            closure_self: None,
+            lambda_binding_name: None,
+            ceiling_tail_params: None,
             field_names: std::collections::HashSet::new(),
             field_type_tags: std::collections::HashMap::new(),
             field_enum_descriptors: std::collections::HashMap::new(),
@@ -170,16 +179,19 @@ impl Lowering {
             list_element_types: std::collections::HashMap::new(),
             pack_field_kinds: std::collections::HashMap::new(),
             type_method_defs: std::collections::HashMap::new(),
+            json_rebuild_fns: std::collections::HashMap::new(),
             top_level_vars: std::collections::HashSet::new(),
             globals_referenced: std::collections::HashSet::new(),
             var_type_names: std::collections::HashMap::new(),
             pending_local_closures: std::collections::HashMap::new(),
             imported_value_symbols: Vec::new(),
             module_inits_needed: Vec::new(),
+            import_sites: std::collections::HashMap::new(),
             module_key: None,
             is_library_module: false,
             entry_mode: false,
             imported_type_symbols: std::collections::HashSet::new(),
+            imported_type_ctors: std::collections::HashMap::new(),
             source_dir: None,
             imported_func_links: std::collections::HashMap::new(),
             imported_value_names: std::collections::HashSet::new(),
@@ -193,6 +205,9 @@ impl Lowering {
             lambda_param_counts: std::collections::HashMap::new(),
             return_type_inferred_params: std::collections::HashSet::new(),
             addon_func_refs: std::collections::HashMap::new(),
+            untyped_addon_vars: std::collections::HashMap::new(),
+            type_decl_keys: std::collections::HashMap::new(),
+            lowering_facade_func: false,
             addon_facade_pack_bindings: Vec::new(),
             addon_facade_funcs: Vec::new(),
             addon_facade_mangled: std::collections::HashSet::new(),
@@ -265,6 +280,56 @@ impl Lowering {
     pub fn module_key_for_path(path: &std::path::Path) -> String {
         let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         format!("m{:016x}", simple_hash(&canonical.to_string_lossy()))
+    }
+
+    /// The global holding the tag of the type declaration `key` shown as
+    /// `display`.
+    fn type_tag_global_hash(display: &str, key: &str) -> i64 {
+        simple_hash(&format!("__taida_type_tag:{key}:{display}")) as i64
+    }
+
+    /// The `__type` value naming the type this module calls `name`: the tag
+    /// of its declaration (made at the start of the module's code by
+    /// [`Self::emit_type_tag_globals`]), so same-named types of two modules
+    /// are told apart; a type the module does not know a declaration of (a
+    /// built-in one) is named by its text.
+    pub(super) fn emit_type_name_tag(&mut self, func: &mut IrFunction, name: &str) -> IrVar {
+        let dst = func.alloc_var();
+        match self.type_decl_keys.get(name) {
+            Some(key) => func.push(IrInst::GlobalGet(
+                dst,
+                Self::type_tag_global_hash(name, key),
+            )),
+            None => func.push(IrInst::ConstStr(dst, name.to_string())),
+        }
+        dst
+    }
+
+    /// Make the tag of each type this module declares or imports, before
+    /// the module's own code runs.
+    pub(super) fn emit_type_tag_globals(&mut self, func: &mut IrFunction) {
+        let mut entries: Vec<(String, String)> = self
+            .type_decl_keys
+            .iter()
+            .map(|(name, key)| (name.clone(), key.clone()))
+            .collect();
+        entries.sort();
+        for (name, key) in entries {
+            let display = func.alloc_var();
+            func.push(IrInst::ConstStr(display, name.clone()));
+            let key_var = func.alloc_var();
+            func.push(IrInst::ConstStr(key_var, key.clone()));
+            let tag = func.alloc_var();
+            func.push(IrInst::Call(
+                tag,
+                "taida_type_tag".to_string(),
+                vec![display, key_var],
+            ));
+            func.push(IrInst::GlobalSet(
+                Self::type_tag_global_hash(&name, &key),
+                tag,
+            ));
+        }
     }
 
     pub(super) fn current_module_key(&self) -> &str {

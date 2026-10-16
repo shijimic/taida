@@ -568,6 +568,101 @@ static taida_val taida_os_http_parse_headers(const char *header_start, const cha
     return headers_pack;
 }
 
+// ASCII whitespace as Rust's `u8::is_ascii_whitespace` (SP, HTAB, LF, FF, CR).
+static int taida_os_http_is_ascii_ws(unsigned char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\f' || c == '\r';
+}
+
+// Whether the response head (status line + header lines, without the blank
+// line) declares Transfer-Encoding with chunked as the final coding. The
+// codings of every Transfer-Encoding line form one list; empty list elements
+// are ignored. Same rule as the interpreter's response_head_is_chunked.
+static int taida_os_http_head_is_chunked(const char *head, size_t head_len) {
+    int has_te = 0;
+    int final_chunked = 0;
+    size_t pos = 0;
+    int first_line = 1;
+    while (pos <= head_len) {
+        const char *nl = memchr(head + pos, '\n', head_len - pos);
+        size_t line_end = nl ? (size_t)(nl - head) : head_len;
+        size_t a = pos, b = line_end;
+        if (b > a && head[b - 1] == '\r') b--;
+        if (!first_line) {
+            const char *colon = memchr(head + a, ':', b - a);
+            if (colon) {
+                size_t na = a, nb = (size_t)(colon - head);
+                while (na < nb && taida_os_http_is_ascii_ws((unsigned char)head[na])) na++;
+                while (nb > na && taida_os_http_is_ascii_ws((unsigned char)head[nb - 1])) nb--;
+                if (nb - na == 17 && strncasecmp(head + na, "transfer-encoding", 17) == 0) {
+                    has_te = 1;
+                    size_t t = (size_t)(colon - head) + 1;
+                    while (t <= b) {
+                        const char *comma = memchr(head + t, ',', b - t);
+                        size_t te = comma ? (size_t)(comma - head) : b;
+                        size_t ta = t, tb = te;
+                        while (ta < tb && taida_os_http_is_ascii_ws((unsigned char)head[ta])) ta++;
+                        while (tb > ta && taida_os_http_is_ascii_ws((unsigned char)head[tb - 1])) tb--;
+                        if (tb > ta) {
+                            final_chunked = (tb - ta == 7 && strncasecmp(head + ta, "chunked", 7) == 0);
+                        }
+                        t = te + 1;
+                    }
+                }
+            }
+        }
+        first_line = 0;
+        if (!nl) break;
+        pos = line_end + 1;
+    }
+    return has_te && final_chunked;
+}
+
+// Decodes a Transfer-Encoding: chunked response body in place. Lines end with
+// CRLF or LF; a chunk-size line is 1 to 16 hex digits with optional ASCII
+// whitespace around them and an ignored `;` extension. Everything after the
+// last chunk (trailers) is ignored. Returns the decoded length, or -1 when the
+// framing is malformed or the body ends early. Same rules as the
+// interpreter's decode_chunked_response_body.
+static int64_t taida_os_http_decode_chunked(char *data, size_t len) {
+    size_t pos = 0;
+    size_t out = 0;
+    for (;;) {
+        const char *nl = memchr(data + pos, '\n', len - pos);
+        if (!nl) return -1;
+        size_t line_end = (size_t)(nl - data);
+        size_t a = pos, b = line_end;
+        if (b > a && data[b - 1] == '\r') b--;
+        const char *semi = memchr(data + a, ';', b - a);
+        if (semi) b = (size_t)(semi - data);
+        while (a < b && taida_os_http_is_ascii_ws((unsigned char)data[a])) a++;
+        while (b > a && taida_os_http_is_ascii_ws((unsigned char)data[b - 1])) b--;
+        if (b == a || b - a > 16) return -1;
+        uint64_t size = 0;
+        for (size_t i = a; i < b; i++) {
+            unsigned char c = (unsigned char)data[i];
+            int digit;
+            if (c >= '0' && c <= '9') digit = c - '0';
+            else if (c >= 'a' && c <= 'f') digit = 10 + c - 'a';
+            else if (c >= 'A' && c <= 'F') digit = 10 + c - 'A';
+            else return -1;
+            size = size * 16 + (uint64_t)digit;
+        }
+        pos = line_end + 1;
+        if (size == 0) return (int64_t)out;
+        if (size > (uint64_t)(len - pos)) return -1;
+        memmove(data + out, data + pos, (size_t)size);
+        out += (size_t)size;
+        pos += (size_t)size;
+        if (len - pos >= 2 && data[pos] == '\r' && data[pos + 1] == '\n') {
+            pos += 2;
+        } else if (len - pos >= 1 && data[pos] == '\n') {
+            pos += 1;
+        } else {
+            return -1;
+        }
+    }
+}
+
 static int taida_os_cmd_append(char **buf, size_t *cap, size_t *len, const char *chunk) {
     if (!chunk) return 1;
     size_t n = strlen(chunk);
@@ -945,6 +1040,17 @@ static taida_val taida_os_http_do(const char *method, const char *url, taida_val
 
     char *resp_body = header_end + 4;
     size_t resp_body_len = resp_len - (size_t)(resp_body - resp_buf);
+    /* A chunked body is decoded here. The HTTPS path gets its body already
+     * decoded by curl, which also keeps the transfer-encoding header in the
+     * reported headers. */
+    if (taida_os_http_head_is_chunked(resp_buf, (size_t)(header_end - resp_buf))) {
+        int64_t decoded = taida_os_http_decode_chunked(resp_body, resp_body_len);
+        if (decoded < 0) {
+            free(resp_buf);
+            return taida_async_resolved(taida_os_http_failure_lax_kind("invalid"));
+        }
+        resp_body_len = (size_t)decoded;
+    }
     /* Same as the TLS-path response above: the body enters the Taida
      * value space, so it must carry the hidden Str header. */
     char *body_copy = taida_str_alloc(resp_body_len);
@@ -1063,6 +1169,81 @@ taida_val taida_os_dns_resolve(taida_val host_ptr, taida_val timeout_ms) {
     return taida_async_resolved(taida_os_result_success(inner));
 }
 
+// ── Socket handle registry ─────────────────────────────────
+// The socket API gives Taida code its file descriptors as handles. The
+// interpreter only accepts handles it issued, kept in separate tables for
+// TCP streams, UDP sockets and listeners, and rejects any other number. The
+// native runtime keeps the same membership per descriptor, so a stray Int
+// such as `socketClose(1)` cannot close stdout, and `socketSend(0, ...)`
+// cannot write to a descriptor the socket API did not open.
+#define TAIDA_OS_SOCK_TCP      1
+#define TAIDA_OS_SOCK_UDP      2
+#define TAIDA_OS_SOCK_LISTENER 3
+
+static pthread_mutex_t taida_os_sock_mutex = PTHREAD_MUTEX_INITIALIZER;
+static unsigned char *taida_os_sock_kinds = NULL;  // indexed by descriptor
+static size_t taida_os_sock_cap = 0;
+
+static void taida_os_sock_register(int fd, unsigned char kind) {
+    if (fd < 0) return;
+    pthread_mutex_lock(&taida_os_sock_mutex);
+    if ((size_t)fd >= taida_os_sock_cap) {
+        size_t cap = taida_os_sock_cap ? taida_os_sock_cap : 64;
+        while (cap <= (size_t)fd) cap *= 2;
+        TAIDA_REALLOC(taida_os_sock_kinds, cap, "socket_handles");
+        memset(taida_os_sock_kinds + taida_os_sock_cap, 0, cap - taida_os_sock_cap);
+        taida_os_sock_cap = cap;
+    }
+    taida_os_sock_kinds[fd] = kind;
+    pthread_mutex_unlock(&taida_os_sock_mutex);
+}
+
+// True when `handle` is an open socket of `kind` issued by the socket API.
+static int taida_os_sock_is(taida_val handle, unsigned char kind) {
+    int found = 0;
+    pthread_mutex_lock(&taida_os_sock_mutex);
+    if (handle >= 0 && (uint64_t)handle < (uint64_t)taida_os_sock_cap) {
+        found = taida_os_sock_kinds[handle] == kind;
+    }
+    pthread_mutex_unlock(&taida_os_sock_mutex);
+    return found;
+}
+
+// Removes `handle` when it is registered with kind `a` or `b`; returns 1 when
+// it was removed (the caller then owns closing the descriptor).
+static int taida_os_sock_take(taida_val handle, unsigned char a, unsigned char b) {
+    int taken = 0;
+    pthread_mutex_lock(&taida_os_sock_mutex);
+    if (handle >= 0 && (uint64_t)handle < (uint64_t)taida_os_sock_cap) {
+        unsigned char kind = taida_os_sock_kinds[handle];
+        if (kind != 0 && (kind == a || kind == b)) {
+            taida_os_sock_kinds[handle] = 0;
+            taken = 1;
+        }
+    }
+    pthread_mutex_unlock(&taida_os_sock_mutex);
+    return taken;
+}
+
+// Result failure for a handle the socket API did not issue. Same shape as the
+// interpreter's: code -1, kind "not_found".
+static taida_val taida_os_unknown_handle_failure(const char *message) {
+    taida_val inner = taida_pack_new(4);
+    taida_pack_set_hash(inner, 0, taida_str_hash((taida_val)"ok"));
+    taida_pack_set(inner, 0, 0);
+    taida_pack_set_tag(inner, 0, TAIDA_TAG_BOOL);
+    taida_pack_set_hash(inner, 1, taida_str_hash((taida_val)"code"));
+    taida_pack_set(inner, 1, -1);
+    taida_pack_set_hash(inner, 2, taida_str_hash((taida_val)"message"));
+    taida_pack_set(inner, 2, (taida_val)taida_str_new_copy(message));
+    taida_pack_set_tag(inner, 2, TAIDA_TAG_STR);
+    taida_pack_set_hash(inner, 3, taida_str_hash((taida_val)"kind"));
+    taida_pack_set(inner, 3, (taida_val)taida_str_new_copy("not_found"));
+    taida_pack_set_tag(inner, 3, TAIDA_TAG_STR);
+    taida_val error = taida_make_error_with_kind_code("IoError", message, "not_found", -1);
+    return taida_async_resolved(taida_os_result_create(inner, error));
+}
+
 taida_val taida_os_tcp_connect(taida_val host_ptr, taida_val port, taida_val timeout_ms) {
     const char *host = (const char*)host_ptr;
     if (!host) return taida_async_resolved(taida_os_result_failure(EINVAL, "tcpConnect: invalid host"));
@@ -1090,6 +1271,7 @@ taida_val taida_os_tcp_connect(taida_val host_ptr, taida_val port, taida_val tim
         return taida_async_resolved(taida_os_result_failure(errno, strerror(errno)));
     }
     freeaddrinfo(res);
+    taida_os_sock_register(sockfd, TAIDA_OS_SOCK_TCP);
 
     // Return @(socket: fd, host: host, port: port)
     taida_val inner = taida_pack_new(3);
@@ -1141,6 +1323,7 @@ taida_val taida_os_tcp_listen(taida_val port, taida_val timeout_ms) {
         close(sockfd);
         return taida_async_resolved(taida_os_result_failure(errno, strerror(errno)));
     }
+    taida_os_sock_register(sockfd, TAIDA_OS_SOCK_LISTENER);
 
     taida_val inner = taida_pack_new(2);
     taida_val listener_hash = 0x5a2d194b8a8ae591ULL;
@@ -1154,6 +1337,9 @@ taida_val taida_os_tcp_listen(taida_val port, taida_val timeout_ms) {
 }
 
 taida_val taida_os_tcp_accept(taida_val listener_fd, taida_val timeout_ms) {
+    if (!taida_os_sock_is(listener_fd, TAIDA_OS_SOCK_LISTENER)) {
+        return taida_os_unknown_handle_failure("tcpAccept: unknown listener handle");
+    }
     struct sockaddr_in peer_addr;
     socklen_t peer_len = sizeof(peer_addr);
     taida_os_apply_socket_timeout((int)listener_fd, timeout_ms);
@@ -1163,6 +1349,7 @@ taida_val taida_os_tcp_accept(taida_val listener_fd, taida_val timeout_ms) {
     }
 
     taida_os_apply_socket_timeout(client_fd, timeout_ms);
+    taida_os_sock_register(client_fd, TAIDA_OS_SOCK_TCP);
 
     char host_buf[INET_ADDRSTRLEN] = {0};
     const char *peer_host = inet_ntop(AF_INET, &peer_addr.sin_addr, host_buf, sizeof(host_buf));
@@ -1184,7 +1371,10 @@ taida_val taida_os_tcp_accept(taida_val listener_fd, taida_val timeout_ms) {
     return taida_async_resolved(taida_os_result_success(inner));
 }
 
-taida_val taida_os_socket_send(taida_val socket_fd, taida_val data_ptr, taida_val timeout_ms) {
+static taida_val taida_os_socket_send_impl(const char *unknown_msg, taida_val socket_fd, taida_val data_ptr, taida_val timeout_ms) {
+    if (!taida_os_sock_is(socket_fd, TAIDA_OS_SOCK_TCP)) {
+        return taida_os_unknown_handle_failure(unknown_msg);
+    }
     unsigned char *payload_buf = NULL;
     size_t payload_len = 0;
     if (TAIDA_IS_BYTES(data_ptr)) {
@@ -1225,7 +1415,14 @@ taida_val taida_os_socket_send(taida_val socket_fd, taida_val data_ptr, taida_va
     return taida_async_resolved(taida_os_result_success(inner));
 }
 
+taida_val taida_os_socket_send(taida_val socket_fd, taida_val data_ptr, taida_val timeout_ms) {
+    return taida_os_socket_send_impl("socketSend: unknown socket handle", socket_fd, data_ptr, timeout_ms);
+}
+
 taida_val taida_os_socket_send_all(taida_val socket_fd, taida_val data_ptr, taida_val timeout_ms) {
+    if (!taida_os_sock_is(socket_fd, TAIDA_OS_SOCK_TCP)) {
+        return taida_os_unknown_handle_failure("socketSendAll: unknown socket handle");
+    }
     unsigned char *payload_buf = NULL;
     size_t payload_len = 0;
     if (TAIDA_IS_BYTES(data_ptr)) {
@@ -1279,6 +1476,10 @@ taida_val taida_os_socket_send_all(taida_val socket_fd, taida_val data_ptr, taid
 }
 
 taida_val taida_os_socket_recv(taida_val socket_fd, taida_val timeout_ms) {
+    if (!taida_os_sock_is(socket_fd, TAIDA_OS_SOCK_TCP)) {
+        taida_val error = taida_make_error_with_kind_code("IoError", "SocketRecv error", "invalid", 0);
+        return taida_async_resolved(taida_lax_empty_error(TAIDA_EMPTY_STR, error));
+    }
     char buf[65536];
     taida_os_apply_socket_timeout((int)socket_fd, timeout_ms);
     ssize_t n = recv((int)socket_fd, buf, sizeof(buf) - 1, 0);
@@ -1293,10 +1494,14 @@ taida_val taida_os_socket_recv(taida_val socket_fd, taida_val timeout_ms) {
 }
 
 taida_val taida_os_socket_send_bytes(taida_val socket_fd, taida_val data_ptr, taida_val timeout_ms) {
-    return taida_os_socket_send(socket_fd, data_ptr, timeout_ms);
+    return taida_os_socket_send_impl("socketSendBytes: unknown socket handle", socket_fd, data_ptr, timeout_ms);
 }
 
 taida_val taida_os_socket_recv_bytes(taida_val socket_fd, taida_val timeout_ms) {
+    if (!taida_os_sock_is(socket_fd, TAIDA_OS_SOCK_TCP)) {
+        taida_val error = taida_make_error_with_kind_code("IoError", "SocketRecvBytes error", "invalid", 0);
+        return taida_async_resolved(taida_lax_empty_error(taida_bytes_default_value(), error));
+    }
     unsigned char buf[65536];
     taida_os_apply_socket_timeout((int)socket_fd, timeout_ms);
     ssize_t n = recv((int)socket_fd, buf, sizeof(buf), 0);
@@ -1322,6 +1527,11 @@ taida_val taida_os_socket_recv_exact(taida_val socket_fd, taida_val size, taida_
     // interpreter) to prevent unbounded malloc from user input.
     if (size > (taida_val)(64 * 1024 * 1024)) {
         taida_val error = taida_make_error_with_kind_code("IoError", "SocketRecvExact error", "too_large", 0);
+        return taida_async_resolved(taida_lax_empty_error(taida_bytes_default_value(), error));
+    }
+
+    if (!taida_os_sock_is(socket_fd, TAIDA_OS_SOCK_TCP)) {
+        taida_val error = taida_make_error_with_kind_code("IoError", "SocketRecvExact error", "invalid", 0);
         return taida_async_resolved(taida_lax_empty_error(taida_bytes_default_value(), error));
     }
 
@@ -1422,6 +1632,7 @@ taida_val taida_os_udp_bind(taida_val host_ptr, taida_val port, taida_val timeou
         close(sockfd);
         return taida_async_resolved(taida_os_result_failure(errno, strerror(errno)));
     }
+    taida_os_sock_register(sockfd, TAIDA_OS_SOCK_UDP);
 
     taida_val inner = taida_pack_new(3);
     taida_val socket_hash = taida_str_hash((taida_val)"socket");
@@ -1442,6 +1653,9 @@ taida_val taida_os_udp_send_to(taida_val socket_fd, taida_val host_ptr, taida_va
     const char *host = (const char*)host_ptr;
     if (!host) {
         return taida_async_resolved(taida_os_result_failure(EINVAL, "udpSendTo: invalid arguments"));
+    }
+    if (!taida_os_sock_is(socket_fd, TAIDA_OS_SOCK_UDP)) {
+        return taida_os_unknown_handle_failure("udpSendTo: unknown socket handle");
     }
 
     unsigned char *payload_buf = NULL;
@@ -1501,6 +1715,10 @@ taida_val taida_os_udp_send_to(taida_val socket_fd, taida_val host_ptr, taida_va
 }
 
 taida_val taida_os_udp_recv_from(taida_val socket_fd, taida_val timeout_ms) {
+    if (!taida_os_sock_is(socket_fd, TAIDA_OS_SOCK_UDP)) {
+        taida_val error = taida_make_error_with_kind_code("IoError", "UdpRecvFrom error", "invalid", 0);
+        return taida_async_resolved(taida_lax_empty_error(taida_os_udp_default_payload(), error));
+    }
     unsigned char buf[65508];
     struct sockaddr_in from_addr;
     socklen_t from_len = sizeof(from_addr);
@@ -1546,14 +1764,30 @@ taida_val taida_os_udp_recv_from(taida_val socket_fd, taida_val timeout_ms) {
     return taida_async_resolved(taida_lax_new(payload, taida_os_udp_default_payload()));
 }
 
-taida_val taida_os_socket_close(taida_val socket_fd) {
+// socketClose and udpClose accept a TCP stream or a UDP socket, like the
+// interpreter (which looks the handle up in both tables).
+static taida_val taida_os_close_socket_handle(const char *unknown_msg, taida_val socket_fd) {
+    if (!taida_os_sock_take(socket_fd, TAIDA_OS_SOCK_TCP, TAIDA_OS_SOCK_UDP)) {
+        return taida_os_unknown_handle_failure(unknown_msg);
+    }
     if (close((int)socket_fd) < 0) {
         return taida_async_resolved(taida_os_result_failure(errno, strerror(errno)));
     }
     return taida_async_resolved(taida_os_result_success(taida_os_ok_inner()));
 }
 
+taida_val taida_os_socket_close(taida_val socket_fd) {
+    return taida_os_close_socket_handle("socketClose: unknown socket handle", socket_fd);
+}
+
+taida_val taida_os_udp_close(taida_val socket_fd) {
+    return taida_os_close_socket_handle("udpClose: unknown socket handle", socket_fd);
+}
+
 taida_val taida_os_listener_close(taida_val listener_fd) {
+    if (!taida_os_sock_take(listener_fd, TAIDA_OS_SOCK_LISTENER, TAIDA_OS_SOCK_LISTENER)) {
+        return taida_os_unknown_handle_failure("listenerClose: unknown listener handle");
+    }
     if (close((int)listener_fd) < 0) {
         return taida_async_resolved(taida_os_result_failure(errno, strerror(errno)));
     }
@@ -1787,6 +2021,8 @@ taida_val taida_pool_create(taida_val config_ptr) {
 
     taida_val inner = taida_pack_new(1);
     taida_val pool_hash = taida_str_hash((taida_val)"pool");
+    // The display shows a field only under a registered name.
+    taida_register_field_name(pool_hash, (taida_val)"pool");
     taida_pack_set_hash(inner, 0, pool_hash);
     taida_pack_set(inner, 0, pool_id);
     return taida_os_result_success(inner);

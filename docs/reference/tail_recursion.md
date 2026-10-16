@@ -42,7 +42,7 @@ factorial n: Int =
 
 ### 1. 関数本体の最後の式
 
-```taida
+```taida fragment
 // 末尾位置
 foo x: Int =
   bar(x)  // ← 関数本体の最後 = 末尾位置
@@ -61,7 +61,7 @@ factorial n: Int acc: Int =
 
 ### 3. ネストした条件分岐の最後
 
-```taida
+```taida fragment
 classify x: Int =
   | x < 0 |>
     | x < -100 |> handleVeryNegative(x)  // ← 末尾位置
@@ -86,6 +86,19 @@ process x: Int =
 ```
 
 ceiling ハンドラ内 (`|== error: Error = ...`) の最後の式はハンドラの戻り値を決定しますが、ハンドラは元の関数のトランポリンとは別スコープで実行されるため、**ハンドラ内に再帰呼び出しを置いた場合は末尾呼び出し最適化の対象になりません**。再帰呼び出しは ceiling の外側に置きます (「エラーシーリングとの相互作用」節を参照)。
+
+### 5. パイプラインの最後の段
+
+末尾位置にあるパイプラインの最後の段が、流れてきた値を `_` で受け取る関数呼び出しなら、その呼び出しは末尾位置です。`n - 1 => countdown(_)` は `countdown(n - 1)` と同じく末尾呼び出しになります。
+
+```taida
+countdown n: Int =
+  | n == 0 |> 0
+  | _ |> n - 1 => countdown(_)  // 末尾位置
+=> :Int
+```
+
+最後の段に名前だけを書いた `n - 1 => countdown` は呼び出しではなく、`countdown` という名前への束縛です。
 
 ---
 
@@ -112,7 +125,7 @@ foo x: Int =
 
 ### 3. 変数束縛の右辺
 
-```taida
+```taida fragment
 // NOT 末尾位置: 後続の式がある
 foo x: Int =
   result <= bar(x)  // × 後に result の返却がある
@@ -122,7 +135,7 @@ foo x: Int =
 
 ### 4. unmold/>=>の右辺
 
-```taida
+```taida fragment
 // NOT 末尾位置
 foo x: Int =
   asyncOp(x) >=> result  // × 後続処理がある
@@ -149,6 +162,40 @@ countdown n: Int =
   | n == 0 |> 0
   | _ |> countdown(n - 1)  // 末尾位置
 => :Int
+```
+
+### 6. 関数値として渡した関数
+
+`Map[xs, f]()` のように関数を値として渡すと、その関数は `Map` の中から呼ばれます。関数値として使った関数 (モールドや関数の引数、パイプラインの段、束縛した関数) は、ラムダの本体の中の呼び出しと同じく、末尾位置でない呼び出しとして扱います。
+
+```taida fragment
+// NOT 末尾位置: Map に渡した total は Map の中から呼ばれる — `[E0701]` で reject される反例
+Node = @(v: Int, kids: @[Node])
+
+total n: Node =
+  Map[n.kids, total]() >=> parts
+  Sum[parts]() >=> s
+  n.v + s
+=> :Int
+```
+
+木をたどる処理は、これからたどるノードをリストに積み、アキュムレータを渡す末尾再帰で書きます。木が深くてもスタックは積まれません。
+
+```taida
+Node = @(v: Int, kids: @[Node])
+
+sumNodes pending: @[Node] acc: Int =
+  | pending.isEmpty() |> acc
+  | _ |>
+    pending.first() >=> n
+    Drop[pending, 1]() >=> rest
+    Concat[n.kids, rest]() >=> next
+    sumNodes(next, acc + n.v)  // 末尾位置
+=> :Int
+
+leaf <= Node(v <= 1, kids <= @[])
+tree <= Node(v <= 2, kids <= @[leaf, Node(v <= 3, kids <= @[leaf])])
+stdout(sumNodes(@[tree], 0).toString())  // 7
 ```
 
 ---
@@ -326,9 +373,12 @@ Native、および Native と同系統のコード生成を行う WASM プロフ
 |-------------|------|-------------|
 | Interpreter | 呼び出し深度 8192 | `Maximum call depth (8192) exceeded` で停止 |
 | Native | OS スタック残量ベース（通常は深度 8192 を大きく超える容量） | `Maximum call stack depth exceeded` を表示して exit 1 |
-| WASM | ランタイムのスタック上限 | `call stack exhausted` トラップ |
+| WASM | 実行するホスト（wasmtime など）の呼び出しスタックの上限。ホストの設定によっては深度 8192 より浅い | `call stack exhausted` トラップ |
 
-Interpreter の上限が最も浅いため、Interpreter で動くプログラムは他バックエンドでも深度起因では失敗しません。深い処理は末尾再帰（深度消費ゼロ）に書き換えてください。
+Interpreter の上限は Native より浅いため、Interpreter で動くプログラムは Native でも深度起因では失敗しません。
+WASM の上限はホストのスタックの大きさで決まり、Interpreter より浅いことがあります。
+値の入れ子が数千段に及ぶと、表示・`toString()`・比較のランタイム内部の再帰も同じ上限に当たり、WASM ではここで止まることがあります。
+深い処理は末尾再帰（深度消費ゼロ）に書き換え、深く入れ子になった値はリストに平らにして持ってください。
 
 #### `[E0700]` が出たときの対応
 
@@ -380,7 +430,7 @@ error [E1614]: Mutual recursion in non-tail position: emptyDomNode -> emptyNodes
 
 エラーシーリングを伴う再帰関数は、**ハンドラブロックを関数本体の先頭に置き、再帰本体は ceiling の外** に置くのが標準パターンです。再帰呼び出し自体は ceiling の外側にあるため、関数本体の最後の式として通常どおり末尾位置になります。
 
-```taida
+```taida fragment
 // xs を末尾再帰で合計する。途中で processOne が throw した場合は
 // エラーシーリングが 0 にフォールバックする。
 safeSum xs: @[Int] =

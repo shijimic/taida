@@ -222,7 +222,10 @@ fn collect_unsupported_insts(insts: &[IrInst], _out: &mut Vec<String>) {
             | IrInst::ReleaseAuto(_)
             | IrInst::GlobalSet(_, _)
             | IrInst::GlobalGet(_, _)
-            | IrInst::TailCall(_) => {}
+            | IrInst::TailCall(_)
+            | IrInst::ReleaseParamIfOwned(_)
+            | IrInst::SetParamOwned(_, _)
+            | IrInst::ParamOwned(_, _) => {}
         }
     }
 }
@@ -354,35 +357,6 @@ pub fn emit_c(ir_module: &IrModule, profile: WasmProfile) -> Result<String, Wasm
             "#define taida_polymorphic_to_string taida_polymorphic_to_string_full"
         )
         .unwrap();
-        // WF-3 fix: core's int_mold_str returns raw value, full needs Lax wrapper
-        writeln!(c, "#define taida_int_mold_str taida_int_mold_str_full").unwrap();
-    }
-
-    // C27B-020 (2026-04-25): redirect polymorphic_length so Bytes is
-    // dispatched correctly on both wasm-wasi and wasm-full. Core's version
-    // only handles list / string -- Bytes pointers fall into the string
-    // branch and silently return 0 (the magic's low byte is 0x00). The
-    // override `taida_polymorphic_length_bytes_aware` lives in
-    // runtime_wasi_io.c (linked by both Wasi and Full).
-    if profile == WasmProfile::Wasi || profile == WasmProfile::Full {
-        writeln!(
-            c,
-            "#define taida_polymorphic_length taida_polymorphic_length_bytes_aware"
-        )
-        .unwrap();
-
-        // D28B-009 (2026-04-26, wD Round 1): redirect float renderer so
-        // NaN renders as canonical "NaN" without sign, matching Rust
-        // f64::Display (interpreter), native `taida_float_to_str`, and
-        // JS `__taida_float_render`. The core implementation in
-        // runtime_core_wasm/01_core.inc.c::fmt_g extracts the sign bit
-        // BEFORE the NaN check, so any NaN with sign-bit set (e.g. the
-        // result of `Sqrt[-1.0]()`) renders as "-NaN", breaking 4-backend
-        // parity. The override `taida_debug_float_d28b009` /
-        // `taida_float_to_str_d28b009` lives in runtime_wasi_io.c and is
-        // linked by both Wasi and Full profiles.
-        writeln!(c, "#define taida_debug_float taida_debug_float_d28b009").unwrap();
-        writeln!(c, "#define taida_float_to_str taida_float_to_str_d28b009").unwrap();
     }
 
     // W-3: f64 -> i64 bitcast helper (union-based, no libc dependency)
@@ -399,6 +373,9 @@ pub fn emit_c(ir_module: &IrModule, profile: WasmProfile) -> Result<String, Wasm
     // taida_get/set_return_tag call sites (one call per user-function
     // call otherwise).
     writeln!(c, "extern int64_t __wasm_return_tag;").unwrap();
+    // The runtime's pending-throw flag, read after every call that can
+    // throw (see `emit_throw_propagation`).
+    writeln!(c, "extern int __wasm_error_thrown;").unwrap();
     writeln!(c).unwrap();
 
     // F-4: グローバル変数を名前ベースの C 変数として宣言
@@ -535,14 +512,6 @@ fn collect_needed_runtime_funcs(insts: &[IrInst], set: &mut HashSet<String>) {
         match inst {
             IrInst::Call(_, name, _) => {
                 set.insert(name.clone());
-                // Calls that may rethrow under the WASM error-flag runtime need
-                // taida_is_error_thrown for the post-call early-return check.
-                if name == "taida_error_type_check_or_rethrow"
-                    || name == "taida_generic_unmold"
-                    || name == "taida_throw"
-                {
-                    set.insert("taida_is_error_thrown".to_string());
-                }
             }
             // W-4: Pack IR instructions need runtime function prototypes
             IrInst::PackNew(_, _) => {
@@ -722,6 +691,10 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_list_note_push_ekind" => {
             "void taida_list_note_push_ekind(int64_t list_ptr, int64_t ekind);".to_string()
         }
+        "taida_list_note_push_dyn" => {
+            "void taida_list_note_push_dyn(int64_t list_ptr, int64_t item, int64_t tag);"
+                .to_string()
+        }
         "taida_set_has_tagged" => {
             "int64_t taida_set_has_tagged(int64_t set_ptr, int64_t item, int64_t ekind);"
                 .to_string()
@@ -768,6 +741,9 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_hashmap_get_lax" => {
             "int64_t taida_hashmap_get_lax(int64_t hm, int64_t kh, int64_t kp);".to_string()
         }
+        "taida_lax_fill_default" => "int64_t taida_lax_fill_default(int64_t lax, int64_t def, int64_t tag);".to_string(),
+        "taida_hashmap_note_kinds" => "void taida_hashmap_note_kinds(int64_t hm, int64_t kh, int64_t kp, int64_t key_ek, int64_t value_ek);".to_string(),
+        "taida_register_enum_variants" => "void taida_register_enum_variants(int64_t id, int64_t variants);".to_string(),
         "taida_hashmap_set_value_tag" => {
             "void taida_hashmap_set_value_tag(int64_t hm, int64_t tag);".to_string()
         }
@@ -790,7 +766,11 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
                 .to_string()
         }
         // W-4: Set runtime functions
+        "taida_set_new" => "int64_t taida_set_new(void);".to_string(),
         "taida_set_from_list" => "int64_t taida_set_from_list(int64_t list_ptr);".to_string(),
+        "taida_hashmap_from" => {
+            "int64_t taida_hashmap_from(int64_t src, int64_t key_ek, int64_t value_ek);".to_string()
+        }
         "taida_set_add" => "int64_t taida_set_add(int64_t set_ptr, int64_t item);".to_string(),
         "taida_set_has" => "int64_t taida_set_has(int64_t set_ptr, int64_t item);".to_string(),
         "taida_set_set_elem_tag" => {
@@ -855,6 +835,7 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_error_setjmp" => "int64_t taida_error_setjmp(int64_t depth);".to_string(),
         // RCB-101: Error type filtering for |==
         "taida_register_type_parent" => "void taida_register_type_parent(int64_t child_str, int64_t parent_str);".to_string(),
+        "taida_type_tag" => "int64_t taida_type_tag(int64_t display, int64_t key);".to_string(),
         "taida_error_type_matches" => "int64_t taida_error_type_matches(int64_t error_val, int64_t handler_type_str);".to_string(),
         "taida_error_type_check_or_rethrow" => "int64_t taida_error_type_check_or_rethrow(int64_t error_val, int64_t handler_type_str);".to_string(),
         // B11B-015: TypeIs named type runtime check
@@ -927,6 +908,9 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
                 .to_string()
         }
         "taida_result_is_ok" => "int64_t taida_result_is_ok(int64_t result);".to_string(),
+        "taida_result_throw_field" => {
+            "int64_t taida_result_throw_field(int64_t result);".to_string()
+        }
         "taida_result_is_error" => "int64_t taida_result_is_error(int64_t result);".to_string(),
         "taida_result_map_error" => {
             "int64_t taida_result_map_error(int64_t result, int64_t fn_ptr);".to_string()
@@ -1043,6 +1027,30 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
             format!("int64_t {}(int64_t s, int64_t idx);", name)
         }
         "taida_str_chars" => "int64_t taida_str_chars(int64_t s);".to_string(),
+        // Byte-level Str molds and StringRepeatJoin (all profiles).
+        "taida_str_byte_length" => "int64_t taida_str_byte_length(int64_t s);".to_string(),
+        "taida_str_byte_at" => "int64_t taida_str_byte_at(int64_t s, int64_t idx);".to_string(),
+        "taida_str_byte_at_lax" => {
+            "int64_t taida_str_byte_at_lax(int64_t s, int64_t idx, int64_t default_value);"
+                .to_string()
+        }
+        "taida_str_byte_slice" => {
+            "int64_t taida_str_byte_slice(int64_t s, int64_t start, int64_t end);".to_string()
+        }
+        "taida_str_repeat_join" => {
+            "int64_t taida_str_repeat_join(int64_t s, int64_t n, int64_t sep);".to_string()
+        }
+        // range(start, end) (all profiles).
+        "taida_range" => "int64_t taida_range(int64_t start, int64_t end);".to_string(),
+        // Enum-typed pack fields: variant names for jsonEncode (all profiles).
+        "taida_register_field_enum" => {
+            "int64_t taida_register_field_enum(int64_t hash, int64_t name_ptr, int64_t variants_ptr);"
+                .to_string()
+        }
+        "taida_register_pack_field_enum" => {
+            "int64_t taida_register_pack_field_enum(int64_t pack_ptr, int64_t field_hash, int64_t variants_ptr);"
+                .to_string()
+        }
         "taida_str_repeat" => "int64_t taida_str_repeat(int64_t s, int64_t n);".to_string(),
         "taida_str_index_of" | "taida_str_last_index_of" => {
             format!("int64_t {}(int64_t s, int64_t sub);", name)
@@ -1068,11 +1076,11 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         | "taida_float_round" => {
             format!("int64_t {}(int64_t a);", name)
         }
-        // C25B-025 Phase 5-I: math mold family. Manual freestanding
-        // implementations in runtime_core_wasm/03_typeof_list.inc.c
-        // (Sqrt uses the `f64.sqrt` wasm opcode via `__builtin_sqrt`;
-        // the rest use range-reduced series / Newton iteration — see
-        // the C source for per-function algorithm notes).
+        // C25B-025 Phase 5-I: math mold family. Wrappers in
+        // runtime_core_wasm/03_typeof_list.inc.c: Sqrt uses the
+        // `f64.sqrt` wasm opcode via `__builtin_sqrt`; the rest call the
+        // correctly rounded kernel shared with the native runtime
+        // (runtime_crmath.inc.c).
         "taida_float_sqrt"
         | "taida_float_exp"
         | "taida_float_ln"
@@ -1136,6 +1144,22 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_list_sort_by" => {
             "int64_t taida_list_sort_by(int64_t list, int64_t fn_ptr);".to_string()
         }
+        "taida_list_sort_kind" => "int64_t taida_list_sort_kind(int64_t list, int64_t fn_ptr, \
+                                    int64_t key_tag, int64_t descending);"
+            .to_string(),
+        "taida_error_field" => {
+            "int64_t taida_error_field(int64_t err, int64_t want_message);".to_string()
+        }
+        "taida_json_encode_desc" | "taida_json_pretty_desc" => {
+            format!("int64_t {}(int64_t val, int64_t desc_ptr);", name)
+        }
+        "taida_register_fn_name" => {
+            "int64_t taida_register_fn_name(int64_t fn_value, int64_t name);".to_string()
+        }
+        "taida_function_to_string" => "int64_t taida_function_to_string(int64_t val);".to_string(),
+        "taida_register_type_methods" => {
+            "int64_t taida_register_type_methods(int64_t type_name, int64_t methods);".to_string()
+        }
         // E34B-021 (Codex review #17 follow-up): WASM C emitter
         // counterpart for `Unique[xs](by <= keyFn)`. The runtime
         // function lives in `runtime_core_wasm/03_typeof_list.inc.c`
@@ -1185,6 +1209,10 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
             format!("int64_t {}(int64_t val);", name)
         }
         "taida_json_schema_cast" => "int64_t taida_json_schema_cast(int64_t raw, int64_t schema);".to_string(),
+        "taida_json_schema_cast_hooked" => {
+            "int64_t taida_json_schema_cast_hooked(int64_t raw, int64_t schema, int64_t hooks);"
+                .to_string()
+        }
         "taida_json_encode_wire" => {
             "int64_t taida_json_encode_wire(int64_t value, int64_t schema);".to_string()
         }
@@ -1293,6 +1321,9 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         }
         "taida_async_ok" => "int64_t taida_async_ok(int64_t value);".to_string(),
         "taida_async_err" => "int64_t taida_async_err(int64_t error);".to_string(),
+        "taida_async_err_kinded" => {
+            "int64_t taida_async_err_kinded(int64_t error, int64_t ekind);".to_string()
+        }
         "taida_async_pending_with_error" => {
             "int64_t taida_async_pending_with_error(int64_t error);".to_string()
         }
@@ -1461,45 +1492,25 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
                 ),
             });
         }
-        // C27B-020 / 021 (2026-04-25): wasm widening (addition only).
-        // These prototypes were historically only registered for wasm-full
-        // (`wasm_full_runtime_prototype`), but the underlying functions have
-        // been migrated to `runtime_wasi_io.c` so wasm-wasi can use them too.
-        // wasm-full keeps working because rt_wasi is also linked into it.
-        // Order matters: place this arm BEFORE the catch-all `_ if Full`
-        // below, so the 2-profile guard wins for the listed names.
-
-        // C27B-021: Bitwise and shift, plus Float Div / Mod molds
-        // (Lax-returning, FLOAT-tagged for parity with native C26B-011).
-        "taida_bit_and" | "taida_bit_or" | "taida_bit_xor"
-            if profile == WasmProfile::Wasi || profile == WasmProfile::Full =>
-        {
+        // Bitwise / shift molds, Float Div / Mod molds, and the Bytes
+        // constructors, cursor and codec molds are pure computations in
+        // the core runtime, so every profile accepts them. Order matters:
+        // these arms precede the catch-all `_ if Full` below.
+        "taida_bit_and" | "taida_bit_or" | "taida_bit_xor" => {
             format!("int64_t {}(int64_t a, int64_t b);", name)
         }
-        "taida_bit_not" if profile == WasmProfile::Wasi || profile == WasmProfile::Full => {
-            "int64_t taida_bit_not(int64_t a);".to_string()
-        }
-        "taida_shift_l" | "taida_shift_r" | "taida_shift_ru"
-            if profile == WasmProfile::Wasi || profile == WasmProfile::Full =>
-        {
+        "taida_bit_not" => "int64_t taida_bit_not(int64_t a);".to_string(),
+        "taida_shift_l" | "taida_shift_r" | "taida_shift_ru" => {
             format!("int64_t {}(int64_t a, int64_t b);", name)
         }
-        "taida_div_mold_f" | "taida_mod_mold_f"
-            if profile == WasmProfile::Wasi || profile == WasmProfile::Full =>
-        {
+        "taida_div_mold_f" | "taida_mod_mold_f" => {
             format!("int64_t {}(int64_t a_bits, int64_t b_bits);", name)
         }
-
-        // C27B-020: Bytes constructors / cursor / encode/decode molds.
-        // wasm-wasi previously rejected these at compile time; now both
-        // wasi and full link rt_wasi which provides the implementations.
         "taida_bytes_default_value" | "taida_bytes_clone" | "taida_bytes_len"
-        | "taida_bytes_to_list" | "taida_bytes_to_display_string"
-            if profile == WasmProfile::Wasi || profile == WasmProfile::Full =>
-        {
+        | "taida_bytes_to_list" | "taida_bytes_to_display_string" => {
             format!("int64_t {}(int64_t v);", name)
         }
-        "taida_bytes_from_raw" if profile == WasmProfile::Wasi || profile == WasmProfile::Full => {
+        "taida_bytes_from_raw" => {
             "int64_t taida_bytes_from_raw(int64_t ptr, int64_t len);".to_string()
         }
         // F55 S4: crypto producers that build Bytes (hexDecode / base64Decode
@@ -1557,46 +1568,34 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
                     .to_string(),
             });
         }
-        "taida_bytes_new_filled"
-            if profile == WasmProfile::Wasi || profile == WasmProfile::Full =>
-        {
+        "taida_bytes_new_filled" => {
             "int64_t taida_bytes_new_filled(int64_t len, int64_t fill);".to_string()
         }
-        "taida_bytes_get_lax" if profile == WasmProfile::Wasi || profile == WasmProfile::Full => {
+        "taida_bytes_get_lax" => {
             "int64_t taida_bytes_get_lax(int64_t bytes, int64_t idx);".to_string()
         }
-        "taida_bytes_set" if profile == WasmProfile::Wasi || profile == WasmProfile::Full => {
+        "taida_bytes_set" => {
             "int64_t taida_bytes_set(int64_t bytes, int64_t idx, int64_t val);".to_string()
         }
-        "taida_bytes_mold" if profile == WasmProfile::Wasi || profile == WasmProfile::Full => {
+        "taida_bytes_mold" => {
             "int64_t taida_bytes_mold(int64_t v, int64_t fill);".to_string()
         }
-        "taida_bytes_cursor_new"
-            if profile == WasmProfile::Wasi || profile == WasmProfile::Full =>
-        {
+        "taida_bytes_cursor_new" => {
             "int64_t taida_bytes_cursor_new(int64_t bytes, int64_t offset);".to_string()
         }
-        "taida_bytes_cursor_u8" | "taida_bytes_cursor_remaining"
-            if profile == WasmProfile::Wasi || profile == WasmProfile::Full =>
-        {
+        "taida_bytes_cursor_u8" | "taida_bytes_cursor_remaining" => {
             format!("int64_t {}(int64_t cursor);", name)
         }
-        "taida_bytes_cursor_take" | "taida_bytes_cursor_step"
-            if profile == WasmProfile::Wasi || profile == WasmProfile::Full =>
-        {
+        "taida_bytes_cursor_take" | "taida_bytes_cursor_step" => {
             format!("int64_t {}(int64_t cursor, int64_t n);", name)
         }
-        "taida_bytes_cursor_unpack"
-            if profile == WasmProfile::Wasi || profile == WasmProfile::Full =>
-        {
+        "taida_bytes_cursor_unpack" => {
             "int64_t taida_bytes_cursor_unpack(int64_t cursor, int64_t schema);".to_string()
         }
         "taida_u16be_mold" | "taida_u16le_mold" | "taida_u32be_mold" | "taida_u32le_mold"
         | "taida_u16be_decode_mold" | "taida_u16le_decode_mold"
         | "taida_u32be_decode_mold" | "taida_u32le_decode_mold"
-        | "taida_uint8_mold" | "taida_uint8_mold_float"
-            if profile == WasmProfile::Wasi || profile == WasmProfile::Full =>
-        {
+        | "taida_uint8_mold" | "taida_uint8_mold_float" => {
             format!("int64_t {}(int64_t v);", name)
         }
         // Utf8Decode / Utf8Encode live in the core runtime (the shared
@@ -1604,10 +1603,7 @@ fn runtime_func_prototype(name: &str, profile: WasmProfile) -> Result<String, Wa
         "taida_utf8_decode_mold" | "taida_utf8_encode_mold" => {
             format!("int64_t {}(int64_t v);", name)
         }
-        "taida_utf8_encode_scalar" | "taida_utf8_decode_one"
-        | "taida_utf8_single_scalar"
-            if profile == WasmProfile::Wasi || profile == WasmProfile::Full =>
-        {
+        "taida_utf8_encode_scalar" | "taida_utf8_decode_one" | "taida_utf8_single_scalar" => {
             format!("int64_t {}(int64_t v);", name)
         }
 
@@ -1879,6 +1875,146 @@ fn emit_insts(
     Ok(())
 }
 
+/// Stop the current function right after a call that left a throw
+/// pending.
+///
+/// The wasm runtime has no unwinding: `taida_throw` records the error
+/// for the innermost `|==` ceiling, sets `__wasm_error_thrown` and
+/// returns a dummy value. Every caller between the throw and the
+/// ceiling's `taida_error_try_call` must return at once, or the rest of
+/// its statements run with dummy values — the dead path the interpreter
+/// and native (longjmp) never execute. The dummy return value is never
+/// read: each caller returns in turn until the try boundary clears the
+/// flag.
+fn emit_throw_propagation(c: &mut String, indent: &str) {
+    writeln!(c, "{}if (__wasm_error_thrown) return 0;", indent).unwrap();
+}
+
+/// Runtime functions that can neither throw nor call back into user
+/// code, so the call site needs no `emit_throw_propagation` check.
+///
+/// Every other runtime call gets the check, which keeps an unlisted or
+/// newly added function correct by default; this list only removes the
+/// check from the calls that dominate generated code. Membership is
+/// verified against the runtime's call graph (no path to `taida_throw`
+/// or to an indirect call, including the per-profile `#define`
+/// redirects) by `runtime_calls_that_never_throw_match_the_call_graph`.
+const RUNTIME_CALLS_THAT_NEVER_THROW: &[&str] = &[
+    // Pack / closure construction and field access.
+    "taida_pack_new",
+    "taida_pack_set",
+    "taida_pack_set_hash",
+    "taida_pack_set_tag",
+    "taida_pack_get",
+    "taida_pack_get_idx",
+    "taida_pack_has_hash",
+    "taida_pack_get_field_tag",
+    "taida_register_field_name",
+    "taida_register_field_type",
+    "taida_register_field_enum",
+    "taida_register_pack_field_enum",
+    "taida_register_type_parent",
+    "taida_closure_new",
+    "taida_closure_get_fn",
+    "taida_closure_get_env",
+    "taida_is_closure_value",
+    // Value-tag and ownership bookkeeping.
+    "taida_push_call_tags",
+    "taida_pop_call_tags",
+    "taida_set_call_arg_tag",
+    "taida_get_call_arg_tag",
+    "taida_get_return_tag",
+    "taida_set_return_tag",
+    "taida_list_set_elem_tag",
+    "taida_list_note_push_ekind",
+    "taida_list_note_push_dyn",
+    "taida_hashmap_set_value_tag",
+    "taida_lax_fill_default",
+    "taida_hashmap_note_kinds",
+    "taida_register_enum_variants",
+    "taida_set_set_elem_tag",
+    "taida_retain_and_tag_field",
+    "taida_retain",
+    "taida_release",
+    "taida_str_retain",
+    "taida_str_release",
+    "taida_arena_iter_enter",
+    "taida_arena_iter_reset",
+    "taida_arena_iter_exit",
+    // Error-ceiling machinery. `taida_error_try_call` runs user
+    // code but returns with the flag cleared: a throw inside it
+    // is reported through its 0 / 1 result.
+    "taida_error_ceiling_push",
+    "taida_error_ceiling_pop",
+    "taida_error_try_call",
+    "taida_error_try_get_result",
+    "taida_error_get_value",
+    "taida_make_error",
+    // Scalars and strings.
+    "taida_str_concat",
+    "taida_str_eq",
+    "taida_str_neq",
+    "taida_str_length",
+    "taida_str_from_int",
+    "taida_str_from_float",
+    "taida_str_from_bool",
+    "taida_int_to_str",
+    "taida_float_to_str",
+    "taida_float_to_int",
+    "taida_int_abs",
+    "taida_poly_eq",
+    "taida_poly_neq",
+    "taida_poly_add",
+    "taida_div_mold",
+    "taida_mod_mold",
+    "taida_div_exact",
+    "taida_mod_exact",
+    "taida_value_hash",
+    "taida_str_hash",
+    // Output that renders scalars and strings only.
+    "taida_io_stdout",
+    "taida_io_stderr",
+    "taida_debug_int",
+    "taida_debug_bool",
+    "taida_debug_str",
+    "taida_debug_float",
+    // Container construction and plain queries.
+    "taida_list_new",
+    "taida_list_push",
+    "taida_list_length",
+    "taida_list_get",
+    "taida_list_is_empty",
+    "taida_list_append_k",
+    "taida_list_append_consume_k",
+    "taida_collection_size",
+    "taida_collection_get",
+    "taida_polymorphic_length",
+    "taida_polymorphic_has_value",
+    "taida_polymorphic_contains",
+    "taida_hashmap_new",
+    "taida_hashmap_set_immut",
+    "taida_lax_new",
+    "taida_lax_empty",
+    "taida_lax_value_ekind",
+    "taida_result_create",
+    "taida_result_throw_field",
+    "taida_async_ok",
+    "taida_async_ok_tagged",
+    "taida_async_err",
+    "taida_async_err_kinded",
+    "taida_gorillax_new",
+    "taida_gorillax_err",
+    "taida_set_new",
+    "taida_error_field",
+    "taida_register_fn_name",
+    "taida_function_to_string",
+    "taida_register_type_methods",
+];
+
+fn runtime_call_never_throws(name: &str) -> bool {
+    RUNTIME_CALLS_THAT_NEVER_THROW.contains(&name)
+}
+
 /// The wasm counterpart of the native `try_emit_intrinsic` table
 /// (emit.rs): returns the C expression that replaces a runtime call to
 /// a scalar operation, or None to keep the call. Only operations whose
@@ -2048,7 +2184,10 @@ fn emit_inst(
                 || name == "taida_str_retain"
                 || name == "taida_list_set_elem_tag"
                 || name == "taida_list_note_push_ekind"
+                || name == "taida_list_note_push_dyn"
                 || name == "taida_hashmap_set_value_tag"
+                || name == "taida_hashmap_note_kinds"
+                || name == "taida_register_enum_variants"
                 || name == "taida_set_set_elem_tag"
                 || name == "taida_error_ceiling_pop"
                 || name == "taida_register_type_parent"
@@ -2074,14 +2213,8 @@ fn emit_inst(
                     write!(c, "v_{}", arg).unwrap();
                 }
                 writeln!(c, ");").unwrap();
-                // In WASM, taida_throw sets a flag instead of longjmp. After
-                // a rethrow-capable call, the current function must not keep
-                // executing with a dummy value.
-                if name == "taida_error_type_check_or_rethrow"
-                    || name == "taida_generic_unmold"
-                    || name == "taida_throw"
-                {
-                    writeln!(c, "{}if (taida_is_error_thrown()) return 0;", indent).unwrap();
+                if !runtime_call_never_throws(name) {
+                    emit_throw_propagation(c, indent);
                 }
             }
         }
@@ -2094,6 +2227,7 @@ fn emit_inst(
                 write!(c, "v_{}", arg).unwrap();
             }
             writeln!(c, ");").unwrap();
+            emit_throw_propagation(c, indent);
         }
         IrInst::CondBranch(result, arms) => {
             for (i, arm) in arms.iter().enumerate() {
@@ -2122,6 +2256,13 @@ fn emit_inst(
         IrInst::Retain(_) | IrInst::Release(_) | IrInst::ReleaseAuto(_) => {
             // RC 操作は wasm-min では無視（ヒープなし）
             writeln!(c, "{}/* retain/release skipped (wasm-min) */", indent).unwrap();
+        }
+        // Loop-parameter ownership only matters with reference counting.
+        IrInst::ReleaseParamIfOwned(_) | IrInst::SetParamOwned(_, _) => {
+            writeln!(c, "{}/* parameter ownership skipped (wasm) */", indent).unwrap();
+        }
+        IrInst::ParamOwned(dst, _) => {
+            writeln!(c, "{}v_{} = 0;", indent, dst).unwrap();
         }
         // F-4: グローバル変数を名前ベースの C 変数で読み書き
         IrInst::GlobalSet(name_hash, value_var) => {
@@ -2270,6 +2411,7 @@ fn emit_inst(
             }
             writeln!(c, ");").unwrap();
             writeln!(c, "{}}}", indent).unwrap();
+            emit_throw_propagation(c, indent);
         }
         IrInst::TailCall(args) => {
             // 末尾再帰: TailCall(args) の args を一時変数に評価してから
@@ -2324,17 +2466,24 @@ fn param_to_var_idx(_name: &str, idx: usize) -> u32 {
     idx as u32
 }
 
-/// 変数名を C 識別子として安全な形に変換
+/// 変数名を C 識別子として安全な形に変換する。
+///
+/// The mapping is injective, so distinct Taida names never meet in C:
+/// ASCII letters and digits stay, `_` doubles, and every other character
+/// becomes `_u<hex>_` (`あ` and `い` used to both become `_`, and `xあ`
+/// must not meet an ASCII `x_u3042_`).
 fn sanitize_name(name: &str) -> String {
-    name.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
+    let mut out = String::with_capacity(name.len());
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+        } else if c == '_' {
+            out.push_str("__");
+        } else {
+            write!(out, "_u{:x}_", c as u32).unwrap();
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -2344,6 +2493,136 @@ fn sanitize_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The calls emitted without a throw check must stay safe: no runtime
+    /// function in `RUNTIME_CALLS_THAT_NEVER_THROW` (nor the per-profile
+    /// function a `#define` redirects it to) may reach `taida_throw` or an
+    /// indirect call, i.e. user code that can throw. The call graph comes
+    /// from clang's LLVM IR of every wasm runtime; the test is skipped when
+    /// no clang is installed.
+    #[test]
+    fn runtime_calls_that_never_throw_match_the_call_graph() {
+        let dir = std::env::temp_dir().join(format!(
+            "taida_never_throw_call_graph_{}",
+            std::process::id()
+        ));
+        let Ok(cache) = crate::codegen::driver::WasmRuntimeCache::new(dir.join("cache")) else {
+            eprintln!("SKIP: clang is unavailable");
+            return;
+        };
+        let sources: [(&str, &str); 5] = [
+            (
+                "core",
+                &crate::codegen::runtime_core_wasm::RUNTIME_CORE_WASM,
+            ),
+            ("wasi", include_str!("runtime_wasi_io.c")),
+            ("full", include_str!("runtime_full_wasm.c")),
+            ("abi_web", include_str!("runtime_abi_web_wasm.c")),
+            ("edge_host", include_str!("runtime_edge_host.c")),
+        ];
+        // function -> direct callees ("<indirect>" for a call through a
+        // function pointer)
+        let mut calls: HashMap<String, HashSet<String>> = HashMap::new();
+        for (name, source) in sources {
+            let c_path = dir.join(format!("{name}.c"));
+            let ll_path = dir.join(format!("{name}.ll"));
+            std::fs::write(&c_path, source).unwrap();
+            let status = std::process::Command::new(cache.clang())
+                .args([
+                    "--target=wasm32-unknown-wasi",
+                    "-nostdlib",
+                    "-O0",
+                    "-fwrapv",
+                    "-S",
+                    "-emit-llvm",
+                    "-I",
+                ])
+                .arg(cache.include_dir())
+                .arg(&c_path)
+                .arg("-o")
+                .arg(&ll_path)
+                .status()
+                .unwrap();
+            assert!(status.success(), "clang failed on the {name} runtime");
+            let ir = std::fs::read_to_string(&ll_path).unwrap();
+            let mut current: Option<String> = None;
+            for line in ir.lines() {
+                if let Some(rest) = line.strip_prefix("define ") {
+                    let at = rest.find('@').unwrap() + 1;
+                    let end = rest[at..].find('(').unwrap() + at;
+                    let fn_name = rest[at..end].trim_matches('"').to_string();
+                    calls.entry(fn_name.clone()).or_default();
+                    current = Some(fn_name);
+                } else if line.starts_with('}') {
+                    current = None;
+                } else if let Some(fn_name) = &current {
+                    let mut rest = line;
+                    while let Some(pos) = rest.find("call ") {
+                        rest = &rest[pos + 5..];
+                        let open = match rest.find('(') {
+                            Some(open) => open,
+                            None => break,
+                        };
+                        let head = &rest[..open];
+                        let callee = match head.rfind(['@', '%']) {
+                            Some(sigil) => &head[sigil..],
+                            None => continue,
+                        };
+                        let callee = if callee.starts_with('%') {
+                            "<indirect>".to_string()
+                        } else {
+                            callee[1..].trim_matches('"').to_string()
+                        };
+                        calls.get_mut(fn_name).unwrap().insert(callee);
+                    }
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut may_throw: HashSet<String> =
+            ["taida_throw".to_string(), "<indirect>".to_string()].into();
+        loop {
+            let before = may_throw.len();
+            for (fn_name, callees) in &calls {
+                if !may_throw.contains(fn_name) && callees.iter().any(|c| may_throw.contains(c)) {
+                    may_throw.insert(fn_name.clone());
+                }
+            }
+            if may_throw.len() == before {
+                break;
+            }
+        }
+
+        // The wasm-full profile redirects some runtime calls to its own
+        // implementations through `#define`s in the generated C.
+        let full_header = emit_c(&IrModule::default(), WasmProfile::Full).unwrap();
+        let redirect = |name: &str| -> Option<String> {
+            full_header.lines().find_map(|line| {
+                let rest = line.strip_prefix("#define ")?;
+                let (from, to) = rest.split_once(' ')?;
+                (from == name).then(|| to.trim().to_string())
+            })
+        };
+
+        for &name in RUNTIME_CALLS_THAT_NEVER_THROW {
+            // Clears the pending flag it catches: see the list comment.
+            if name == "taida_error_try_call" {
+                continue;
+            }
+            assert!(
+                calls.contains_key(name),
+                "{name} is not defined by any wasm runtime"
+            );
+            for target in std::iter::once(name.to_string()).chain(redirect(name)) {
+                assert!(
+                    !may_throw.contains(&target),
+                    "{target} can reach taida_throw or user code, so calls to {name} \
+                     need the throw check (remove it from RUNTIME_CALLS_THAT_NEVER_THROW)"
+                );
+            }
+        }
+    }
 
     /// Every scalar operation in the intrinsic table expands, nothing
     /// outside it does. This is the always-on layer of the expansion

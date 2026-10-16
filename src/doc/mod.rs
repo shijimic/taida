@@ -49,6 +49,29 @@ pub struct DocTags {
     pub ai_side_effects: Vec<String>,
 }
 
+impl DocTags {
+    /// Whether no tag and no description was written.
+    pub fn is_empty(&self) -> bool {
+        self.description.is_empty()
+            && self.purpose.is_none()
+            && self.params.is_empty()
+            && self.returns.is_none()
+            && self.throws.is_empty()
+            && self.example.is_empty()
+            && self.since.is_none()
+            && self.deprecated.is_none()
+            && self.see.is_none()
+            && self.ai_context.is_empty()
+            && self.ai_hint.is_empty()
+            && self.ai_examples.is_empty()
+            && self.ai_constraints.is_empty()
+            && self.ai_related.is_empty()
+            && self.ai_category.is_none()
+            && self.ai_complexity.is_empty()
+            && self.ai_side_effects.is_empty()
+    }
+}
+
 /// Documentation for a single field.
 #[derive(Debug, Clone)]
 pub struct FieldDoc {
@@ -63,6 +86,16 @@ pub struct TypeDoc {
     pub name: String,
     pub tags: DocTags,
     pub fields: Vec<FieldDoc>,
+    /// Methods declared in the type's body.
+    pub methods: Vec<FuncDoc>,
+}
+
+/// Documentation for an enum definition.
+#[derive(Debug, Clone)]
+pub struct EnumDoc {
+    pub name: String,
+    pub tags: DocTags,
+    pub variants: Vec<String>,
 }
 
 /// Documentation for a function definition.
@@ -82,6 +115,7 @@ pub struct MoldDoc {
     pub header_args: Vec<String>,
     pub tags: DocTags,
     pub fields: Vec<FieldDoc>,
+    pub methods: Vec<FuncDoc>,
 }
 
 /// Documentation for an inheritance definition.
@@ -93,6 +127,7 @@ pub struct InheritDoc {
     pub child_header_args: Vec<String>,
     pub tags: DocTags,
     pub fields: Vec<FieldDoc>,
+    pub methods: Vec<FuncDoc>,
 }
 
 /// Documentation for a variable assignment.
@@ -107,6 +142,7 @@ pub struct AssignmentDoc {
 pub struct ModuleDoc {
     pub name: String,
     pub types: Vec<TypeDoc>,
+    pub enums: Vec<EnumDoc>,
     pub functions: Vec<FuncDoc>,
     pub molds: Vec<MoldDoc>,
     pub inheritances: Vec<InheritDoc>,
@@ -143,36 +179,37 @@ const MULTI_LINE_TAGS: &[&str] = &[
 ///
 /// Each line in `comments` is the raw content after stripping the `///@` prefix
 /// (the parser already does this).
+///
+/// A tag runs from its own line to the next tag line, so the lines after it
+/// belong to it: a value that wraps over several lines is read whole, list
+/// items (`Params`, `Throws`, ...) are one per line, and the code of an
+/// `Example` keeps its indentation and blank lines. A line that opens no
+/// known tag is a continuation of the tag before it (free-form description
+/// when no tag has been seen yet), so nothing written is dropped.
 pub fn parse_doc_tags(comments: &[String]) -> DocTags {
     let mut tags = DocTags::default();
-    let mut current_tag: Option<String> = None;
+    // The tag being read: its name and the lines that belong to it, the
+    // first being whatever follows the tag name on its own line.
+    let mut current: Option<(String, Vec<String>)> = None;
 
     for line in comments {
-        let trimmed = line.trim();
-
-        // Check if this line starts a new tag: `@TagName:` or `@TagName`
-        if let Some(tag_match) = try_match_tag(trimmed) {
-            let (tag_name, rest) = tag_match;
-            current_tag = Some(tag_name.to_string());
-
-            let rest_trimmed = rest.trim();
-            if !rest_trimmed.is_empty() {
-                push_tag_content(&mut tags, &tag_name, rest_trimmed);
+        if let Some((tag_name, rest)) = try_match_tag(line.trim()) {
+            if let Some((tag, lines)) = current.take() {
+                push_tag_block(&mut tags, &tag, &lines);
             }
-        } else if let Some(ref tag) = current_tag {
-            // Continuation line for the current tag
-            if trimmed.is_empty() {
-                // Blank line within a multi-line tag: keep it if relevant
-                // (skip for now to avoid trailing blanks)
-            } else {
-                push_tag_content(&mut tags, tag, trimmed);
-            }
+            current = Some((tag_name, vec![rest]));
+        } else if let Some((_, lines)) = current.as_mut() {
+            lines.push(line.clone());
         } else {
             // Free-form description (no tag context yet)
+            let trimmed = line.trim();
             if !trimmed.is_empty() {
                 tags.description.push(trimmed.to_string());
             }
         }
+    }
+    if let Some((tag, lines)) = current.take() {
+        push_tag_block(&mut tags, &tag, &lines);
     }
 
     tags
@@ -183,7 +220,7 @@ pub fn parse_doc_tags(comments: &[String]) -> DocTags {
 /// Accepts both `@Purpose:...` (raw doc comment content where `///@` prefix
 /// left the `@`) and `Purpose:...` (where the lexer already consumed the `@`
 /// as part of the `///@` prefix).
-fn try_match_tag(line: &str) -> Option<(String, String)> {
+pub(crate) fn try_match_tag(line: &str) -> Option<(String, String)> {
     // Strip optional leading `@`
     let body = line.strip_prefix('@').unwrap_or(line);
 
@@ -192,8 +229,15 @@ fn try_match_tag(line: &str) -> Option<(String, String)> {
         if let Some(remaining) = body.strip_prefix(tag) {
             // Must be followed by `:`, whitespace, or end of line
             if remaining.is_empty() || remaining.starts_with(':') || remaining.starts_with(' ') {
-                let rest = remaining.trim_start_matches(':').to_string();
-                return Some((tag.to_string(), rest));
+                // A colon after some spaces (`Since : e.32`) is the tag's
+                // colon too; it is not the start of the value.
+                let after_spaces = remaining.trim_start();
+                let rest = if after_spaces.starts_with(':') {
+                    after_spaces.trim_start_matches(':')
+                } else {
+                    remaining
+                };
+                return Some((tag.to_string(), rest.to_string()));
             }
         }
     }
@@ -201,65 +245,111 @@ fn try_match_tag(line: &str) -> Option<(String, String)> {
     None
 }
 
-/// Push content into the appropriate tag field.
-fn push_tag_content(tags: &mut DocTags, tag: &str, content: &str) {
+/// The non-blank lines, trimmed.
+fn trimmed_lines(lines: &[String]) -> Vec<String> {
+    lines
+        .iter()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// A tag's lines as one value: a value wrapped over several lines is joined
+/// with spaces.
+fn joined_value(lines: &[String]) -> Option<String> {
+    let value = trimmed_lines(lines).join(" ");
+    (!value.is_empty()).then_some(value)
+}
+
+/// Code lines, with the indentation the block as a whole is written at
+/// removed (and what is deeper kept) and blank lines inside kept. Blank
+/// lines at either end are dropped.
+fn code_lines(lines: &[String]) -> Vec<String> {
+    // Counted in characters: the indentation may be any whitespace, and what
+    // is cut off must be whole characters.
+    let indent = lines
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.chars().take_while(|c| c.is_whitespace()).count())
+        .min()
+        .unwrap_or(0);
+    let mut out: Vec<String> = lines
+        .iter()
+        .map(|line| {
+            if line.trim().is_empty() {
+                String::new()
+            } else {
+                let start = line
+                    .char_indices()
+                    .nth(indent)
+                    .map_or(line.len(), |(i, _)| i);
+                line[start..].trim_end().to_string()
+            }
+        })
+        .collect();
+    while out.first().is_some_and(|line| line.is_empty()) {
+        out.remove(0);
+    }
+    while out.last().is_some_and(|line| line.is_empty()) {
+        out.pop();
+    }
+    out
+}
+
+/// List items: a line opening with `-` starts an item, and the lines after
+/// it that do not are the rest of that item. A list written without any `-`
+/// has one item per line.
+fn list_items(lines: &[String]) -> Vec<String> {
+    let lines = trimmed_lines(lines);
+    let dashed = lines.iter().any(|line| line.starts_with('-'));
+    let mut items: Vec<String> = Vec::new();
+    for line in lines {
+        match line.strip_prefix('-') {
+            Some(item) => items.push(item.trim().to_string()),
+            None => match items.last_mut() {
+                Some(last) if dashed => {
+                    last.push(' ');
+                    last.push_str(&line);
+                }
+                _ => items.push(line),
+            },
+        }
+    }
+    items
+}
+
+/// Store the finished block of lines of `tag` in its field.
+fn push_tag_block(tags: &mut DocTags, tag: &str, lines: &[String]) {
     match tag {
-        "Purpose" => {
-            tags.purpose = Some(content.to_string());
-        }
-        "Returns" => {
-            tags.returns = Some(content.to_string());
-        }
-        "Since" => {
-            tags.since = Some(content.to_string());
-        }
-        "Deprecated" => {
-            tags.deprecated = Some(content.to_string());
-        }
-        "See" => {
-            tags.see = Some(content.to_string());
-        }
-        "AI-Category" => {
-            tags.ai_category = Some(content.to_string());
-        }
+        "Purpose" => tags.purpose = joined_value(lines),
+        "Returns" => tags.returns = joined_value(lines),
+        "Since" => tags.since = joined_value(lines),
+        "Deprecated" => tags.deprecated = joined_value(lines),
+        "See" => tags.see = joined_value(lines),
+        "AI-Category" => tags.ai_category = joined_value(lines),
         "Params" => {
             // Parse `- name: description` format
-            let stripped = content.trim_start_matches('-').trim();
-            if let Some(colon_pos) = stripped.find(':') {
-                let name = stripped[..colon_pos].trim().to_string();
-                let desc = stripped[colon_pos + 1..].trim().to_string();
-                tags.params.push((name, desc));
-            } else {
-                tags.params.push((stripped.to_string(), String::new()));
+            for item in list_items(lines) {
+                match item.find(':') {
+                    Some(colon_pos) => {
+                        let name = item[..colon_pos].trim().to_string();
+                        let desc = item[colon_pos + 1..].trim().to_string();
+                        tags.params.push((name, desc));
+                    }
+                    None => tags.params.push((item, String::new())),
+                }
             }
         }
-        "Throws" => {
-            tags.throws.push(content.to_string());
-        }
-        "Example" => {
-            tags.example.push(content.to_string());
-        }
-        "AI-Context" => {
-            tags.ai_context.push(content.to_string());
-        }
-        "AI-Hint" => {
-            tags.ai_hint.push(content.to_string());
-        }
-        "AI-Examples" => {
-            tags.ai_examples.push(content.to_string());
-        }
-        "AI-Constraints" => {
-            tags.ai_constraints.push(content.to_string());
-        }
-        "AI-Related" => {
-            tags.ai_related.push(content.to_string());
-        }
-        "AI-Complexity" => {
-            tags.ai_complexity.push(content.to_string());
-        }
-        "AI-SideEffects" => {
-            tags.ai_side_effects.push(content.to_string());
-        }
+        "Throws" => tags.throws.extend(list_items(lines)),
+        "Example" => tags.example.extend(code_lines(lines)),
+        "AI-Examples" => tags.ai_examples.extend(code_lines(lines)),
+        "AI-Context" => tags.ai_context.extend(trimmed_lines(lines)),
+        "AI-Hint" => tags.ai_hint.extend(trimmed_lines(lines)),
+        "AI-Constraints" => tags.ai_constraints.extend(trimmed_lines(lines)),
+        "AI-Related" => tags.ai_related.extend(trimmed_lines(lines)),
+        "AI-Complexity" => tags.ai_complexity.extend(trimmed_lines(lines)),
+        "AI-SideEffects" => tags.ai_side_effects.extend(trimmed_lines(lines)),
         _ => {}
     }
 }
@@ -317,9 +407,29 @@ fn format_mold_header_arg(arg: &MoldHeaderArg) -> String {
 // ── Extraction ──────────────────────────────────────────────────────
 
 /// Extract field documentation from AST FieldDef.
+///
+/// The description is the field's `Purpose` (or, without one, what its
+/// comment says) followed by the notes it carries (`Deprecated`, `Since`,
+/// `See`), on one line for the table cell.
 fn extract_field_doc(field: &FieldDef) -> FieldDoc {
     let type_str = field.type_annotation.as_ref().map(format_type_expr);
-    let doc = field.doc_comments.join(" ").trim().to_string();
+    let tags = parse_doc_tags(&field.doc_comments);
+    let mut parts: Vec<String> = Vec::new();
+    match &tags.purpose {
+        Some(purpose) => parts.push(purpose.clone()),
+        None if !tags.description.is_empty() => parts.push(tags.description.join(" ")),
+        None => {}
+    }
+    for (label, note) in [
+        ("Deprecated", &tags.deprecated),
+        ("Since", &tags.since),
+        ("See", &tags.see),
+    ] {
+        if let Some(note) = note {
+            parts.push(format!("{}: {}", label, note));
+        }
+    }
+    let doc = parts.join("; ");
     FieldDoc {
         name: field.name.clone(),
         type_str,
@@ -327,11 +437,38 @@ fn extract_field_doc(field: &FieldDef) -> FieldDoc {
     }
 }
 
+/// The value fields of a definition, for its table (methods are documented
+/// on their own).
+fn extract_field_docs(fields: &[FieldDef]) -> Vec<FieldDoc> {
+    fields
+        .iter()
+        .filter(|field| field.method_def.is_none())
+        .map(extract_field_doc)
+        .collect()
+}
+
+/// The methods of a definition, documented like functions.
+fn extract_method_docs(fields: &[FieldDef]) -> Vec<FuncDoc> {
+    fields
+        .iter()
+        .filter_map(|field| {
+            let method = field.method_def.as_ref()?;
+            let mut doc = extract_func_doc(method);
+            // The comment above the method is attached to its field.
+            if doc.tags.is_empty() {
+                doc.tags = parse_doc_tags(&field.doc_comments);
+            }
+            Some(doc)
+        })
+        .collect()
+}
+
 /// Extract documentation from a program AST.
 pub fn extract_docs(program: &Program, module_name: &str) -> ModuleDoc {
     let mut doc = ModuleDoc {
         name: module_name.to_string(),
         types: Vec::new(),
+        enums: Vec::new(),
         functions: Vec::new(),
         molds: Vec::new(),
         inheritances: Vec::new(),
@@ -341,6 +478,11 @@ pub fn extract_docs(program: &Program, module_name: &str) -> ModuleDoc {
 
     for stmt in &program.statements {
         match stmt {
+            Statement::EnumDef(ed) => doc.enums.push(EnumDoc {
+                name: ed.name.clone(),
+                tags: parse_doc_tags(&ed.doc_comments),
+                variants: ed.variants.iter().map(|v| v.name.clone()).collect(),
+            }),
             // (E30 Sub-step 2.1) ClassLikeDef 単一 variant + kind dispatch。
             Statement::ClassLikeDef(cl) => match &cl.kind {
                 ClassLikeKind::BuchiPack
@@ -444,7 +586,8 @@ fn extract_type_doc(td: &ClassLikeDef) -> TypeDoc {
     TypeDoc {
         name: td.name.clone(),
         tags: parse_doc_tags(&td.doc_comments),
-        fields: td.fields.iter().map(extract_field_doc).collect(),
+        fields: extract_field_docs(&td.fields),
+        methods: extract_method_docs(&td.fields),
     }
 }
 
@@ -482,7 +625,8 @@ fn extract_mold_doc(md: &ClassLikeDef) -> MoldDoc {
             .map(format_mold_header_arg)
             .collect(),
         tags: parse_doc_tags(&md.doc_comments),
-        fields: md.fields.iter().map(extract_field_doc).collect(),
+        fields: extract_field_docs(&md.fields),
+        methods: extract_method_docs(&md.fields),
     }
 }
 
@@ -512,7 +656,8 @@ fn extract_inherit_doc(id: &ClassLikeDef) -> InheritDoc {
         child: id.name.clone(),
         child_header_args,
         tags: parse_doc_tags(&id.doc_comments),
-        fields: id.fields.iter().map(extract_field_doc).collect(),
+        fields: extract_field_docs(&id.fields),
+        methods: extract_method_docs(&id.fields),
     }
 }
 
@@ -542,6 +687,14 @@ pub fn render_markdown(doc: &ModuleDoc) -> String {
         out.push_str("## Types\n\n");
         for td in &doc.types {
             render_type_doc(&mut out, td);
+        }
+    }
+
+    // Enums
+    if !doc.enums.is_empty() {
+        out.push_str("## Enums\n\n");
+        for ed in &doc.enums {
+            render_enum_doc(&mut out, ed);
         }
     }
 
@@ -585,6 +738,29 @@ pub fn render_markdown(doc: &ModuleDoc) -> String {
     out
 }
 
+fn render_enum_doc(out: &mut String, ed: &EnumDoc) {
+    out.push_str(&format!("### {}\n\n", ed.name));
+    render_tags_header(out, &ed.tags);
+
+    if !ed.variants.is_empty() {
+        out.push_str("| Variant |\n");
+        out.push_str("|---------|\n");
+        for variant in &ed.variants {
+            out.push_str(&format!("| `{}` |\n", escape_table_cell(variant)));
+        }
+        out.push('\n');
+    }
+
+    render_tags_body(out, &ed.tags);
+}
+
+/// Methods of a type, one `####` section each.
+fn render_methods(out: &mut String, methods: &[FuncDoc]) {
+    for method in methods {
+        render_func_doc_at(out, method, "####");
+    }
+}
+
 fn render_type_doc(out: &mut String, td: &TypeDoc) {
     out.push_str(&format!("### {}\n\n", td.name));
     render_tags_header(out, &td.tags);
@@ -606,15 +782,20 @@ fn render_type_doc(out: &mut String, td: &TypeDoc) {
     }
 
     render_tags_body(out, &td.tags);
+    render_methods(out, &td.methods);
 }
 
 fn render_func_doc(out: &mut String, fd: &FuncDoc) {
+    render_func_doc_at(out, fd, "###");
+}
+
+fn render_func_doc_at(out: &mut String, fd: &FuncDoc, heading: &str) {
     let type_params_str = if fd.type_params.is_empty() {
         String::new()
     } else {
         format!("[{}]", fd.type_params.join(", "))
     };
-    out.push_str(&format!("### {}{}\n\n", fd.name, type_params_str));
+    out.push_str(&format!("{} {}{}\n\n", heading, fd.name, type_params_str));
     render_tags_header(out, &fd.tags);
 
     // Parameters table (merge AST params with @Params tag descriptions)
@@ -681,6 +862,7 @@ fn render_mold_doc(out: &mut String, md: &MoldDoc) {
     }
 
     render_tags_body(out, &md.tags);
+    render_methods(out, &md.methods);
 }
 
 fn render_inherit_doc(out: &mut String, id: &InheritDoc) {
@@ -714,6 +896,7 @@ fn render_inherit_doc(out: &mut String, id: &InheritDoc) {
     }
 
     render_tags_body(out, &id.tags);
+    render_methods(out, &id.methods);
 }
 
 fn escape_table_cell(s: &str) -> String {
@@ -1052,6 +1235,124 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_doc_tags_wrapped_values_keep_every_line() {
+        let comments = vec![
+            "Purpose: first line".to_string(),
+            "  second line".to_string(),
+            "Returns: the result,".to_string(),
+            "  and more".to_string(),
+        ];
+        let tags = parse_doc_tags(&comments);
+        assert_eq!(tags.purpose.as_deref(), Some("first line second line"));
+        assert_eq!(tags.returns.as_deref(), Some("the result, and more"));
+    }
+
+    #[test]
+    fn test_parse_doc_tags_unknown_tag_line_does_not_replace_the_value() {
+        let comments = vec![
+            "Purpose: what it is".to_string(),
+            "Note: something the tags do not know".to_string(),
+        ];
+        let tags = parse_doc_tags(&comments);
+        let purpose = tags.purpose.expect("purpose");
+        assert!(purpose.starts_with("what it is"), "{purpose}");
+        assert!(purpose.contains("Note: something"), "{purpose}");
+    }
+
+    #[test]
+    fn test_parse_doc_tags_throws_items_carry_no_dash() {
+        let comments = vec![
+            "Throws:".to_string(),
+            "  - ValidationError: id is negative".to_string(),
+            "  - NetworkError: cannot connect,".to_string(),
+            "    retry later".to_string(),
+        ];
+        let tags = parse_doc_tags(&comments);
+        assert_eq!(
+            tags.throws,
+            vec![
+                "ValidationError: id is negative".to_string(),
+                "NetworkError: cannot connect, retry later".to_string(),
+            ]
+        );
+        let mut out = String::new();
+        render_tags_body(&mut out, &tags);
+        assert!(out.contains("- ValidationError: id is negative\n"), "{out}");
+        assert!(!out.contains("- - "), "{out}");
+    }
+
+    #[test]
+    fn test_parse_doc_tags_example_keeps_indentation_and_blank_lines() {
+        let comments = vec![
+            "Example:".to_string(),
+            "  f <= _ x: Int =".to_string(),
+            "    y <= x * 2".to_string(),
+            "    y + 1".to_string(),
+            "".to_string(),
+            "  stdout(f(1).toString())".to_string(),
+        ];
+        let tags = parse_doc_tags(&comments);
+        assert_eq!(
+            tags.example,
+            vec![
+                "f <= _ x: Int =",
+                "  y <= x * 2",
+                "  y + 1",
+                "",
+                "stdout(f(1).toString())",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_param_description_continues_on_the_next_line() {
+        let comments = vec![
+            "Params:".to_string(),
+            "  - id: the identifier".to_string(),
+            "      of the pilot".to_string(),
+            "  - limit: how many".to_string(),
+        ];
+        let tags = parse_doc_tags(&comments);
+        assert_eq!(
+            tags.params,
+            vec![
+                ("id".to_string(), "the identifier of the pilot".to_string()),
+                ("limit".to_string(), "how many".to_string()),
+            ]
+        );
+    }
+
+    fn documented(source: &str) -> String {
+        let (program, errors) = crate::parser::parse(source);
+        assert!(errors.is_empty(), "parse errors: {errors:?}");
+        render_markdown(&extract_docs(&program, "m.td"))
+    }
+
+    #[test]
+    fn test_enum_is_documented_with_its_variants() {
+        let md = documented("///@ Purpose: colours\nEnum => Color = :Red :Green\n");
+        assert!(md.contains("## Enums"), "{md}");
+        assert!(md.contains("### Color"), "{md}");
+        assert!(md.contains("> colours"), "{md}");
+        assert!(md.contains("| `Red` |"), "{md}");
+        assert!(md.contains("| `Green` |"), "{md}");
+    }
+
+    #[test]
+    fn test_method_comment_is_expanded_not_flattened_into_the_field_table() {
+        let source = "Point = @(\n  x: Int\n  ///@ Purpose: add x\n  ///@ Params:\n  ///@   - other: the addend\n  ///@ Returns: the sum\n  plus other: Int =\n    x + other\n  => :Int\n)\n";
+        let md = documented(source);
+        assert!(md.contains("#### plus"), "{md}");
+        assert!(md.contains("> add x"), "{md}");
+        assert!(md.contains("| `other` | `Int` | the addend |"), "{md}");
+        assert!(md.contains("**Returns**: `Int` - the sum"), "{md}");
+        assert!(
+            !md.contains("| `plus` |"),
+            "a method is not a field row: {md}"
+        );
+    }
+
+    #[test]
     fn test_format_type_expr_named() {
         let te = TypeExpr::Named("Int".to_string());
         assert_eq!(format_type_expr(&te), "Int");
@@ -1180,6 +1481,7 @@ isTerminal <= RustAddon["isTerminal"](arity <= 1)
     fn test_render_markdown_types() {
         let doc = ModuleDoc {
             name: "test.td".to_string(),
+            enums: vec![],
             types: vec![TypeDoc {
                 name: "Pilot".to_string(),
                 tags: DocTags {
@@ -1198,6 +1500,7 @@ isTerminal <= RustAddon["isTerminal"](arity <= 1)
                         doc: "Pilot name".to_string(),
                     },
                 ],
+                methods: vec![],
             }],
             functions: vec![],
             molds: vec![],
@@ -1218,6 +1521,7 @@ isTerminal <= RustAddon["isTerminal"](arity <= 1)
     fn test_render_markdown_functions() {
         let doc = ModuleDoc {
             name: "test.td".to_string(),
+            enums: vec![],
             types: vec![],
             functions: vec![FuncDoc {
                 name: "search".to_string(),
@@ -1248,6 +1552,7 @@ isTerminal <= RustAddon["isTerminal"](arity <= 1)
     fn test_render_markdown_molds() {
         let doc = ModuleDoc {
             name: "test.td".to_string(),
+            enums: vec![],
             types: vec![],
             functions: vec![],
             molds: vec![MoldDoc {
@@ -1262,6 +1567,7 @@ isTerminal <= RustAddon["isTerminal"](arity <= 1)
                     type_str: Some("Bool".to_string()),
                     doc: "Whether request succeeded".to_string(),
                 }],
+                methods: vec![],
             }],
             inheritances: vec![],
             assignments: vec![],
@@ -1278,6 +1584,7 @@ isTerminal <= RustAddon["isTerminal"](arity <= 1)
     fn test_render_markdown_inheritances() {
         let doc = ModuleDoc {
             name: "test.td".to_string(),
+            enums: vec![],
             types: vec![],
             functions: vec![],
             molds: vec![],
@@ -1295,6 +1602,7 @@ isTerminal <= RustAddon["isTerminal"](arity <= 1)
                     type_str: Some("Str".to_string()),
                     doc: "Dog breed".to_string(),
                 }],
+                methods: vec![],
             }],
             assignments: vec![],
             exports: vec![],
@@ -1310,6 +1618,7 @@ isTerminal <= RustAddon["isTerminal"](arity <= 1)
     fn test_render_markdown_exports() {
         let doc = ModuleDoc {
             name: "test.td".to_string(),
+            enums: vec![],
             types: vec![],
             functions: vec![],
             molds: vec![],
@@ -1328,6 +1637,7 @@ isTerminal <= RustAddon["isTerminal"](arity <= 1)
     fn test_render_markdown_ai_tags() {
         let doc = ModuleDoc {
             name: "test.td".to_string(),
+            enums: vec![],
             types: vec![],
             functions: vec![FuncDoc {
                 name: "process".to_string(),

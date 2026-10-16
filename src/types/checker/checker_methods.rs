@@ -178,6 +178,60 @@ impl TypeChecker {
         }
     }
 
+    /// A pack built by a literal has the methods `throw`, `unmold` and
+    /// `toString`, and calls its function-valued fields; any other name fails
+    /// every time it runs. (A value only declared to have a pack type may be
+    /// an instance with methods of its own, so it is not checked.)
+    pub(super) fn check_literal_pack_method(
+        &mut self,
+        receiver: &Expr,
+        obj_type: &Type,
+        method: &str,
+        span: &Span,
+    ) {
+        let Type::BuchiPack(fields) = obj_type else {
+            return;
+        };
+        if fields.is_empty()
+            || matches!(method, "throw" | "unmold" | "toString" | "errorInfo")
+            || !self.is_pack_literal_value(receiver)
+        {
+            return;
+        }
+        match fields.iter().find(|(name, _)| name == method) {
+            None => self.errors.push(TypeError {
+                message: format!(
+                    "[E1509] Unknown method '{}' on type {}. \
+                     Hint: Check the method name for typos, or use a mold instead.",
+                    method, obj_type
+                ),
+                span: span.clone(),
+            }),
+            Some((_, field_ty))
+                if matches!(
+                    field_ty,
+                    Type::Int
+                        | Type::Float
+                        | Type::Str
+                        | Type::Bool
+                        | Type::Bytes
+                        | Type::List(_)
+                        | Type::BuchiPack(_)
+                ) =>
+            {
+                self.errors.push(TypeError {
+                    message: format!(
+                        "[E1509] Field '{}' of type {} is not a function and cannot be called. \
+                         Hint: Read it as a field (`value.{}`) instead.",
+                        method, field_ty, method
+                    ),
+                    span: span.clone(),
+                })
+            }
+            Some(_) => {}
+        }
+    }
+
     pub(super) fn check_method_args(
         &mut self,
         obj_type: &Type,
@@ -228,7 +282,7 @@ impl TypeChecker {
                     | Type::Bool
                     | Type::Bytes
                     | Type::List(_)
-            ) || matches!(obj_type, Type::Named(n) if n == "HashMap" || n == "Set")
+            ) || matches!(obj_type, Type::Named(n) | Type::Generic(n, _) if n == "HashMap" || n == "Set")
                 || matches!(obj_type, Type::Named(n) if self.mold_field_defs.contains_key(n) || self.registry.get_type_fields(n).is_some())
                 || matches!(obj_type, Type::Generic(n, _) if n == "Lax" || n == "Result" || n == "Gorillax" || n == "RelaxedGorillax")
                 || matches!(obj_type, Type::Error(_));

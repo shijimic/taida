@@ -97,8 +97,377 @@ static const char *taida_net_status_reason(int code) {
     }
 }
 
+// Header byte-grammar helpers; the definitions live alongside the
+// streaming validator and the WebSocket helpers below.
+static int taida_net3_is_rfc7230_token_byte(unsigned char b);
+static int taida_net3_is_rfc7230_field_value_byte(unsigned char b);
+static int taida_net3_header_name_eq_ci(const char *name, size_t name_len, const char *expected);
+static int taida_net4_is_valid_utf8(const unsigned char *bytes, size_t len);
+
+// ── HTTP/1.1 request head grammar ───────────────────────────────
+// The interpreter parses request heads with httparse (default
+// configuration). This parser follows the same rules byte for byte, so the
+// two backends accept and reject the same heads and report the same spans:
+//   - empty lines (CRLF or LF) before the request line are skipped;
+//   - method = 1*tchar, followed by exactly one SP;
+//   - request-target = 1*( %x21-7E / %x80-FF ) that is valid UTF-8,
+//     followed by exactly one SP;
+//   - version = "HTTP/1.0" / "HTTP/1.1";
+//   - every line ends with CRLF or LF;
+//   - header name = 1*tchar immediately followed by ':' (whitespace before
+//     the colon and obs-fold continuation lines are rejected);
+//   - header value bytes = HTAB / SP / VCHAR / obs-text; the SP / HTAB
+//     around the value are not part of it;
+//   - at most 64 header lines.
+// Before this grammar was enforced, a name such as "Content-Length " was
+// kept as an unknown header, so the body length fell back to 0 and the body
+// was read as the next request (request smuggling).
+//
+// A head that ends before the grammar reaches a verdict is partial: the
+// fields completed so far are still reported, as the interpreter does.
+
+#define TAIDA_NET_H1_MAX_HEADERS 64
+
+#define TAIDA_NET_H1_COMPLETE 0
+#define TAIDA_NET_H1_PARTIAL  1
+#define TAIDA_NET_H1_ERROR    2
+
+typedef struct {
+    size_t name_start, name_len;
+    size_t value_start, value_len;
+} TaidaNetH1Header;
+
+typedef struct {
+    int has_method;
+    size_t method_start, method_len;
+    int has_target;
+    size_t target_start, target_len;
+    int has_version;
+    int minor;
+    size_t header_count;
+    TaidaNetH1Header headers[TAIDA_NET_H1_MAX_HEADERS];
+    size_t consumed;      // head length, set when the head is complete
+    const char *error;    // grammar violation, set on TAIDA_NET_H1_ERROR
+} TaidaNetH1Head;
+
+static int taida_net_h1_is_target_byte(unsigned char b) {
+    return (b >= 0x21 && b <= 0x7E) || b >= 0x80;
+}
+
+static int taida_net_h1_fail(TaidaNetH1Head *h, const char *error) {
+    h->error = error;
+    return TAIDA_NET_H1_ERROR;
+}
+
+// Parses d[0..len). Returns TAIDA_NET_H1_COMPLETE, TAIDA_NET_H1_PARTIAL or
+// TAIDA_NET_H1_ERROR (with h->error set to the violated rule).
+static int taida_net_h1_parse_head(const unsigned char *d, size_t len, TaidaNetH1Head *h) {
+    memset(h, 0, sizeof(*h));
+    h->minor = 1;
+    size_t pos = 0;
+
+    // Empty lines before the request line.
+    for (;;) {
+        if (pos >= len) return TAIDA_NET_H1_PARTIAL;
+        if (d[pos] == '\r') {
+            if (pos + 1 >= len) return TAIDA_NET_H1_PARTIAL;
+            if (d[pos + 1] != '\n') return taida_net_h1_fail(h, "invalid new line");
+            pos += 2;
+        } else if (d[pos] == '\n') {
+            pos++;
+        } else {
+            break;
+        }
+    }
+
+    // Method.
+    size_t start = pos;
+    if (!taida_net3_is_rfc7230_token_byte(d[pos])) return taida_net_h1_fail(h, "invalid token");
+    pos++;
+    for (;;) {
+        if (pos >= len) return TAIDA_NET_H1_PARTIAL;
+        unsigned char b = d[pos++];
+        if (b == ' ') break;
+        if (!taida_net3_is_rfc7230_token_byte(b)) return taida_net_h1_fail(h, "invalid token");
+    }
+    h->has_method = 1;
+    h->method_start = start;
+    h->method_len = pos - 1 - start;
+
+    // Request target.
+    start = pos;
+    while (pos < len && taida_net_h1_is_target_byte(d[pos])) pos++;
+    if (pos >= len) return TAIDA_NET_H1_PARTIAL;
+    if (d[pos] != ' ' || pos == start || !taida_net4_is_valid_utf8(d + start, pos - start)) {
+        return taida_net_h1_fail(h, "invalid token");
+    }
+    h->has_target = 1;
+    h->target_start = start;
+    h->target_len = pos - start;
+    pos++;
+
+    // Version. With fewer than 8 bytes left, a prefix of "HTTP/1." is
+    // still undecided.
+    if (len - pos >= 8) {
+        if (memcmp(d + pos, "HTTP/1.0", 8) == 0) {
+            h->minor = 0;
+        } else if (memcmp(d + pos, "HTTP/1.1", 8) == 0) {
+            h->minor = 1;
+        } else {
+            return taida_net_h1_fail(h, "invalid HTTP version");
+        }
+        h->has_version = 1;
+        pos += 8;
+    } else {
+        static const char prefix[] = "HTTP/1.";
+        for (size_t i = 0; i < 7; i++) {
+            if (pos + i >= len) return TAIDA_NET_H1_PARTIAL;
+            if (d[pos + i] != (unsigned char)prefix[i]) return taida_net_h1_fail(h, "invalid HTTP version");
+        }
+        return TAIDA_NET_H1_PARTIAL;
+    }
+
+    // End of the request line.
+    if (pos >= len) return TAIDA_NET_H1_PARTIAL;
+    if (d[pos] == '\r') {
+        if (pos + 1 >= len) return TAIDA_NET_H1_PARTIAL;
+        if (d[pos + 1] != '\n') return taida_net_h1_fail(h, "invalid new line");
+        pos += 2;
+    } else if (d[pos] == '\n') {
+        pos++;
+    } else {
+        return taida_net_h1_fail(h, "invalid new line");
+    }
+
+    // Header lines, up to the empty line that ends the head.
+    for (;;) {
+        if (pos >= len) return TAIDA_NET_H1_PARTIAL;
+        if (d[pos] == '\r') {
+            if (pos + 1 >= len) return TAIDA_NET_H1_PARTIAL;
+            if (d[pos + 1] != '\n') return taida_net_h1_fail(h, "invalid new line");
+            h->consumed = pos + 2;
+            return TAIDA_NET_H1_COMPLETE;
+        }
+        if (d[pos] == '\n') {
+            h->consumed = pos + 1;
+            return TAIDA_NET_H1_COMPLETE;
+        }
+
+        size_t name_start = pos;
+        while (pos < len && taida_net3_is_rfc7230_token_byte(d[pos])) pos++;
+        if (pos == name_start) return taida_net_h1_fail(h, "invalid header name");
+        if (pos >= len) return TAIDA_NET_H1_PARTIAL;
+        if (d[pos] != ':') return taida_net_h1_fail(h, "invalid header name");
+        size_t name_len = pos - name_start;
+        pos++;
+
+        for (;;) {
+            if (pos >= len) return TAIDA_NET_H1_PARTIAL;
+            if (d[pos] != ' ' && d[pos] != '\t') break;
+            pos++;
+        }
+        // An empty value is reported as a zero-length span at the line end.
+        size_t value_start = pos;
+        size_t value_end = pos;
+        if (d[pos] == '\r') {
+            if (pos + 1 >= len) return TAIDA_NET_H1_PARTIAL;
+            if (d[pos + 1] != '\n') return taida_net_h1_fail(h, "invalid header value");
+            pos += 2;
+        } else if (d[pos] == '\n') {
+            pos++;
+        } else if (taida_net3_is_rfc7230_field_value_byte(d[pos])) {
+            while (pos < len && taida_net3_is_rfc7230_field_value_byte(d[pos])) pos++;
+            if (pos >= len) return TAIDA_NET_H1_PARTIAL;
+            value_end = pos;
+            if (d[pos] == '\r') {
+                if (pos + 1 >= len) return TAIDA_NET_H1_PARTIAL;
+                if (d[pos + 1] != '\n') return taida_net_h1_fail(h, "invalid header value");
+                pos += 2;
+            } else if (d[pos] == '\n') {
+                pos++;
+            } else {
+                return taida_net_h1_fail(h, "invalid header value");
+            }
+            while (value_end > value_start && (d[value_end - 1] == ' ' || d[value_end - 1] == '\t')) value_end--;
+        } else {
+            return taida_net_h1_fail(h, "invalid header value");
+        }
+
+        if (h->header_count >= TAIDA_NET_H1_MAX_HEADERS) return taida_net_h1_fail(h, "too many headers");
+        TaidaNetH1Header *hdr = &h->headers[h->header_count++];
+        hdr->name_start = name_start;
+        hdr->name_len = name_len;
+        hdr->value_start = value_start;
+        hdr->value_len = value_end - value_start;
+    }
+}
+
+// Case-insensitive comparison of d[start..start+len) with a lowercase name.
+static int taida_net_h1_span_eq_ci(const unsigned char *d, size_t start, size_t len, const char *lower) {
+    return taida_net3_header_name_eq_ci((const char *)(d + start), len, lower);
+}
+
+// Builds the httpParseRequestHead result for a complete or partial head.
+// The framing checks match the interpreter's build_parse_result and run in
+// the same order, so both backends report the same error for a head:
+//   1. method / path / Host wire-byte limits (16 / 2048 / 256 bytes);
+//   2. per header, in order: Transfer-Encoding codings, Content-Length
+//      (single header, 1*DIGIT, at most 2^53-1);
+//   3. on a complete head, a Transfer-Encoding whose final coding is not
+//      chunked (RFC 9112 §6.3: the body length cannot be determined);
+//   4. Content-Length together with chunked.
+static taida_val taida_net_h1_parse_result(const unsigned char *d, const TaidaNetH1Head *h, int complete) {
+    size_t method_start = 0, method_len = 0;
+    if (h->has_method) {
+        method_start = h->method_start;
+        method_len = h->method_len;
+    }
+    size_t path_start = 0, path_len = 0, query_start = 0, query_len = 0;
+    if (h->has_target) {
+        path_start = h->target_start;
+        path_len = h->target_len;
+        for (size_t i = 0; i < h->target_len; i++) {
+            if (d[h->target_start + i] == '?') {
+                path_len = i;
+                query_start = h->target_start + i + 1;
+                query_len = h->target_len - i - 1;
+                break;
+            }
+        }
+    }
+
+    // The H2 / H3 request structs back these fields with fixed-size
+    // buffers (`char method[16]`, `char path[2048]`, `char authority[256]`),
+    // so over-limit values are rejected here instead of being truncated
+    // later (docs/api/net.md §4.3).
+    if (method_len > 16) {
+        return taida_net_result_fail("ParseError", "Malformed HTTP request: method exceeds wire-byte limit");
+    }
+    if (path_len > 2048) {
+        return taida_net_result_fail("ParseError", "Malformed HTTP request: path exceeds wire-byte limit");
+    }
+
+    taida_val headers_list = taida_list_new();
+    int64_t content_length = 0;
+    int cl_count = 0;
+    int has_te = 0;
+    int final_coding_chunked = 0;
+    for (size_t i = 0; i < h->header_count; i++) {
+        const TaidaNetH1Header *hdr = &h->headers[i];
+        taida_val header_pack = taida_pack_new(2);
+        taida_pack_set_hash(header_pack, 0, taida_str_hash((taida_val)"name"));
+        taida_pack_set(header_pack, 0, taida_net_make_span((taida_val)hdr->name_start, (taida_val)hdr->name_len));
+        taida_pack_set_tag(header_pack, 0, TAIDA_TAG_PACK);
+        taida_pack_set_hash(header_pack, 1, taida_str_hash((taida_val)"value"));
+        taida_pack_set(header_pack, 1, taida_net_make_span((taida_val)hdr->value_start, (taida_val)hdr->value_len));
+        taida_pack_set_tag(header_pack, 1, TAIDA_TAG_PACK);
+        headers_list = taida_list_push(headers_list, header_pack);
+
+        const unsigned char *value = d + hdr->value_start;
+        size_t value_len = hdr->value_len;
+
+        if (taida_net_h1_span_eq_ci(d, hdr->name_start, hdr->name_len, "host") && value_len > 256) {
+            taida_release(headers_list);
+            return taida_net_result_fail("ParseError", "Malformed HTTP request: authority exceeds wire-byte limit");
+        }
+
+        if (taida_net_h1_span_eq_ci(d, hdr->name_start, hdr->name_len, "transfer-encoding")) {
+            // The codings of every Transfer-Encoding line form one list; empty
+            // list elements are ignored (RFC 9110 §5.6.1).
+            has_te = 1;
+            size_t tk_start = 0;
+            while (tk_start <= value_len) {
+                size_t tk_end = tk_start;
+                while (tk_end < value_len && value[tk_end] != ',') tk_end++;
+                size_t a = tk_start, b = tk_end;
+                while (a < b && (value[a] == ' ' || value[a] == '\t')) a++;
+                while (b > a && (value[b - 1] == ' ' || value[b - 1] == '\t')) b--;
+                if (b > a) {
+                    final_coding_chunked = taida_net3_header_name_eq_ci((const char *)(value + a), b - a, "chunked");
+                }
+                tk_start = tk_end + 1;
+            }
+        }
+
+        if (taida_net_h1_span_eq_ci(d, hdr->name_start, hdr->name_len, "content-length")) {
+            cl_count++;
+            if (cl_count > 1) {
+                taida_release(headers_list);
+                return taida_net_result_fail("ParseError", "Malformed HTTP request: duplicate Content-Length header");
+            }
+            // Content-Length = 1*DIGIT (the parser already dropped the SP / HTAB
+            // around the value), capped at 2^53-1 like the other backends.
+            int valid = value_len > 0;
+            int64_t cl_val = 0;
+            for (size_t k = 0; valid && k < value_len; k++) {
+                if (value[k] < '0' || value[k] > '9') { valid = 0; break; }
+                int64_t digit = value[k] - '0';
+                if (cl_val > (9007199254740991LL - digit) / 10) { valid = 0; break; }
+                cl_val = cl_val * 10 + digit;
+            }
+            if (!valid) {
+                taida_release(headers_list);
+                return taida_net_result_fail("ParseError", "Malformed HTTP request: invalid Content-Length value");
+            }
+            content_length = cl_val;
+        }
+    }
+
+    int chunked = has_te && final_coding_chunked;
+    if (complete && has_te && !chunked) {
+        taida_release(headers_list);
+        return taida_net_result_fail("ParseError", "Malformed HTTP request: Transfer-Encoding must end with chunked");
+    }
+    // Content-Length together with chunked (RFC 9112 §6.3).
+    if (chunked && cl_count > 0) {
+        taida_release(headers_list);
+        return taida_net_result_fail("ParseError", "Malformed HTTP request: Content-Length and Transfer-Encoding: chunked are mutually exclusive");
+    }
+
+    size_t consumed = complete ? h->consumed : 0;
+    taida_val parsed = taida_pack_new(10);
+    taida_pack_set_hash(parsed, 0, taida_str_hash((taida_val)"complete"));
+    taida_pack_set(parsed, 0, complete ? 1 : 0);
+    taida_pack_set_tag(parsed, 0, TAIDA_TAG_BOOL);
+    taida_pack_set_hash(parsed, 1, taida_str_hash((taida_val)"consumed"));
+    taida_pack_set(parsed, 1, (taida_val)consumed);
+    taida_pack_set_hash(parsed, 2, taida_str_hash((taida_val)"method"));
+    taida_pack_set(parsed, 2, taida_net_make_span((taida_val)method_start, (taida_val)method_len));
+    taida_pack_set_tag(parsed, 2, TAIDA_TAG_PACK);
+    taida_pack_set_hash(parsed, 3, taida_str_hash((taida_val)"path"));
+    taida_pack_set(parsed, 3, taida_net_make_span((taida_val)path_start, (taida_val)path_len));
+    taida_pack_set_tag(parsed, 3, TAIDA_TAG_PACK);
+    taida_pack_set_hash(parsed, 4, taida_str_hash((taida_val)"query"));
+    taida_pack_set(parsed, 4, taida_net_make_span((taida_val)query_start, (taida_val)query_len));
+    taida_pack_set_tag(parsed, 4, TAIDA_TAG_PACK);
+
+    taida_val ver = taida_pack_new(2);
+    taida_pack_set_hash(ver, 0, taida_str_hash((taida_val)"major"));
+    taida_pack_set(ver, 0, 1);
+    taida_pack_set_hash(ver, 1, taida_str_hash((taida_val)"minor"));
+    taida_pack_set(ver, 1, (taida_val)(h->has_version ? h->minor : 1));
+    taida_pack_set_hash(parsed, 5, taida_str_hash((taida_val)"version"));
+    taida_pack_set(parsed, 5, ver);
+    taida_pack_set_tag(parsed, 5, TAIDA_TAG_PACK);
+
+    taida_pack_set_hash(parsed, 6, taida_str_hash((taida_val)"headers"));
+    taida_pack_set(parsed, 6, headers_list);
+    taida_pack_set_tag(parsed, 6, TAIDA_TAG_LIST);
+
+    taida_pack_set_hash(parsed, 7, taida_str_hash((taida_val)"bodyOffset"));
+    taida_pack_set(parsed, 7, (taida_val)consumed);
+
+    taida_pack_set_hash(parsed, 8, taida_str_hash((taida_val)"contentLength"));
+    taida_pack_set(parsed, 8, (taida_val)content_length);
+
+    taida_pack_set_hash(parsed, 9, taida_str_hash((taida_val)"chunked"));
+    taida_pack_set(parsed, 9, chunked ? 1 : 0);
+    taida_pack_set_tag(parsed, 9, TAIDA_TAG_BOOL);
+
+    return taida_net_result_ok(parsed);
+}
+
 // ── httpParseRequestHead(bytes) ─────────────────────────────────
-// Hand-written HTTP/1.1 request head parser (no external deps).
 // Returns Result[@(complete, consumed, method, path, query, version, headers, bodyOffset, contentLength, chunked), _]
 taida_val taida_net_http_parse_request_head(taida_val input) {
     // Extract raw bytes from Bytes or Str
@@ -107,19 +476,11 @@ taida_val taida_net_http_parse_request_head(taida_val input) {
     int free_data = 0;
 
     if (TAIDA_IS_BYTES_CONTIG(input)) {
-        // D29B-015 (Track-β-2, 2026-04-27): CONTIG borrow — payload is
-        // already contiguous, but we still alloc a (data_len + 1) buffer
-        // so the trailing NUL terminator can be written without mutating
-        // the borrowed CONTIG payload (which is shared via Arc-like refcount
-        // semantics on the Bytes header). One memcpy + NUL replaces the
-        // legacy 8x byte-loop expansion.
+        // The contiguous payload is only read, so it is borrowed as is.
         taida_val blen = taida_bytes_contig_len(input);
         if (blen < 0) blen = 0;
         data_len = (size_t)blen;
-        data = (unsigned char*)TAIDA_MALLOC(data_len + 1, "net_parse_input");
-        if (data_len > 0) memcpy(data, taida_bytes_contig_data(input), data_len);
-        data[data_len] = 0;
-        free_data = 1;
+        data = (unsigned char*)taida_bytes_contig_data(input);
     } else if (TAIDA_IS_BYTES(input)) {
         taida_val *bytes = (taida_val*)input;
         taida_val blen = bytes[1];
@@ -139,390 +500,19 @@ taida_val taida_net_http_parse_request_head(taida_val input) {
         data_len = slen;
     }
 
-    // Find \r\n\r\n (end of head)
-    int head_end = -1;
-    for (size_t i = 0; i + 3 < data_len; i++) {
-        if (data[i] == '\r' && data[i+1] == '\n' && data[i+2] == '\r' && data[i+3] == '\n') {
-            head_end = (int)i;
-            break;
-        }
+    TaidaNetH1Head head;
+    int status = taida_net_h1_parse_head(data, data_len, &head);
+    taida_val result;
+    if (status == TAIDA_NET_H1_ERROR) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "Malformed HTTP request: %s", head.error);
+        result = taida_net_result_fail("ParseError", msg);
+    } else {
+        result = taida_net_h1_parse_result(data, &head, status == TAIDA_NET_H1_COMPLETE);
     }
-
-    int complete = (head_end >= 0);
-    size_t consumed = complete ? (size_t)(head_end + 4) : 0;
-
-    // We need at least a request line to parse
-    // Find the first \r\n for request line
-    int first_crlf = -1;
-    size_t scan_limit = complete ? (size_t)head_end : data_len;
-    for (size_t i = 0; i + 1 < scan_limit; i++) {
-        if (data[i] == '\r' && data[i+1] == '\n') {
-            first_crlf = (int)i;
-            break;
-        }
-    }
-
-    if (first_crlf < 0) {
-        // No CRLF found at all — incomplete if no head_end, try to check for obvious malformed
-        if (!complete) {
-            // Could be incomplete — return incomplete result
-            taida_val parsed = taida_pack_new(10);
-            taida_pack_set_hash(parsed, 0, taida_str_hash((taida_val)"complete"));
-            taida_pack_set(parsed, 0, 0);  // false
-            taida_pack_set_tag(parsed, 0, TAIDA_TAG_BOOL);
-            taida_pack_set_hash(parsed, 1, taida_str_hash((taida_val)"consumed"));
-            taida_pack_set(parsed, 1, 0);
-            taida_pack_set_hash(parsed, 2, taida_str_hash((taida_val)"method"));
-            taida_pack_set(parsed, 2, taida_net_make_span(0, 0));
-            taida_pack_set_tag(parsed, 2, TAIDA_TAG_PACK);
-            taida_pack_set_hash(parsed, 3, taida_str_hash((taida_val)"path"));
-            taida_pack_set(parsed, 3, taida_net_make_span(0, 0));
-            taida_pack_set_tag(parsed, 3, TAIDA_TAG_PACK);
-            taida_pack_set_hash(parsed, 4, taida_str_hash((taida_val)"query"));
-            taida_pack_set(parsed, 4, taida_net_make_span(0, 0));
-            taida_pack_set_tag(parsed, 4, TAIDA_TAG_PACK);
-            taida_val ver = taida_pack_new(2);
-            taida_pack_set_hash(ver, 0, taida_str_hash((taida_val)"major"));
-            taida_pack_set(ver, 0, 1);
-            taida_pack_set_hash(ver, 1, taida_str_hash((taida_val)"minor"));
-            taida_pack_set(ver, 1, 1);
-            taida_pack_set_hash(parsed, 5, taida_str_hash((taida_val)"version"));
-            taida_pack_set(parsed, 5, ver);
-            taida_pack_set_tag(parsed, 5, TAIDA_TAG_PACK);
-            taida_pack_set_hash(parsed, 6, taida_str_hash((taida_val)"headers"));
-            taida_pack_set(parsed, 6, taida_list_new());
-            taida_pack_set_tag(parsed, 6, TAIDA_TAG_LIST);
-            taida_pack_set_hash(parsed, 7, taida_str_hash((taida_val)"bodyOffset"));
-            taida_pack_set(parsed, 7, 0);
-            taida_pack_set_hash(parsed, 8, taida_str_hash((taida_val)"contentLength"));
-            taida_pack_set(parsed, 8, 0);
-            taida_pack_set_hash(parsed, 9, taida_str_hash((taida_val)"chunked"));
-            taida_pack_set(parsed, 9, 0);  // false
-            taida_pack_set_tag(parsed, 9, TAIDA_TAG_BOOL);
-            if (free_data) free(data);
-            return taida_net_result_ok(parsed);
-        }
-        if (free_data) free(data);
-        return taida_net_result_fail("ParseError", "Malformed HTTP request: no request line");
-    }
-
-    // Parse request line: METHOD SP PATH HTTP/x.y
-    // Find first SP
-    int method_end = -1;
-    for (int i = 0; i < first_crlf; i++) {
-        if (data[i] == ' ') { method_end = i; break; }
-    }
-    if (method_end <= 0) {
-        if (free_data) free(data);
-        return taida_net_result_fail("ParseError", "Malformed HTTP request: invalid request line");
-    }
-
-    // Find last SP (before HTTP/x.y)
-    int version_start = -1;
-    for (int i = first_crlf - 1; i > method_end; i--) {
-        if (data[i - 1] == ' ') { version_start = i; break; }
-    }
-    if (version_start < 0 || version_start <= method_end + 1) {
-        if (free_data) free(data);
-        return taida_net_result_fail("ParseError", "Malformed HTTP request: invalid request line");
-    }
-
-    // Parse version: must be exactly "HTTP/x.y" where x,y are single ASCII digits
-    // Strict: reject HTTP/a.b, HTTP/12.34, HTTP/1, etc. (parity with Interpreter/JS)
-    int http_major = 1, http_minor = 1;
-    int version_len = first_crlf - version_start;
-    if (version_len == 8 &&
-        data[version_start]   == 'H' && data[version_start+1] == 'T' &&
-        data[version_start+2] == 'T' && data[version_start+3] == 'P' &&
-        data[version_start+4] == '/' &&
-        data[version_start+5] >= '0' && data[version_start+5] <= '9' &&
-        data[version_start+6] == '.' &&
-        data[version_start+7] >= '0' && data[version_start+7] <= '9') {
-        http_major = data[version_start+5] - '0';
-        http_minor = data[version_start+7] - '0';
-        // NB-32: restrict to HTTP/1.0 and HTTP/1.1 only (parity with Interpreter/httparse)
-        // Reject immediately once version is fully parsed, regardless of head completeness
-        if (http_major != 1 || (http_minor != 0 && http_minor != 1)) {
-            if (free_data) free(data);
-            return taida_net_result_fail("ParseError", "Malformed HTTP request: invalid HTTP version");
-        }
-    } else if (complete) {
-        if (free_data) free(data);
-        return taida_net_result_fail("ParseError", "Malformed HTTP request: invalid HTTP version");
-    }
-
-    // Method span
-    int method_start_idx = 0;
-    int method_len = method_end;
-
-    // C26B-022 Step 2 (wS Round 6, 2026-04-24): HTTP wire byte upper
-    // limits must be enforced at the Native parser boundary so that the
-    // fixed-size struct fields downstream (`char method[16]` in
-    // net_h1_h2.c H2RequestFields and net_h3_quic.c H3RequestFields)
-    // cannot silently truncate. Must match the interpreter constants in
-    // src/interpreter/net_eval/h1.rs::HTTP_WIRE_MAX_METHOD_LEN (=16).
-    // Option confirmation: Step 3 Option B (parser reject with 400).
-    if (method_len > 16) {
-        if (free_data) free(data);
-        return taida_net_result_fail("ParseError", "Malformed HTTP request: method exceeds wire-byte limit");
-    }
-
-    // Path + query: between first SP and last SP
-    int uri_start = method_end + 1;
-    int uri_end = version_start - 1;
-    int uri_len = uri_end - uri_start;
-
-    // Split path and query on '?'
-    int path_start_idx = uri_start;
-    int path_len = uri_len;
-    int query_start_idx = 0;
-    int query_len = 0;
-    for (int i = uri_start; i < uri_end; i++) {
-        if (data[i] == '?') {
-            path_len = i - uri_start;
-            query_start_idx = i + 1;
-            query_len = uri_end - (i + 1);
-            break;
-        }
-    }
-
-    // C26B-022 Step 2 (wS Round 6): path wire-byte cap = 2048 (matches
-    // HTTP_WIRE_MAX_PATH_LEN in h1.rs and `char path[2048]` field).
-    if (path_len > 2048) {
-        if (free_data) free(data);
-        return taida_net_result_fail("ParseError", "Malformed HTTP request: path exceeds wire-byte limit");
-    }
-
-    // Parse headers
-    taida_val headers_list = taida_list_new();
-    int64_t content_length = 0;
-    int cl_count = 0;
-    int has_te_chunked = 0;
-    size_t pos = (size_t)(first_crlf + 2);  // after first \r\n
-
-    int header_count = 0;
-    while (pos < scan_limit) {
-        // Find next \r\n
-        size_t line_end = scan_limit;
-        for (size_t j = pos; j + 1 < scan_limit; j++) {
-            if (data[j] == '\r' && data[j+1] == '\n') {
-                line_end = j;
-                break;
-            }
-        }
-        if (line_end == pos) break;  // empty line = end of headers
-
-        // NB-4/NB-6: enforce max 64 headers (parity with Interpreter/httparse)
-        header_count++;
-        if (header_count > 64) {
-            if (free_data) free(data);
-            return taida_net_result_fail("ParseError", "Malformed HTTP request: too many headers");
-        }
-
-        // Find colon separator
-        size_t colon = line_end;
-        for (size_t j = pos; j < line_end; j++) {
-            if (data[j] == ':') { colon = j; break; }
-        }
-        if (colon >= line_end) {
-            // No colon found: if head is complete this is malformed, otherwise incomplete
-            if (complete) {
-                if (free_data) free(data);
-                return taida_net_result_fail("ParseError", "Malformed HTTP request: invalid header line");
-            }
-            break;  // incomplete — stop parsing headers
-        }
-
-        // Header name: pos..colon, value: after colon + OWS trimming
-        size_t name_start = pos;
-        size_t name_len = colon - pos;
-        size_t val_start = colon + 1;
-        // NB-34: Skip leading SP/HT and trim trailing SP/HT (parity with Interpreter/httparse)
-        while (val_start < line_end && (data[val_start] == ' ' || data[val_start] == '\t')) val_start++;
-        size_t val_end = line_end;
-        while (val_end > val_start && (data[val_end - 1] == ' ' || data[val_end - 1] == '\t')) val_end--;
-        size_t val_len = val_end - val_start;
-
-        taida_val header_pack = taida_pack_new(2);
-        taida_pack_set_hash(header_pack, 0, taida_str_hash((taida_val)"name"));
-        taida_pack_set(header_pack, 0, taida_net_make_span((taida_val)name_start, (taida_val)name_len));
-        taida_pack_set_tag(header_pack, 0, TAIDA_TAG_PACK);
-        taida_pack_set_hash(header_pack, 1, taida_str_hash((taida_val)"value"));
-        taida_pack_set(header_pack, 1, taida_net_make_span((taida_val)val_start, (taida_val)val_len));
-        taida_pack_set_tag(header_pack, 1, TAIDA_TAG_PACK);
-        headers_list = taida_list_push(headers_list, header_pack);
-
-        // C26B-022 Step 2 (wS Round 6): authority wire-byte cap = 256.
-        // Host is the HTTP/1.x equivalent of the H2/H3 `:authority`
-        // pseudo-header; the `char authority[256]` struct field in
-        // H2RequestFields / H3RequestFields backs both paths, so reject
-        // over-limit Host values at parse time to match h1.rs.
-        if (name_len == 4) {
-            const char *host_expected = "host";
-            int is_host = 1;
-            for (size_t k = 0; k < 4; k++) {
-                char c = (char)data[name_start + k];
-                if (c >= 'A' && c <= 'Z') c += 32;
-                if (c != host_expected[k]) { is_host = 0; break; }
-            }
-            if (is_host && val_len > 256) {
-                if (free_data) free(data);
-                return taida_net_result_fail("ParseError", "Malformed HTTP request: authority exceeds wire-byte limit");
-            }
-        }
-
-        // Check Content-Length (case-insensitive)
-        if (name_len == 14) {
-            // Check "content-length" case-insensitively
-            const char *cl_expected = "content-length";
-            int is_cl = 1;
-            for (size_t k = 0; k < 14; k++) {
-                char c = (char)data[name_start + k];
-                if (c >= 'A' && c <= 'Z') c += 32;
-                if (c != cl_expected[k]) { is_cl = 0; break; }
-            }
-            if (is_cl) {
-                cl_count++;
-                if (cl_count > 1) {
-                    if (free_data) free(data);
-                    return taida_net_result_fail("ParseError", "Malformed HTTP request: duplicate Content-Length header");
-                }
-                // Validate: trimmed value must be all digits
-                // val_start..val_start+val_len (already trimmed leading spaces/tabs)
-                // Also trim trailing spaces and tabs (parity with Interpreter's .trim() and JS's .trim())
-                size_t cl_end = val_start + val_len;
-                while (cl_end > val_start && (data[cl_end-1] == ' ' || data[cl_end-1] == '\t')) cl_end--;
-                size_t cl_len = cl_end - val_start;
-                if (cl_len == 0) {
-                    if (free_data) free(data);
-                    return taida_net_result_fail("ParseError", "Malformed HTTP request: invalid Content-Length value");
-                }
-                int all_digits = 1;
-                for (size_t k = 0; k < cl_len; k++) {
-                    if (data[val_start + k] < '0' || data[val_start + k] > '9') {
-                        all_digits = 0;
-                        break;
-                    }
-                }
-                if (!all_digits) {
-                    if (free_data) free(data);
-                    return taida_net_result_fail("ParseError", "Malformed HTTP request: invalid Content-Length value");
-                }
-                // Parse digits
-                int64_t cl_val = 0;
-                for (size_t k = 0; k < cl_len; k++) {
-                    int64_t digit = data[val_start + k] - '0';
-                    // Overflow check
-                    if (cl_val > (9007199254740991LL - digit) / 10) {
-                        if (free_data) free(data);
-                        return taida_net_result_fail("ParseError", "Malformed HTTP request: invalid Content-Length value");
-                    }
-                    cl_val = cl_val * 10 + digit;
-                }
-                // Cap at Number.MAX_SAFE_INTEGER
-                if (cl_val > 9007199254740991LL) {
-                    if (free_data) free(data);
-                    return taida_net_result_fail("ParseError", "Malformed HTTP request: invalid Content-Length value");
-                }
-                content_length = cl_val;
-            }
-        }
-
-        // NET2-2a: Detect Transfer-Encoding: chunked (parity with Interpreter)
-        if (name_len == 17) {
-            const char *te_expected = "transfer-encoding";
-            int is_te = 1;
-            for (size_t k = 0; k < 17; k++) {
-                char c = (char)data[name_start + k];
-                if (c >= 'A' && c <= 'Z') c += 32;
-                if (c != te_expected[k]) { is_te = 0; break; }
-            }
-            if (is_te) {
-                // Scan comma-separated tokens for "chunked" (case-insensitive)
-                size_t tk_start = val_start;
-                while (tk_start < val_start + val_len) {
-                    // Skip leading whitespace
-                    while (tk_start < val_start + val_len && (data[tk_start] == ' ' || data[tk_start] == '\t')) tk_start++;
-                    // Find comma or end
-                    size_t tk_end = tk_start;
-                    while (tk_end < val_start + val_len && data[tk_end] != ',') tk_end++;
-                    // Trim trailing whitespace of token
-                    size_t tk_trim = tk_end;
-                    while (tk_trim > tk_start && (data[tk_trim - 1] == ' ' || data[tk_trim - 1] == '\t')) tk_trim--;
-                    size_t tk_len = tk_trim - tk_start;
-                    if (tk_len == 7) {
-                        const char *chunked_str = "chunked";
-                        int match = 1;
-                        for (size_t m = 0; m < 7; m++) {
-                            char c = (char)data[tk_start + m];
-                            if (c >= 'A' && c <= 'Z') c += 32;
-                            if (c != chunked_str[m]) { match = 0; break; }
-                        }
-                        if (match) has_te_chunked = 1;
-                    }
-                    tk_start = tk_end + 1;  // skip comma
-                }
-            }
-        }
-
-        pos = line_end + 2;  // skip \r\n
-    }
-
-    // NET2-2e: Reject Content-Length + Transfer-Encoding: chunked (RFC 7230 section 3.3.3)
-    if (has_te_chunked && cl_count > 0) {
-        if (free_data) free(data);
-        return taida_net_result_fail("ParseError", "Malformed HTTP request: Content-Length and Transfer-Encoding: chunked are mutually exclusive");
-    }
-
-    // Build result pack
-    taida_val parsed = taida_pack_new(10);
-    taida_pack_set_hash(parsed, 0, taida_str_hash((taida_val)"complete"));
-    taida_pack_set(parsed, 0, complete ? 1 : 0);
-    taida_pack_set_tag(parsed, 0, TAIDA_TAG_BOOL);
-    taida_pack_set_hash(parsed, 1, taida_str_hash((taida_val)"consumed"));
-    taida_pack_set(parsed, 1, (taida_val)consumed);
-    taida_pack_set_hash(parsed, 2, taida_str_hash((taida_val)"method"));
-    taida_pack_set(parsed, 2, taida_net_make_span((taida_val)method_start_idx, (taida_val)method_len));
-    taida_pack_set_tag(parsed, 2, TAIDA_TAG_PACK);
-    taida_pack_set_hash(parsed, 3, taida_str_hash((taida_val)"path"));
-    taida_pack_set(parsed, 3, taida_net_make_span((taida_val)path_start_idx, (taida_val)path_len));
-    taida_pack_set_tag(parsed, 3, TAIDA_TAG_PACK);
-    taida_pack_set_hash(parsed, 4, taida_str_hash((taida_val)"query"));
-    taida_pack_set(parsed, 4, taida_net_make_span((taida_val)query_start_idx, (taida_val)query_len));
-    taida_pack_set_tag(parsed, 4, TAIDA_TAG_PACK);
-
-    taida_val ver = taida_pack_new(2);
-    taida_pack_set_hash(ver, 0, taida_str_hash((taida_val)"major"));
-    taida_pack_set(ver, 0, (taida_val)http_major);
-    taida_pack_set_hash(ver, 1, taida_str_hash((taida_val)"minor"));
-    taida_pack_set(ver, 1, (taida_val)http_minor);
-    taida_pack_set_hash(parsed, 5, taida_str_hash((taida_val)"version"));
-    taida_pack_set(parsed, 5, ver);
-    taida_pack_set_tag(parsed, 5, TAIDA_TAG_PACK);
-
-    taida_pack_set_hash(parsed, 6, taida_str_hash((taida_val)"headers"));
-    taida_pack_set(parsed, 6, headers_list);
-    taida_pack_set_tag(parsed, 6, TAIDA_TAG_LIST);
-
-    taida_pack_set_hash(parsed, 7, taida_str_hash((taida_val)"bodyOffset"));
-    taida_pack_set(parsed, 7, (taida_val)consumed);
-
-    taida_pack_set_hash(parsed, 8, taida_str_hash((taida_val)"contentLength"));
-    taida_pack_set(parsed, 8, (taida_val)content_length);
-
-    taida_pack_set_hash(parsed, 9, taida_str_hash((taida_val)"chunked"));
-    taida_pack_set(parsed, 9, has_te_chunked ? 1 : 0);
-    taida_pack_set_tag(parsed, 9, TAIDA_TAG_BOOL);
-
     if (free_data) free(data);
-    return taida_net_result_ok(parsed);
+    return result;
 }
-
-// Forward declarations for header byte-grammar helpers; the definitions
-// live alongside the streaming validator below.
-static int taida_net3_is_rfc7230_token_byte(unsigned char b);
-static int taida_net3_is_rfc7230_field_value_byte(unsigned char b);
-static int taida_net3_header_name_eq_ci(const char *name, size_t name_len, const char *expected);
 
 // ── httpEncodeResponse(response) ────────────────────────────────
 // Encode response @(status, headers, body) into HTTP/1.1 wire bytes.
@@ -775,15 +765,22 @@ taida_val taida_net_http_encode_response(taida_val response) {
                     (int)i);
                 return taida_net_result_fail("EncodeError", err_msg);
             }
-            // Content-Length: drop it for bodyless statuses (parity with
-            // Interpreter / JS) and otherwise mark `has_content_length`
-            // so the auto-append below does not double-emit. Without
-            // this signal Native would emit the user's Content-Length
-            // on the wire AND append its own — re-introducing the
-            // CL.CL smuggling vector the rest of this batch closes.
+            // Content-Length never frames the body with the handler's value
+            // (same rule as the interpreter's write_response_header_lines):
+            // it is dropped for bodyless statuses; otherwise the first one
+            // keeps its place and spelling but carries the real body length,
+            // and further ones are dropped. A value that disagreed with the
+            // body used to go out as is, so on a keep-alive connection the
+            // rest of the body was read as the next response.
+            // `has_content_length = 1` also keeps the auto-append below from
+            // emitting a second line.
+            char cl_value[32];
             if (taida_net3_header_name_eq_ci(hname_s, hn_len, "content-length")) {
                 if (no_body) continue;
+                if (has_content_length) continue;
                 has_content_length = 1;
+                hv_len = (size_t)snprintf(cl_value, sizeof(cl_value), "%zu", body_len);
+                hvalue_s = cl_value;
             }
 
             // Grow buffer if needed
@@ -1411,7 +1408,11 @@ static void taida_net_send_response(int client_fd, taida_val encoded) {
 // Builds head in one buffer, then sends head + body via writev (2 iovecs).
 // Avoids the aggregate buffer concatenation of encode → materialize → send.
 // Returns 0 on success, -1 on error.
-static int taida_net_send_response_scatter(int client_fd, taida_val response) {
+//
+// `head_request` is set for a response to a HEAD request: that response has
+// no body, and its Content-Length describes what a GET would return (RFC 9110
+// §8.6), so handler-supplied Content-Length headers are sent unchanged.
+static int taida_net_send_response_scatter(int client_fd, taida_val response, int head_request) {
     if (!taida_is_buchi_pack(response)) return -1;
 
     taida_val status_hash = taida_str_hash((taida_val)"status");
@@ -1523,11 +1524,17 @@ static int taida_net_send_response_scatter(int client_fd, taida_val response) {
         }
 
         // Reserve Content-Length / Transfer-Encoding / Set-Cookie at the
-        // grammar layer (parity with eager / streaming).
+        // grammar layer (parity with eager / streaming). Content-Length
+        // carries the real body length, as in httpEncodeResponse.
+        char cl_value[32];
         if (taida_net3_header_name_eq_ci(hname_s, hn_len, "content-length")) {
             if (no_body) continue;
+            if (!head_request) {
+                if (has_content_length) continue;
+                hv_len = (size_t)snprintf(cl_value, sizeof(cl_value), "%zu", body_len);
+                hvalue_s = cl_value;
+            }
             has_content_length = 1;
-            // Fall through to emit; the caller has already validated the body length.
         }
         if (taida_net3_header_name_eq_ci(hname_s, hn_len, "transfer-encoding")) {
             if (head != head_stack) free(head);
@@ -2476,32 +2483,38 @@ static int8_t taida_base64_decode_value(unsigned char c) {
     return -1;
 }
 
+// Strict base64 decode (RFC 4648 §4 alphabet, canonical padding), matching the
+// interpreter's decoder: '=' may only be the last one or two characters, and
+// the bits after the last decoded byte must be zero. A '=' in the middle of
+// the input used to be read as a zero digit.
 static int taida_base64_decode(const char *input, size_t input_len, uint8_t *out, size_t out_cap) {
     if (input_len % 4 != 0) return -1;
-    size_t decoded_len = input_len / 4 * 3;
-    if (input_len > 0 && input[input_len - 1] == '=') decoded_len--;
-    if (input_len > 1 && input[input_len - 2] == '=') decoded_len--;
+    size_t pad = 0;
+    if (input_len >= 1 && input[input_len - 1] == '=') pad++;
+    if (input_len >= 2 && input[input_len - 2] == '=') pad++;
+    size_t decoded_len = input_len / 4 * 3 - pad;
     if (decoded_len > out_cap) return -1;
 
     size_t j = 0;
     for (size_t i = 0; i < input_len; i += 4) {
-        int8_t a = taida_base64_decode_value((unsigned char)input[i]);
-        int8_t b = (i + 1 < input_len) ? taida_base64_decode_value((unsigned char)input[i + 1]) : -1;
-        if (a < 0 || b < 0) return -1;
-        uint32_t triple = ((uint32_t)a << 18) | ((uint32_t)b << 12);
-        if (i + 2 < input_len && input[i + 2] != '=') {
-            int8_t c = taida_base64_decode_value((unsigned char)input[i + 2]);
-            if (c < 0) return -1;
-            triple |= ((uint32_t)c << 6);
+        int last = (i + 4 == input_len);
+        uint32_t triple = 0;
+        for (size_t k = 0; k < 4; k++) {
+            unsigned char c = (unsigned char)input[i + k];
+            int8_t v;
+            if (last && c == '=' && k >= 4 - pad) {
+                v = 0;
+            } else {
+                v = taida_base64_decode_value(c);
+                if (v < 0) return -1;
+            }
+            triple = (triple << 6) | (uint32_t)v;
         }
-        if (i + 3 < input_len && input[i + 3] != '=') {
-            int8_t d = taida_base64_decode_value((unsigned char)input[i + 3]);
-            if (d < 0) return -1;
-            triple |= (uint32_t)d;
-        }
-        if (j < decoded_len) out[j++] = (uint8_t)(triple >> 16);
-        if (j < decoded_len) out[j++] = (uint8_t)(triple >> 8);
-        if (j < decoded_len) out[j++] = (uint8_t)triple;
+        if (last && pad == 2 && (triple & 0xFFFF) != 0) return -1;
+        if (last && pad == 1 && (triple & 0xFF) != 0) return -1;
+        out[j++] = (uint8_t)(triple >> 16);
+        if (!(last && pad == 2)) out[j++] = (uint8_t)(triple >> 8);
+        if (!(last && pad >= 1)) out[j++] = (uint8_t)triple;
     }
     return (int)decoded_len;
 }
@@ -2598,45 +2611,59 @@ static size_t taida_net4_read_body_bytes(Net4BodyState *bs, int fd, unsigned cha
     return total;
 }
 
-// Read a line (up to LF) from leftover then fd.
-// Returns line in `out` (null-terminated). Max `cap` bytes including NUL.
-// Return value:
-//   > 0 — number of bytes written (excluding NUL); LF is the last byte.
-//   = 0 — EOF / no bytes read.
-//   < 0 — line exceeds `cap - 1` bytes without observing LF. Callers must
-//         treat this as malformed framing (chunk-ext flood / smuggling
-//         vector) and abort the connection. Parity with the eager-path
-//         MAX_CHUNK_LINE_BYTES contract documented in
-//         docs/reference/net_api.md §5.4.
-// NET5-4a: Routes through TLS when tl_ssl is active.
-static ssize_t taida_net4_read_line(Net4BodyState *bs, int fd, char *out, size_t cap) {
+// Per-thread line buffer for the streaming chunked decoder. Chunk-size and
+// trailer lines may be as long as the eager path allows
+// (TAIDA_NET_MAX_CHUNK_LINE_BYTES, docs/api/net.md §4.4), so the buffer grows
+// on demand; a fixed 4 KiB stack buffer used to reject longer lines that the
+// interpreter and the eager path accept.
+static __thread char *tl_net4_line_buf = NULL;
+static __thread size_t tl_net4_line_cap = 0;
+
+#define TAIDA_NET4_LINE_TOO_LONG  (-1)
+#define TAIDA_NET4_LINE_CUT       (-2)
+
+// Reads one line (up to and including LF) from leftover, then the socket
+// (through TLS when tl_ssl is active). On success `*out` points at the
+// NUL-terminated line and its length is returned (0 at EOF before any byte; a
+// line cut by EOF is returned as is). Returns TAIDA_NET4_LINE_TOO_LONG when no
+// LF arrives within TAIDA_NET_MAX_CHUNK_LINE_BYTES bytes: callers treat that
+// as malformed framing (chunk-ext flood / smuggling vector) and abort the
+// connection, like the eager path. Returns TAIDA_NET4_LINE_CUT when the read
+// times out or fails in the middle of a line: treating that fragment as a
+// whole line would mis-frame the rest of the body.
+static ssize_t taida_net4_read_line(Net4BodyState *bs, int fd, char **out) {
     size_t pos = 0;
-    // From leftover.
-    while (pos < cap - 1 && bs->leftover_pos < bs->leftover_len) {
-        unsigned char b = bs->leftover[bs->leftover_pos++];
-        out[pos++] = (char)b;
-        if (b == '\n') { out[pos] = '\0'; return (ssize_t)pos; }
-    }
-    // From socket byte-by-byte (TLS-aware).
-    while (pos < cap - 1) {
+    for (;;) {
+        if (pos + 1 >= tl_net4_line_cap) {
+            if (tl_net4_line_cap >= TAIDA_NET_MAX_CHUNK_LINE_BYTES + 1) {
+                tl_net4_line_buf[pos] = '\0';
+                *out = tl_net4_line_buf;
+                return TAIDA_NET4_LINE_TOO_LONG;
+            }
+            size_t cap = tl_net4_line_cap ? tl_net4_line_cap * 2 : 256;
+            if (cap > TAIDA_NET_MAX_CHUNK_LINE_BYTES + 1) cap = TAIDA_NET_MAX_CHUNK_LINE_BYTES + 1;
+            TAIDA_REALLOC(tl_net4_line_buf, cap, "net_chunk_line");
+            tl_net4_line_cap = cap;
+        }
         unsigned char b;
-        ssize_t n = taida_tls_recv(fd, &b, 1);
-        if (n <= 0) {
+        if (bs->leftover_pos < bs->leftover_len) {
+            b = bs->leftover[bs->leftover_pos++];
+        } else {
+            // From socket byte-by-byte (TLS-aware).
+            ssize_t n = taida_tls_recv(fd, &b, 1);
             if (n < 0 && errno == EINTR) continue;
-            break;
+            if (n < 0 && pos > 0) {
+                tl_net4_line_buf[pos] = '\0';
+                *out = tl_net4_line_buf;
+                return TAIDA_NET4_LINE_CUT;
+            }
+            if (n <= 0) break;
         }
-        out[pos++] = (char)b;
-        if (b == '\n') {
-            out[pos] = '\0';
-            return (ssize_t)pos;
-        }
+        tl_net4_line_buf[pos++] = (char)b;
+        if (b == '\n') break;
     }
-    if (pos >= cap - 1) {
-        // Buffer ran out before LF: malformed framing (or attacker padding).
-        out[pos] = '\0';
-        return -1;
-    }
-    out[pos] = '\0';
+    tl_net4_line_buf[pos] = '\0';
+    *out = tl_net4_line_buf;
     return (ssize_t)pos;
 }
 
@@ -2646,10 +2673,10 @@ static ssize_t taida_net4_read_line(Net4BodyState *bs, int fd, char *out, size_t
 // translate the negative return into abort_connection. Bounds match the
 // 3-backend contract in docs/reference/net_api.md §5.4.
 static int taida_net4_drain_chunked_trailers(Net4BodyState *bs, int fd) {
-    char line[4096];
+    char *line = NULL;
     size_t total_bytes = 0;
     for (size_t i = 0; i < TAIDA_NET_MAX_TRAILER_COUNT; i++) {
-        ssize_t len = taida_net4_read_line(bs, fd, line, sizeof(line));
+        ssize_t len = taida_net4_read_line(bs, fd, &line);
         if (len < 0) {
             // Per-line cap exceeded — malformed framing (smuggling vector).
             return -1;
@@ -2742,7 +2769,7 @@ taida_val taida_net_read_body_chunk(taida_val req) {
     if (bs->is_chunked) {
         // Chunked TE decode (parity with Interpreter).
         #define NET4_READ_BUF 8192
-        char line_buf[4096];
+        char *line_buf = NULL;
         for (;;) {
             switch (bs->chunked_state) {
                 case NET4_CHUNKED_DONE:
@@ -2750,11 +2777,14 @@ taida_val taida_net_read_body_chunk(taida_val req) {
                     return taida_net4_make_lax_bytes_empty();
 
                 case NET4_CHUNKED_WAIT_SIZE: {
-                    ssize_t llen_signed = taida_net4_read_line(bs, fd, line_buf, sizeof(line_buf));
+                    ssize_t llen_signed = taida_net4_read_line(bs, fd, &line_buf);
                     if (llen_signed < 0) {
                         // Streaming chunk-size line exceeded MAX_CHUNK_LINE
-                        // _BYTES (parity with eager body_complete cap).
-                        taida_net4_abort_connection("readBodyChunk: chunk-size line exceeds byte cap");
+                        // _BYTES (parity with eager body_complete cap), or the
+                        // read stopped in the middle of it.
+                        taida_net4_abort_connection(llen_signed == TAIDA_NET4_LINE_TOO_LONG
+                            ? "readBodyChunk: chunk-size line exceeds byte cap"
+                            : "readBodyChunk: read timed out inside a chunk-size line");
                         return taida_net4_make_lax_bytes_empty();
                     }
                     size_t llen = (size_t)llen_signed;
@@ -2841,9 +2871,11 @@ taida_val taida_net_read_body_chunk(taida_val req) {
                 case NET4_CHUNKED_WAIT_TRAILER: {
                     // Read CRLF after chunk data and validate.
                     {
-                        ssize_t tl_len_signed = taida_net4_read_line(bs, fd, line_buf, sizeof(line_buf));
+                        ssize_t tl_len_signed = taida_net4_read_line(bs, fd, &line_buf);
                         if (tl_len_signed < 0) {
-                            taida_net4_abort_connection("readBodyChunk: chunk-data trailer line exceeds byte cap");
+                            taida_net4_abort_connection(tl_len_signed == TAIDA_NET4_LINE_TOO_LONG
+                                ? "readBodyChunk: chunk-data trailer line exceeds byte cap"
+                                : "readBodyChunk: read timed out inside a chunk-data trailer line");
                             return taida_net4_make_lax_bytes_empty();
                         }
                         size_t tl_len = (size_t)tl_len_signed;
@@ -2934,7 +2966,7 @@ taida_val taida_net_read_body_all(taida_val req) {
     unsigned char *all_buf = (unsigned char*)TAIDA_MALLOC(all_cap, "net_readBodyAll");
 
     if (bs->is_chunked) {
-        char line_buf[4096];
+        char *line_buf = NULL;
         for (;;) {
             switch (bs->chunked_state) {
                 case NET4_CHUNKED_DONE:
@@ -2942,10 +2974,12 @@ taida_val taida_net_read_body_all(taida_val req) {
                     goto all_done;
 
                 case NET4_CHUNKED_WAIT_SIZE: {
-                    ssize_t llen_signed = taida_net4_read_line(bs, fd, line_buf, sizeof(line_buf));
+                    ssize_t llen_signed = taida_net4_read_line(bs, fd, &line_buf);
                     if (llen_signed < 0) {
                         free(all_buf);
-                        taida_net4_abort_connection("readBodyAll: chunk-size line exceeds byte cap");
+                        taida_net4_abort_connection(llen_signed == TAIDA_NET4_LINE_TOO_LONG
+                            ? "readBodyAll: chunk-size line exceeds byte cap"
+                            : "readBodyAll: read timed out inside a chunk-size line");
                         return taida_bytes_new_filled(0, 0);
                     }
                     size_t llen = (size_t)llen_signed;
@@ -3037,10 +3071,12 @@ taida_val taida_net_read_body_all(taida_val req) {
                 case NET4_CHUNKED_WAIT_TRAILER: {
                     // Read CRLF after chunk data and validate.
                     {
-                        ssize_t tl_len2_signed = taida_net4_read_line(bs, fd, line_buf, sizeof(line_buf));
+                        ssize_t tl_len2_signed = taida_net4_read_line(bs, fd, &line_buf);
                         if (tl_len2_signed < 0) {
                             free(all_buf);
-                            taida_net4_abort_connection("readBodyAll: chunk-data trailer line exceeds byte cap");
+                            taida_net4_abort_connection(tl_len2_signed == TAIDA_NET4_LINE_TOO_LONG
+                                ? "readBodyAll: chunk-data trailer line exceeds byte cap"
+                                : "readBodyAll: read timed out inside a chunk-data trailer line");
                             return taida_bytes_new_filled(0, 0);
                         }
                         size_t tl_len2 = (size_t)tl_len2_signed;
@@ -3319,8 +3355,15 @@ static taida_val taida_net4_make_lax_ws_frame_empty(void) {
 }
 
 // ── Helper: extract header value from request pack (case-insensitive) ──
-static int taida_net4_get_header_value(taida_val req, const unsigned char *raw, size_t raw_len,
-                                        const char *target_name, char *out, size_t out_cap) {
+// Finds the first header named `target_name` (case-insensitive) and returns
+// its whole value span in `raw`, like the interpreter's lookup: a later header
+// with the same name is not consulted, and a value that is not valid UTF-8
+// reads as empty. The value used to be copied into a 256-byte buffer and
+// silently cut, so a token past byte 255 (e.g. `Upgrade` in a long
+// Connection value) was not seen. Returns 1 when the header is present.
+static int taida_net4_find_header(taida_val req, const unsigned char *raw, size_t raw_len,
+                                  const char *target_name, const unsigned char **out_value,
+                                  size_t *out_len) {
     taida_val headers = taida_pack_get(req, taida_str_hash((taida_val)"headers"));
     if (!TAIDA_IS_LIST(headers)) return 0;
     taida_val *hdr_list = (taida_val*)headers;
@@ -3348,17 +3391,45 @@ static int taida_net4_get_header_value(taida_val req, const unsigned char *raw, 
         }
         if (!match) continue;
 
+        *out_value = raw;
+        *out_len = 0;
         taida_val val_span = taida_pack_get(header, taida_str_hash((taida_val)"value"));
-        if (!taida_is_buchi_pack(val_span)) continue;
-        taida_val v_start = taida_pack_get(val_span, taida_str_hash((taida_val)"start"));
-        taida_val v_len = taida_pack_get(val_span, taida_str_hash((taida_val)"len"));
-        if (v_start < 0 || v_len <= 0 || (size_t)(v_start + v_len) > raw_len) continue;
-
-        size_t copy_len = (size_t)v_len;
-        if (copy_len >= out_cap) copy_len = out_cap - 1;
-        memcpy(out, raw + v_start, copy_len);
-        out[copy_len] = '\0';
+        if (taida_is_buchi_pack(val_span)) {
+            taida_val v_start = taida_pack_get(val_span, taida_str_hash((taida_val)"start"));
+            taida_val v_len = taida_pack_get(val_span, taida_str_hash((taida_val)"len"));
+            if (v_start >= 0 && v_len > 0 && (size_t)(v_start + v_len) <= raw_len
+                && taida_net4_is_valid_utf8(raw + v_start, (size_t)v_len)) {
+                *out_value = raw + v_start;
+                *out_len = (size_t)v_len;
+            }
+        }
         return 1;
+    }
+    return 0;
+}
+
+// Trims SP / HTAB from both ends of a span.
+static void taida_net4_trim_span(const unsigned char **p, size_t *len) {
+    while (*len > 0 && ((*p)[0] == ' ' || (*p)[0] == '\t')) { (*p)++; (*len)--; }
+    while (*len > 0 && ((*p)[*len - 1] == ' ' || (*p)[*len - 1] == '\t')) (*len)--;
+}
+
+// Case-insensitive comparison of a span with a NUL-terminated ASCII string.
+static int taida_net4_span_eq_ci(const unsigned char *p, size_t len, const char *s) {
+    return taida_net3_header_name_eq_ci((const char *)p, len, s);
+}
+
+// Whether a comma-separated header value contains `token` (case-insensitive).
+static int taida_net4_span_contains_token(const unsigned char *p, size_t len, const char *token) {
+    size_t i = 0;
+    while (i <= len) {
+        size_t j = i;
+        while (j < len && p[j] != ',') j++;
+        const unsigned char *part = p + i;
+        size_t part_len = j - i;
+        taida_net4_trim_span(&part, &part_len);
+        if (taida_net4_span_eq_ci(part, part_len, token)) return 1;
+        i = j + 1;
     }
     return 0;
 }
@@ -3387,34 +3458,6 @@ static int taida_net4_strcasecmp(const char *a, const char *b) {
         a++; b++;
     }
     return (unsigned char)*a - (unsigned char)*b;
-}
-
-// Check if a comma-separated header value contains a token (case-insensitive).
-static int taida_net4_header_contains_token(const char *value, const char *token) {
-    size_t token_len = strlen(token);
-    const char *p = value;
-    while (*p) {
-        // Skip leading whitespace and commas.
-        while (*p == ' ' || *p == '\t' || *p == ',') p++;
-        if (!*p) break;
-        const char *start = p;
-        while (*p && *p != ',') p++;
-        // Trim trailing whitespace.
-        const char *end = p;
-        while (end > start && (end[-1] == ' ' || end[-1] == '\t')) end--;
-        size_t tlen = (size_t)(end - start);
-        if (tlen == token_len) {
-            int match = 1;
-            for (size_t i = 0; i < tlen; i++) {
-                char ca = start[i], cb = token[i];
-                if (ca >= 'A' && ca <= 'Z') ca += 32;
-                if (cb >= 'A' && cb <= 'Z') cb += 32;
-                if (ca != cb) { match = 0; break; }
-            }
-            if (match) return 1;
-        }
-    }
-    return 0;
 }
 
 // ── wsUpgrade(req, writer) → Lax[@(ws: WsConn)] (NET4-4b) ──
@@ -3505,63 +3548,52 @@ taida_val taida_net_ws_upgrade(taida_val req, taida_val writer) {
         return taida_net4_make_lax_ws_empty();
     }
 
+    // The header values are compared on their full spans in `raw`.
+    const unsigned char *hv = NULL;
+    size_t hv_len = 0;
+
     // Validate: Upgrade: websocket
-    char hdr_buf[256];
-    if (!taida_net4_get_header_value(req, raw, (size_t)raw_len, "upgrade", hdr_buf, sizeof(hdr_buf)) ||
-        taida_net4_strcasecmp(hdr_buf, "websocket") != 0) {
+    if (!taida_net4_find_header(req, raw, (size_t)raw_len, "upgrade", &hv, &hv_len) ||
+        !taida_net4_span_eq_ci(hv, hv_len, "websocket")) {
         free(raw);
         return taida_net4_make_lax_ws_empty();
     }
 
     // Validate: Connection contains "Upgrade"
-    if (!taida_net4_get_header_value(req, raw, (size_t)raw_len, "connection", hdr_buf, sizeof(hdr_buf)) ||
-        !taida_net4_header_contains_token(hdr_buf, "Upgrade")) {
+    if (!taida_net4_find_header(req, raw, (size_t)raw_len, "connection", &hv, &hv_len) ||
+        !taida_net4_span_contains_token(hv, hv_len, "upgrade")) {
         free(raw);
         return taida_net4_make_lax_ws_empty();
     }
 
     // Validate: Sec-WebSocket-Version: 13
-    if (!taida_net4_get_header_value(req, raw, (size_t)raw_len, "sec-websocket-version", hdr_buf, sizeof(hdr_buf))) {
+    if (!taida_net4_find_header(req, raw, (size_t)raw_len, "sec-websocket-version", &hv, &hv_len)) {
         free(raw);
         return taida_net4_make_lax_ws_empty();
     }
-    // Trim whitespace.
-    {
-        char *p = hdr_buf;
-        while (*p == ' ' || *p == '\t') p++;
-        if (strcmp(p, "13") != 0) {
-            free(raw);
-            return taida_net4_make_lax_ws_empty();
-        }
+    taida_net4_trim_span(&hv, &hv_len);
+    if (hv_len != 2 || memcmp(hv, "13", 2) != 0) {
+        free(raw);
+        return taida_net4_make_lax_ws_empty();
     }
 
-    // Validate: Sec-WebSocket-Key (must be present and non-empty).
-    char ws_key[256];
-    if (!taida_net4_get_header_value(req, raw, (size_t)raw_len, "sec-websocket-key", ws_key, sizeof(ws_key))) {
-        free(raw);
-        return taida_net4_make_lax_ws_empty();
-    }
-    // Trim key.
-    {
-        size_t ks = 0, ke = strlen(ws_key);
-        while (ks < ke && (ws_key[ks] == ' ' || ws_key[ks] == '\t')) ks++;
-        while (ke > ks && (ws_key[ke-1] == ' ' || ws_key[ke-1] == '\t')) ke--;
-        if (ks > 0) memmove(ws_key, ws_key + ks, ke - ks);
-        ws_key[ke - ks] = '\0';
-    }
-    if (ws_key[0] == '\0') {
-        free(raw);
-        return taida_net4_make_lax_ws_empty();
-    }
+    // Validate: Sec-WebSocket-Key.
     // NB4-11: RFC 6455: key must be 24 chars and decode to exactly 16 bytes.
+    char ws_key[25];
+    if (!taida_net4_find_header(req, raw, (size_t)raw_len, "sec-websocket-key", &hv, &hv_len)) {
+        free(raw);
+        return taida_net4_make_lax_ws_empty();
+    }
+    taida_net4_trim_span(&hv, &hv_len);
+    if (hv_len != 24) {
+        free(raw);
+        return taida_net4_make_lax_ws_empty();
+    }
+    memcpy(ws_key, hv, 24);
+    ws_key[24] = '\0';
     {
-        size_t key_len = strlen(ws_key);
-        if (key_len != 24) {
-            free(raw);
-            return taida_net4_make_lax_ws_empty();
-        }
         uint8_t decoded[18]; // 16 bytes + margin
-        int dec_len = taida_base64_decode(ws_key, key_len, decoded, sizeof(decoded));
+        int dec_len = taida_base64_decode(ws_key, 24, decoded, sizeof(decoded));
         if (dec_len != 16) {
             free(raw);
             return taida_net4_make_lax_ws_empty();
@@ -4061,9 +4093,26 @@ typedef struct {
 
     // NET5-4a: TLS context (NULL = plaintext, non-NULL = TLS).
     OSSL_SSL_CTX *ssl_ctx;
+
+    // Worker threads. A worker serves one connection at a time with
+    // blocking reads, so the pool grows on demand up to the connection
+    // limit (`max_workers`). A fixed small pool let a few slow or idle
+    // connections occupy every worker and stall the whole server, while
+    // the interpreter keeps serving other connections up to maxConnections.
+    pthread_t *workers;
+    int worker_count;
+    int max_workers;
 } NetThreadPool;
 
-static void net_pool_init(NetThreadPool *pool, int queue_cap, taida_val handler, int64_t max_requests, int64_t timeout_ms, int handler_arity) {
+// Upper bound for maxConnections. Larger values mean the same thing in
+// practice (far more descriptors than a process can hold open) and keep the
+// int-sized counters of the pool in range: 2^32 used to truncate to 0 and
+// leave the accept loop waiting forever.
+#define TAIDA_NET_MAX_CONNECTIONS 65536
+
+static void *net_worker_thread(void *arg);
+
+static void net_pool_init(NetThreadPool *pool, int queue_cap, int max_workers, taida_val handler, int64_t max_requests, int64_t timeout_ms, int handler_arity) {
     pthread_mutex_init(&pool->mutex, NULL);
     pthread_cond_init(&pool->cond_available, NULL);
     pthread_cond_init(&pool->cond_done, NULL);
@@ -4080,6 +4129,10 @@ static void net_pool_init(NetThreadPool *pool, int queue_cap, taida_val handler,
     pool->timeout_ms = timeout_ms;
     pool->handler_arity = handler_arity;
     pool->ssl_ctx = NULL; // NET5-4a: set by httpServe if TLS configured
+    if (max_workers < 1) max_workers = 1;
+    pool->workers = (pthread_t*)TAIDA_MALLOC(sizeof(pthread_t) * (size_t)max_workers, "net_workers");
+    pool->worker_count = 0;
+    pool->max_workers = max_workers;
 }
 
 static void net_pool_destroy(NetThreadPool *pool) {
@@ -4087,6 +4140,27 @@ static void net_pool_destroy(NetThreadPool *pool) {
     pthread_cond_destroy(&pool->cond_available);
     pthread_cond_destroy(&pool->cond_done);
     free(pool->queue);
+    free(pool->workers);
+}
+
+// Starts one worker. Returns 0 on success. Call with the pool mutex held
+// (or before the accept loop starts).
+static int net_pool_spawn_worker(NetThreadPool *pool) {
+    if (pool->worker_count >= pool->max_workers) return -1;
+    if (pthread_create(&pool->workers[pool->worker_count], NULL, net_worker_thread, pool) != 0) {
+        return -1;
+    }
+    pool->worker_count++;
+    return 0;
+}
+
+// Starts another worker when the queued connections outnumber the workers
+// that are not serving a connection. Call with the pool mutex held.
+static void net_pool_grow_if_busy(NetThreadPool *pool) {
+    int idle = pool->worker_count - pool->active_connections;
+    if (pool->queue_count > idle) {
+        (void)net_pool_spawn_worker(pool);
+    }
 }
 
 // Enqueue a client fd. Returns 0 on success, -1 if queue full.
@@ -4185,6 +4259,7 @@ static void *net_worker_thread(void *arg) {
             int64_t content_length = 0;
             int is_chunked = 0;
             int head_malformed = 0;
+            int head_request = 0;        // the request method is HEAD
             taida_val parse_result = 0;  // retained across head+body for single-parse reuse
             taida_val parse_inner = 0;   // inner pack from parse_result
             // NET-1: resume the CRLFCRLF scan from where the previous read left
@@ -4218,11 +4293,31 @@ static void *net_worker_thread(void *arg) {
                             break;
                         }
                         parse_inner = taida_pack_get(parse_result, taida_str_hash((taida_val)"__value"));
+                        // A terminator can precede the request line (empty
+                        // lines before it are skipped), so the parser may
+                        // still report a partial head here. The interpreter
+                        // treats that as a malformed head as well.
+                        if (parse_inner == 0 || !taida_is_buchi_pack(parse_inner)
+                            || taida_pack_get(parse_inner, taida_str_hash((taida_val)"complete")) == 0) {
+                            head_malformed = 1;
+                            taida_release(parse_bytes);
+                            taida_release(parse_result);
+                            parse_result = 0;
+                            parse_inner = 0;
+                            break;
+                        }
                         if (parse_inner != 0 && taida_is_buchi_pack(parse_inner)) {
                             content_length = taida_pack_get(parse_inner, taida_str_hash((taida_val)"contentLength"));
                             head_consumed = (size_t)taida_pack_get(parse_inner, taida_str_hash((taida_val)"consumed"));
                             taida_val chunked_val = taida_pack_get(parse_inner, taida_str_hash((taida_val)"chunked"));
                             is_chunked = (chunked_val != 0) ? 1 : 0;
+                            taida_val method_span = taida_pack_get(parse_inner, taida_str_hash((taida_val)"method"));
+                            if (method_span != 0 && taida_is_buchi_pack(method_span)) {
+                                taida_val ms = taida_pack_get(method_span, taida_str_hash((taida_val)"start"));
+                                taida_val ml = taida_pack_get(method_span, taida_str_hash((taida_val)"len"));
+                                head_request = ml == 4 && ms >= 0 && (size_t)ms + 4 <= total_read
+                                    && memcmp(buf + ms, "HEAD", 4) == 0;
+                            }
                         }
                         taida_release(parse_bytes);
                         break;
@@ -4510,7 +4605,7 @@ static void *net_worker_thread(void *arg) {
                         taida_pack_set_tag(effective_response, 2, TAIDA_TAG_STR);
                     }
                     // NB6-1: Scatter-gather send — head and body as separate buffers.
-                    if (taida_net_send_response_scatter(client_fd, effective_response) != 0) {
+                    if (taida_net_send_response_scatter(client_fd, effective_response, head_request) != 0) {
                         const char *fallback = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                         taida_net_send_all(client_fd, fallback, strlen(fallback));
                     }
@@ -4739,7 +4834,7 @@ static void *net_worker_thread(void *arg) {
 
                 // NB6-1: 1-arg handler — scatter-gather send (head+body separate).
                 taida_val response = taida_invoke_callback1(pool->handler, request);
-                if (taida_net_send_response_scatter(client_fd, response) != 0) {
+                if (taida_net_send_response_scatter(client_fd, response, head_request) != 0) {
                     const char *fallback = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                     taida_net_send_all(client_fd, fallback, strlen(fallback));
                 }

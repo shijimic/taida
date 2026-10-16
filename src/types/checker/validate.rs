@@ -903,7 +903,20 @@ impl TypeChecker {
             if path.exists() {
                 (path, None)
             } else {
-                return; // Cannot resolve — let downstream handle
+                // A local path is resolved as written (no extension is
+                // added), so a missing file fails the program at the import
+                // whichever backend runs it. Say so here, where the
+                // location is known.
+                self.errors.push(TypeError {
+                    message: format!(
+                        "[E1701] Module '{}' not found (looked for '{}'). \
+                         Hint: a local import is resolved from the directory of the importing file, and the file name is written in full (`.td` included).",
+                        imp.path,
+                        path.display()
+                    ),
+                    span: imp.span.clone(),
+                });
+                return;
             }
         } else {
             // Package import — resolve via .taida/deps/
@@ -988,7 +1001,7 @@ impl TypeChecker {
             Ok(s) => s,
             Err(_) => return,
         };
-        let (program, _) = crate::parser::parse(&source);
+        let (program, _) = crate::parser::parse_detached(&source);
 
         // Collect explicit export list from entry module's <<< statements
         let mut exports = std::collections::HashSet::new();
@@ -1579,12 +1592,38 @@ defaulted fields must be provided via `()`",
         }
     }
 
+    /// A call of a generic function whose body returns one fixed primitive
+    /// type, taking the returned type parameter as another primitive, gets a
+    /// value of a type it does not expect.
+    pub(super) fn check_generic_fixed_return(
+        &mut self,
+        fd: &FuncDef,
+        bindings: &HashMap<String, Type>,
+        span: &Span,
+    ) {
+        if let Some((tp, body)) = self.generic_fixed_returns.get(&fd.name)
+            && let Some(actual) = bindings.get(tp)
+            && matches!(actual, Type::Int | Type::Float | Type::Str | Type::Bool)
+            && actual != body
+        {
+            self.errors.push(TypeError {
+                message: format!(
+                    "[E1601] Function '{}' returns {} whatever {} is, but this call takes {} as {}. \
+                     Hint: Return a value of type {} from the function, or call it with {} as {}.",
+                    fd.name, body, tp, tp, actual, tp, tp, body
+                ),
+                span: span.clone(),
+            });
+        }
+    }
+
     pub(super) fn validate_generic_function_bindings(
         &mut self,
         fd: &FuncDef,
         bindings: &HashMap<String, Type>,
         span: &Span,
     ) {
+        self.check_generic_fixed_return(fd, bindings, span);
         for type_param in &fd.type_params {
             let Some(actual) = bindings.get(&type_param.name) else {
                 continue;

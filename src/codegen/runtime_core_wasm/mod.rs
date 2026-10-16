@@ -1,7 +1,7 @@
-//! Taida WASM core runtime — single translation unit assembled from four
-//! mechanical fragments.
+//! Taida WASM core runtime — single translation unit assembled from five
+//! fragments and the math kernel shared with the native runtime.
 //!
-//! The runtime is split into four `.inc.c` fragments and concatenated at
+//! The runtime is split into five `.inc.c` fragments and concatenated at
 //! Rust load time before being passed to `clang`. The fragments are
 //! treated as **a single translation unit** by clang (Rust concatenates
 //! them and writes the result via `fs::write`), so DCE / static helper
@@ -16,8 +16,16 @@
 //! div/mod / String template / digit helpers
 //! - [`TYPEOF_LIST_SECTION`] — RC no-ops / typeof / List HOF / List
 //! operations / List query / element retain/release
-//! - [`JSON_ASYNC_SECTION`] — JSON runtime (strtol/strtod/itoa/ftoa/FNV-1a /
-//! type detection / public field wrappers / schema / descriptor apply) /
+//! - [`NUMERIC_SECTION`] — numeric kernel: f64 <-> decimal text (Float
+//! display, ToFixed, Float parsing) and round. Concatenated before the
+//! JSON / async fragment so the WASI `_start` entry stays last; callers
+//! in the earlier fragments see the entry points through forward
+//! declarations in `01_core.inc.c`.
+//! - [`CRMATH_TABLES_SECTION`] / [`CRMATH_SECTION`] — the correctly
+//! rounded math kernel behind the transcendental molds, shared with the
+//! native runtime; concatenated after the numeric fragment.
+//! - [`JSON_ASYNC_SECTION`] — JSON runtime (strtol/itoa/ftoa/FNV-1a /
+//! type detection / public field wrappers / reader / schema / descriptor apply) /
 //! Async runtime / `_taida_main` extern / `_start` WASI entry
 
 use std::sync::LazyLock;
@@ -32,11 +40,20 @@ pub const CONTAINERS_SECTION: &str = include_str!("02_containers.inc.c");
 /// Fragment 3: RC no-ops, typeof, List HOF / operations / queries.
 pub const TYPEOF_LIST_SECTION: &str = include_str!("03_typeof_list.inc.c");
 
+/// Fragment 5 (assembled fourth): f64 <-> decimal text and round.
+pub const NUMERIC_SECTION: &str = include_str!("05_numeric.inc.c");
+
 /// Fragment 4: JSON runtime + Schema + Async + `_start` entry.
 pub const JSON_ASYNC_SECTION: &str = include_str!("04_json_async.inc.c");
 
-/// Full wasm core runtime C source, assembled from the four fragments on
-/// first access and cached for the process lifetime.
+/// Shared with the native runtime: the tables and the correctly rounded
+/// math kernel behind the transcendental molds.
+pub const CRMATH_TABLES_SECTION: &str = include_str!("../runtime_crmath_tables.inc.c");
+pub const CRMATH_SECTION: &str = include_str!("../runtime_crmath.inc.c");
+
+/// Full wasm core runtime C source, assembled from the five fragments and
+/// the shared math kernel on first access and cached for the process
+/// lifetime.
 ///
 /// Byte-identical to the pre-split monolithic `runtime_core_wasm.c` — see
 /// `test_runtime_core_wasm_fragment_concat_preserves_bytes` below for the
@@ -50,11 +67,17 @@ pub static RUNTIME_CORE_WASM: LazyLock<&'static str> = LazyLock::new(|| {
     let total = CORE_SECTION.len()
         + CONTAINERS_SECTION.len()
         + TYPEOF_LIST_SECTION.len()
+        + NUMERIC_SECTION.len()
+        + CRMATH_TABLES_SECTION.len()
+        + CRMATH_SECTION.len()
         + JSON_ASYNC_SECTION.len();
     let mut s = String::with_capacity(total);
     s.push_str(CORE_SECTION);
     s.push_str(CONTAINERS_SECTION);
     s.push_str(TYPEOF_LIST_SECTION);
+    s.push_str(NUMERIC_SECTION);
+    s.push_str(CRMATH_TABLES_SECTION);
+    s.push_str(CRMATH_SECTION);
     s.push_str(JSON_ASYNC_SECTION);
     debug_assert_eq!(s.len(), total);
     Box::leak(s.into_boxed_str())
@@ -64,7 +87,7 @@ pub static RUNTIME_CORE_WASM: LazyLock<&'static str> = LazyLock::new(|| {
 mod tests {
     use super::*;
 
-    /// Invariant: the concatenation of the four fragments must be
+    /// Invariant: the concatenation of the five fragments must be
     /// byte-identical to the equivalent monolithic `runtime_core_wasm.c`.
     /// We anchor the total byte length + the first / last 200 bytes of
     /// the assembled source to detect accidental edits that would break
@@ -305,7 +328,96 @@ mod tests {
         //   characters via _wasm_utf8_count and repeats the whole pad string,
         //   with a total-length guard: +371.
         //   507,665 -> 508,036.
-        const EXPECTED_TOTAL_LEN: usize = 507_704;
+        // 2026-09-29 (01_core / 02_containers / 03_typeof_list /
+        //   04_json_async): the strict JSON reader (grammar, `\uXXXX`,
+        //   exact numbers, self-referential schemas, kind tags, rebuild
+        //   hooks for TypeDefs with methods, the interpreter's result on a
+        //   kind mismatch), the Div/Mod smallest-Int case, saturating
+        //   float-to-Int with exact Floor/Ceil/Round, exact ToFixed and
+        //   Unicode-whitespace Trim — see the native twins — plus Enum
+        //   schemas in the reader: 507,704 -> 534,314.
+        // 2026-09-29: a throw stops every caller up to its ceiling (the
+        //   pending flag is read by the generated C; callbacks and a second
+        //   throw on the dead path are inert); the numeric kernels fragment
+        //   (Float text + math library) replaces the ad-hoc formatter,
+        //   parser, ToFixed and series approximations; the Bytes / bitwise /
+        //   Float Div-Mod molds move in from the wasi layer and range, the
+        //   byte-level Str molds, StringRepeatJoin and the Enum field
+        //   registries join them on every profile; HashMap key equality and
+        //   churn rebuild, the Int range check of Int[Str], jsonEncode
+        //   escapes / non-finite nulls, Bytes display, the static empty
+        //   pack, 128-bit integer support routines; the JSON schema error
+        //   message as a Str.
+        //   534,314 -> 644,100.
+        // Clamp with reversed bounds, Sort in the reference's order (merge
+        //   sort, NaN keys last, `by` keys by their kind), the uncaught-error
+        //   message rule, and the omitted Error `type` / `message` reader:
+        //   644,100 -> 643,950.
+        // jsonEncode / jsonPretty written by the argument's static type
+        //   (a schema descriptor from the lowering): 643,950 -> 649,538.
+        // Join and kinded element strings render an Int as a number; Str.get
+        //   defaults carry the string header: 649,538 -> 649,826.
+        // List accessors default by the first element's kind; jsonEncode
+        //   writes Bytes as null and checks a Str part: 649,826 -> 651,259.
+        // Function values show as `<function NAME>`, methods are left out of
+        //   displays and jsonEncode, AsyncTask shows in lists, Lax over Bytes
+        //   records its kind: 651,259 -> 658,628.
+        // Runtime-raised errors are built in the caught form with their
+        //   string kinds, the Result predicate message names the value, and
+        //   Error values show as packs: 658,628 -> 659,056.
+        // Rejected Async values show a runtime-raised error as Error(type:
+        //   message): 659,056 -> 660,747.
+        // taida_list_note_push_dyn (kind only; WASM counts no references):
+        //   660,747 -> 661,196.
+        // HashMap lookups record the map's value kind and the empty value
+        //   of it (_wasm_hashmap_lax): 661,196 -> 662,394.
+        // pack display takes Bool from the field's own tag, not the
+        //   name-keyed registry: 662,394 -> 661,883.
+        // jsonEncode writes a Float in the reference notation
+        //   (_wc_json_format_float): 661,883 -> 663,593.
+        // Gorillax.toString() shows the value by its slot's kind: 663,593
+        //   -> 664,034.
+        // Abs clears the sign bit, Int[str, base]() checks the sign and the
+        //   range, the fixed-width decodes need the exact length, and Slice
+        //   takes Bytes: 664,034 -> 665,257.
+        // taida_function_to_string shows a function value in a template
+        //   part or Str[...](): 665,257 -> 665,486.
+        // list and set displays read each element's kind: 665,486 ->
+        //   665,770.
+        // HashMap entries keep their key and value kinds, list / pack keys
+        //   hash and compare by content, HashMaps compare structurally and
+        //   jsonEncode names Enum values: 665,770 -> 673,186.
+        // taida_lax_fill_default gives a failed lookup the default of the
+        //   element's static type: 673,186 -> 673,783.
+        // AsyncReject keeps its payload's kind, and a payload that is not
+        //   an error is thrown as an AsyncError carrying its text: 673,783 ->
+        //   675,301.
+        // Upper / Lower use the whole Unicode case mapping, with the tables
+        //   the interpreter's Rust standard library has: 675,301 -> 710,568.
+        // ByteLength / ByteAt / ByteSlice read Bytes values too, and
+        //   ByteSlice reads a cut UTF-8 sequence as U+FFFD: 710,568 ->
+        //   712,025.
+        // jsonEncode / jsonPretty stop past 128 levels of nesting as the
+        //   native runtime does: 712,025 -> 713,179.
+        // A Result given no error reads and shows its throw as the empty
+        //   Error: 713,179 -> 714,700.
+        // A Result given no error reads and shows its throw as the empty
+        //   Error: 714,700 -> 715,002.
+        // Functions are named Function by typeof: 715,002 -> 715,003.
+        // hashMap(entries) builds a HashMap on the compiled backends:
+        //   715,003 -> 719,028.
+        // Error types are told apart by their declaration: 719,028 ->
+        //   722,573.
+        // Transcendental molds use the shared correctly rounded kernel:
+        //   722,573 -> 731,100.
+        // WASM Float text conversion rewritten in-house: 731,100 ->
+        //   729,444.
+        // HashMap keys tell strings apart first, and Int / Bool sets
+        //   compare by value: 729,444 -> 732,972.
+        // Pointer checks do not wrap at 2^32; field names have no fixed
+        //   limit; Molten and Stream show as the reference shows them:
+        //   732,972 -> 734,753.
+        const EXPECTED_TOTAL_LEN: usize = 734_753;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),
@@ -346,6 +458,7 @@ mod tests {
         for (name, frag) in [
             ("containers", CONTAINERS_SECTION),
             ("typeof_list", TYPEOF_LIST_SECTION),
+            ("numeric", NUMERIC_SECTION),
             ("json_async", JSON_ASYNC_SECTION),
         ] {
             let first = frag.lines().next().unwrap_or("");
@@ -373,6 +486,10 @@ mod tests {
         assert!(
             TYPEOF_LIST_SECTION.len() > 5_000,
             "typeof_list fragment suspiciously small"
+        );
+        assert!(
+            NUMERIC_SECTION.len() > 10_000,
+            "numeric fragment suspiciously small"
         );
         assert!(
             JSON_ASYNC_SECTION.len() > 10_000,

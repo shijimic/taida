@@ -19,49 +19,6 @@ static int64_t _wc_strtol(const char *s, const char **end) {
     return neg ? -result : result;
 }
 
-/* ── Helper: manual strtod ── */
-static double _wc_strtod(const char *s, const char **end) {
-    if (!s) { if (end) *end = s; return 0.0; }
-    const char *p = s;
-    double result = 0.0;
-    int neg = 0;
-    if (*p == '-') { neg = 1; p++; }
-    else if (*p == '+') { p++; }
-    if (*p < '0' || *p > '9') {
-        if (*p != '.') { if (end) *end = s; return 0.0; }
-    }
-    while (*p >= '0' && *p <= '9') {
-        result = result * 10.0 + (*p - '0');
-        p++;
-    }
-    if (*p == '.') {
-        p++;
-        double frac = 0.1;
-        while (*p >= '0' && *p <= '9') {
-            result += (*p - '0') * frac;
-            frac *= 0.1;
-            p++;
-        }
-    }
-    if (*p == 'e' || *p == 'E') {
-        p++;
-        int exp_neg = 0;
-        if (*p == '-') { exp_neg = 1; p++; }
-        else if (*p == '+') { p++; }
-        int exp = 0;
-        while (*p >= '0' && *p <= '9') {
-            exp = exp * 10 + (*p - '0');
-            p++;
-        }
-        double factor = 1.0;
-        for (int i = 0; i < exp; i++) factor *= 10.0;
-        if (exp_neg) result /= factor;
-        else result *= factor;
-    }
-    if (end) *end = p;
-    return neg ? -result : result;
-}
-
 /* ── Helper: int64_t to string ── */
 static char *_wc_i64_to_str(int64_t val) {
     char tmp[24];
@@ -199,7 +156,7 @@ static int _wc_is_valid_ptr(int64_t val, unsigned int min_bytes) {
     unsigned int pages = __builtin_wasm_memory_size(0);
     unsigned int mem_size = pages * 65536;
     unsigned int addr = (unsigned int)val;
-    if (addr + min_bytes > mem_size) return 0;
+    if ((uint64_t)addr + min_bytes > (uint64_t)mem_size) return 0; /* no wrap-around */
     return 1;
 }
 
@@ -235,6 +192,24 @@ int64_t taida_lookup_field_type(int64_t hash, int64_t name_ptr) {
    WC-4: JSON value types and parser
    ══════════════════════════════════════════════════════════════════════════ */
 
+/* The reader accepts exactly the documents the interpreter's reader
+   (serde_json) accepts and decodes them to the same values — the same
+   rules as the native runtime's JSON reader:
+     - strict grammar: no trailing or missing `,` / `:`, no unclosed
+       containers or strings, no leading zeros, `+`, bare `.` or hex
+       numbers, no raw control characters or unknown escapes in strings,
+       nothing but whitespace after the document;
+     - `\uXXXX` escapes are decoded (a surrogate pair becomes one code
+       point, a lone surrogate is an error); raw string bytes must be
+       UTF-8;
+     - integers keep the full Int range; fractions, exponents, `-0` and
+       integers beyond the Int range become Floats computed the way
+       serde_json computes them; a number past the Float range is an
+       error;
+     - at most _WC_JSON_MAX_NESTING containers nest;
+     - a repeated object key keeps its last value.
+   Every read is bounded by the end of the input. */
+
 enum {
     WC_JSON_NULL = 0,
     WC_JSON_INT,
@@ -254,6 +229,7 @@ typedef struct {
     int64_t int_val;
     double float_val;
     char *str_val;
+    int str_len;
     wc_json_array *arr;
     wc_json_obj *obj;
 } wc_json_val;
@@ -266,6 +242,7 @@ struct wc_json_array {
 
 struct wc_json_obj_entry {
     char *key;
+    int key_len;
     wc_json_val value;
 };
 
@@ -275,189 +252,527 @@ struct wc_json_obj {
     int cap;
 };
 
-/* Forward declarations */
-static wc_json_val _wc_json_parse_value(const char **p);
-static void _wc_json_skip_ws(const char **p);
-static int64_t _wc_json_apply_schema(wc_json_val *jval, const char **desc);
+/* serde_json's recursion limit: the 128th nested container fails. */
+#define _WC_JSON_MAX_NESTING 127
+/* Integer limits (the freestanding build has no <stdint.h> limit macros). */
+#define _WC_I32_MAX ((int32_t)TAIDA_WASM_I32_MAX)
+#define _WC_I32_MIN (-_WC_I32_MAX - 1)
+#define _WC_U64_MAX 0xFFFFFFFFFFFFFFFFULL
 
-static void _wc_json_skip_ws(const char **p) {
-    while (**p == ' ' || **p == '\t' || **p == '\n' || **p == '\r') (*p)++;
+typedef struct {
+    const unsigned char *p;
+    const unsigned char *end;
+    int nesting;
+} _wc_json_reader;
+
+/* Forward declarations */
+static int _wc_json_parse_value(_wc_json_reader *r, wc_json_val *out);
+
+static void _wc_json_val_clear(wc_json_val *v) {
+    v->type = WC_JSON_NULL;
+    v->int_val = 0;
+    v->float_val = 0.0;
+    v->str_val = (char *)0;
+    v->str_len = 0;
+    v->arr = (wc_json_array *)0;
+    v->obj = (wc_json_obj *)0;
 }
 
-static char *_wc_json_parse_string_raw(const char **p) {
-    if (**p != '"') return (char *)0;
-    (*p)++;
-    const char *scan = *p;
-    int len = 0;
-    while (*scan && *scan != '"') {
-        if (*scan == '\\') { scan++; if (*scan) scan++; }
-        else scan++;
-        len++;
+static void _wc_json_skip_ws(_wc_json_reader *r) {
+    while (r->p < r->end
+           && (*r->p == ' ' || *r->p == '\t' || *r->p == '\n' || *r->p == '\r')) {
+        r->p++;
     }
-    char *buf = _wasm_str_alloc((unsigned int)(len + 1));
+}
+
+static int _wc_json_at(_wc_json_reader *r, unsigned char c) {
+    return r->p < r->end && *r->p == c;
+}
+
+static int _wc_json_at_digit(_wc_json_reader *r) {
+    return r->p < r->end && *r->p >= '0' && *r->p <= '9';
+}
+
+/* Four hex digits of a `\u` escape, all before `limit`. */
+static int _wc_json_read_hex4(_wc_json_reader *r, const unsigned char *limit, uint32_t *out) {
+    if (limit - r->p < 4) return 0;
+    uint32_t v = 0;
+    for (int i = 0; i < 4; i++) {
+        unsigned char c = r->p[i];
+        uint32_t d;
+        if (c >= '0' && c <= '9') d = (uint32_t)(c - '0');
+        else if (c >= 'a' && c <= 'f') d = (uint32_t)(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') d = (uint32_t)(c - 'A' + 10);
+        else return 0;
+        v = (v << 4) | d;
+    }
+    r->p += 4;
+    *out = v;
+    return 1;
+}
+
+static int _wc_json_put_utf8(char *buf, int out, uint32_t cp) {
+    if (cp < 0x80) {
+        buf[out++] = (char)cp;
+    } else if (cp < 0x800) {
+        buf[out++] = (char)(0xC0 | (cp >> 6));
+        buf[out++] = (char)(0x80 | (cp & 0x3F));
+    } else if (cp < 0x10000) {
+        buf[out++] = (char)(0xE0 | (cp >> 12));
+        buf[out++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        buf[out++] = (char)(0x80 | (cp & 0x3F));
+    } else {
+        buf[out++] = (char)(0xF0 | (cp >> 18));
+        buf[out++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+        buf[out++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        buf[out++] = (char)(0x80 | (cp & 0x3F));
+    }
+    return out;
+}
+
+/* Length of the well-formed UTF-8 sequence that starts with a non-ASCII
+   byte at `p` and ends before `limit`, or 0 when it is malformed. */
+static int _wc_json_utf8_seq_len(const unsigned char *p, const unsigned char *limit) {
+    unsigned char c = p[0];
+    int n;
+    if (c >= 0xC2 && c <= 0xDF) n = 2;
+    else if (c >= 0xE0 && c <= 0xEF) n = 3;
+    else if (c >= 0xF0 && c <= 0xF4) n = 4;
+    else return 0;
+    if (limit - p < n) return 0;
+    for (int i = 1; i < n; i++) {
+        if ((p[i] & 0xC0) != 0x80) return 0;
+    }
+    if (c == 0xE0 && p[1] < 0xA0) return 0;
+    if (c == 0xED && p[1] >= 0xA0) return 0;
+    if (c == 0xF0 && p[1] < 0x90) return 0;
+    if (c == 0xF4 && p[1] >= 0x90) return 0;
+    return n;
+}
+
+/* Reads the string whose opening quote is at r->p into a Str buffer and
+   stores its decoded length, or returns NULL on malformed input. */
+static char *_wc_json_read_string(_wc_json_reader *r, int *out_len) {
+    if (!_wc_json_at(r, '"')) return (char *)0;
+    r->p++;
+    /* Find the closing quote first (an escape always skips the byte after
+       the backslash) to size the buffer: no escape decodes to more bytes
+       than it occupies in the input. */
+    const unsigned char *close = r->p;
+    while (close < r->end && *close != '"') {
+        if (*close == '\\') {
+            close++;
+            if (close >= r->end) break;
+        }
+        close++;
+    }
+    if (close >= r->end) return (char *)0;
+    int64_t raw_len = (int64_t)(close - r->p);
+    if (raw_len >= TAIDA_WASM_I32_MAX) return (char *)0;
+    char *buf = _wasm_str_alloc((unsigned int)(raw_len + 1));
     int out = 0;
-    while (**p && **p != '"') {
-        if (**p == '\\') {
-            (*p)++;
-            switch (**p) {
+    while (r->p < close) {
+        unsigned char c = *r->p;
+        if (c == '\\') {
+            r->p++;
+            unsigned char e = *r->p++;
+            switch (e) {
                 case '"': buf[out++] = '"'; break;
                 case '\\': buf[out++] = '\\'; break;
                 case '/': buf[out++] = '/'; break;
-                case 'n': buf[out++] = '\n'; break;
-                case 't': buf[out++] = '\t'; break;
-                case 'r': buf[out++] = '\r'; break;
                 case 'b': buf[out++] = '\b'; break;
                 case 'f': buf[out++] = '\f'; break;
-                // TODO(WCR-3): \uXXXX Unicode escape not implemented.
-                // Currently outputs raw character after 'u'. Should decode 4-hex-digit
-                // codepoint to UTF-8. Surrogate pairs (\uD800-\uDFFF) also needed.
-                default: buf[out++] = **p; break;
+                case 'n': buf[out++] = '\n'; break;
+                case 'r': buf[out++] = '\r'; break;
+                case 't': buf[out++] = '\t'; break;
+                case 'u': {
+                    uint32_t cp;
+                    if (!_wc_json_read_hex4(r, close, &cp)) return (char *)0;
+                    if (cp >= 0xDC00 && cp <= 0xDFFF) return (char *)0;
+                    if (cp >= 0xD800 && cp <= 0xDBFF) {
+                        uint32_t lo;
+                        if (close - r->p < 2 || r->p[0] != '\\' || r->p[1] != 'u') return (char *)0;
+                        r->p += 2;
+                        if (!_wc_json_read_hex4(r, close, &lo)) return (char *)0;
+                        if (lo < 0xDC00 || lo > 0xDFFF) return (char *)0;
+                        cp = (((cp - 0xD800) << 10) | (lo - 0xDC00)) + 0x10000;
+                    }
+                    out = _wc_json_put_utf8(buf, out, cp);
+                    break;
+                }
+                default:
+                    return (char *)0;
             }
-            (*p)++;
+        } else if (c < 0x20) {
+            return (char *)0;
+        } else if (c < 0x80) {
+            buf[out++] = (char)c;
+            r->p++;
         } else {
-            buf[out++] = **p;
-            (*p)++;
+            int n = _wc_json_utf8_seq_len(r->p, close);
+            if (n == 0) return (char *)0;
+            _wf_memcpy(buf + out, r->p, n);
+            out += n;
+            r->p += n;
         }
     }
+    r->p = close + 1;  /* closing quote */
     buf[out] = '\0';
-    if (**p == '"') (*p)++;
+    if (out_len) *out_len = out;
     return buf;
 }
 
-static wc_json_val _wc_json_parse_string(const char **p) {
-    wc_json_val v;
-    v.type = WC_JSON_STRING;
-    v.str_val = _wc_json_parse_string_raw(p);
-    v.arr = (wc_json_array *)0;
-    v.obj = (wc_json_obj *)0;
-    v.int_val = 0;
-    v.float_val = 0.0;
-    return v;
+/* Powers of ten used to scale a decimal significand, as serde_json does. */
+static const double _wc_json_pow10[309] = {
+    1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9,
+    1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19,
+    1e20, 1e21, 1e22, 1e23, 1e24, 1e25, 1e26, 1e27, 1e28, 1e29,
+    1e30, 1e31, 1e32, 1e33, 1e34, 1e35, 1e36, 1e37, 1e38, 1e39,
+    1e40, 1e41, 1e42, 1e43, 1e44, 1e45, 1e46, 1e47, 1e48, 1e49,
+    1e50, 1e51, 1e52, 1e53, 1e54, 1e55, 1e56, 1e57, 1e58, 1e59,
+    1e60, 1e61, 1e62, 1e63, 1e64, 1e65, 1e66, 1e67, 1e68, 1e69,
+    1e70, 1e71, 1e72, 1e73, 1e74, 1e75, 1e76, 1e77, 1e78, 1e79,
+    1e80, 1e81, 1e82, 1e83, 1e84, 1e85, 1e86, 1e87, 1e88, 1e89,
+    1e90, 1e91, 1e92, 1e93, 1e94, 1e95, 1e96, 1e97, 1e98, 1e99,
+    1e100, 1e101, 1e102, 1e103, 1e104, 1e105, 1e106, 1e107, 1e108, 1e109,
+    1e110, 1e111, 1e112, 1e113, 1e114, 1e115, 1e116, 1e117, 1e118, 1e119,
+    1e120, 1e121, 1e122, 1e123, 1e124, 1e125, 1e126, 1e127, 1e128, 1e129,
+    1e130, 1e131, 1e132, 1e133, 1e134, 1e135, 1e136, 1e137, 1e138, 1e139,
+    1e140, 1e141, 1e142, 1e143, 1e144, 1e145, 1e146, 1e147, 1e148, 1e149,
+    1e150, 1e151, 1e152, 1e153, 1e154, 1e155, 1e156, 1e157, 1e158, 1e159,
+    1e160, 1e161, 1e162, 1e163, 1e164, 1e165, 1e166, 1e167, 1e168, 1e169,
+    1e170, 1e171, 1e172, 1e173, 1e174, 1e175, 1e176, 1e177, 1e178, 1e179,
+    1e180, 1e181, 1e182, 1e183, 1e184, 1e185, 1e186, 1e187, 1e188, 1e189,
+    1e190, 1e191, 1e192, 1e193, 1e194, 1e195, 1e196, 1e197, 1e198, 1e199,
+    1e200, 1e201, 1e202, 1e203, 1e204, 1e205, 1e206, 1e207, 1e208, 1e209,
+    1e210, 1e211, 1e212, 1e213, 1e214, 1e215, 1e216, 1e217, 1e218, 1e219,
+    1e220, 1e221, 1e222, 1e223, 1e224, 1e225, 1e226, 1e227, 1e228, 1e229,
+    1e230, 1e231, 1e232, 1e233, 1e234, 1e235, 1e236, 1e237, 1e238, 1e239,
+    1e240, 1e241, 1e242, 1e243, 1e244, 1e245, 1e246, 1e247, 1e248, 1e249,
+    1e250, 1e251, 1e252, 1e253, 1e254, 1e255, 1e256, 1e257, 1e258, 1e259,
+    1e260, 1e261, 1e262, 1e263, 1e264, 1e265, 1e266, 1e267, 1e268, 1e269,
+    1e270, 1e271, 1e272, 1e273, 1e274, 1e275, 1e276, 1e277, 1e278, 1e279,
+    1e280, 1e281, 1e282, 1e283, 1e284, 1e285, 1e286, 1e287, 1e288, 1e289,
+    1e290, 1e291, 1e292, 1e293, 1e294, 1e295, 1e296, 1e297, 1e298, 1e299,
+    1e300, 1e301, 1e302, 1e303, 1e304, 1e305, 1e306, 1e307, 1e308,
+};
+
+/* significand * 10^exponent the way serde_json computes it: exact integer
+   significand as f64, then one multiplication or division by a power of
+   ten. Fails when the result overflows f64. */
+static int _wc_json_f64_from_parts(int positive, uint64_t significand, int32_t exponent, double *out) {
+    double f = (double)significand;
+    for (;;) {
+        uint32_t idx = exponent < 0 ? (uint32_t)0 - (uint32_t)exponent : (uint32_t)exponent;
+        if (idx < 309) {
+            if (exponent >= 0) {
+                f *= _wc_json_pow10[idx];
+                if (__builtin_isinf(f)) return 0;
+            } else {
+                f /= _wc_json_pow10[idx];
+            }
+            break;
+        }
+        if (f == 0.0) break;
+        if (exponent >= 0) return 0;
+        f /= 1e308;
+        exponent += 308;
+    }
+    *out = positive ? f : -f;
+    return 1;
 }
 
-static wc_json_val _wc_json_parse_number(const char **p) {
-    wc_json_val v;
-    v.str_val = (char *)0; v.arr = (wc_json_array *)0; v.obj = (wc_json_obj *)0;
-    const char *end;
-    double d = _wc_strtod(*p, &end);
-    int is_int = 1;
-    const char *scan = *p;
-    if (*scan == '-') scan++;
-    while (scan < end) {
-        if (*scan == '.' || *scan == 'e' || *scan == 'E') { is_int = 0; break; }
-        scan++;
+static int _wc_json_read_exponent(_wc_json_reader *r, int positive, uint64_t significand,
+                                  int32_t starting_exp, double *out) {
+    r->p++;  /* 'e' / 'E' */
+    int positive_exp = 1;
+    if (_wc_json_at(r, '+')) {
+        r->p++;
+    } else if (_wc_json_at(r, '-')) {
+        positive_exp = 0;
+        r->p++;
     }
-    *p = end;
-    if (is_int && d >= -9007199254740992.0 && d <= 9007199254740992.0) {
-        v.type = WC_JSON_INT;
-        v.int_val = (int64_t)d;
-        v.float_val = d;
+    if (!_wc_json_at_digit(r)) return 0;
+    int32_t exp = (int32_t)(*r->p++ - '0');
+    while (_wc_json_at_digit(r)) {
+        int32_t digit = (int32_t)(*r->p - '0');
+        if (exp >= _WC_I32_MAX / 10 && (exp > _WC_I32_MAX / 10 || digit > _WC_I32_MAX % 10)) {
+            /* The exponent overflows i32: the value is 0 (or out of range). */
+            if (significand != 0 && positive_exp) return 0;
+            while (_wc_json_at_digit(r)) r->p++;
+            *out = positive ? 0.0 : -0.0;
+            return 1;
+        }
+        r->p++;
+        exp = exp * 10 + digit;
+    }
+    int32_t final_exp;
+    if (positive_exp) {
+        final_exp = starting_exp > _WC_I32_MAX - exp ? _WC_I32_MAX : starting_exp + exp;
     } else {
-        v.type = WC_JSON_FLOAT;
-        v.float_val = d;
-        v.int_val = (int64_t)d;
+        final_exp = starting_exp < _WC_I32_MIN + exp ? _WC_I32_MIN : starting_exp - exp;
     }
-    return v;
+    return _wc_json_f64_from_parts(positive, significand, final_exp, out);
 }
 
-static wc_json_val _wc_json_parse_array(const char **p) {
-    wc_json_val v;
-    v.type = WC_JSON_ARRAY;
-    v.str_val = (char *)0; v.obj = (wc_json_obj *)0;
-    v.int_val = 0; v.float_val = 0.0;
-    v.arr = (wc_json_array *)wasm_alloc(sizeof(wc_json_array));
-    v.arr->count = 0;
-    v.arr->cap = 4;
-    v.arr->items = (wc_json_val *)wasm_alloc((unsigned int)(4 * sizeof(wc_json_val)));
-    (*p)++;
-    _wc_json_skip_ws(p);
-    if (**p == ']') { (*p)++; return v; }
-    while (**p) {
-        wc_json_val item = _wc_json_parse_value(p);
-        if (v.arr->count >= v.arr->cap) {
-            int new_cap = v.arr->cap * 2;
+static int _wc_json_read_fraction(_wc_json_reader *r, int positive, uint64_t significand,
+                                  int32_t exponent_before, double *out) {
+    r->p++;  /* '.' */
+    int32_t exponent_after = 0;
+    while (_wc_json_at_digit(r)) {
+        uint64_t digit = (uint64_t)(*r->p - '0');
+        if (significand >= _WC_U64_MAX / 10
+            && (significand > _WC_U64_MAX / 10 || digit > _WC_U64_MAX % 10)) {
+            /* No room for more digits: the rest of the fraction is dropped. */
+            int32_t exponent = exponent_before + exponent_after;
+            while (_wc_json_at_digit(r)) r->p++;
+            if (_wc_json_at(r, 'e') || _wc_json_at(r, 'E')) {
+                return _wc_json_read_exponent(r, positive, significand, exponent, out);
+            }
+            return _wc_json_f64_from_parts(positive, significand, exponent, out);
+        }
+        r->p++;
+        significand = significand * 10 + digit;
+        if (exponent_after > _WC_I32_MIN) exponent_after--;
+    }
+    if (exponent_after == 0) return 0;  /* `.` needs a digit after it */
+    int32_t exponent = exponent_before + exponent_after;
+    if (_wc_json_at(r, 'e') || _wc_json_at(r, 'E')) {
+        return _wc_json_read_exponent(r, positive, significand, exponent, out);
+    }
+    return _wc_json_f64_from_parts(positive, significand, exponent, out);
+}
+
+static int _wc_json_parse_number(_wc_json_reader *r, wc_json_val *v) {
+    int positive = 1;
+    if (_wc_json_at(r, '-')) {
+        positive = 0;
+        r->p++;
+    }
+    if (!_wc_json_at_digit(r)) return 0;
+    uint64_t significand = 0;
+    if (*r->p == '0') {
+        r->p++;
+        if (_wc_json_at_digit(r)) return 0;  /* leading zero */
+    } else {
+        while (_wc_json_at_digit(r)) {
+            uint64_t digit = (uint64_t)(*r->p - '0');
+            if (significand >= _WC_U64_MAX / 10
+                && (significand > _WC_U64_MAX / 10 || digit > _WC_U64_MAX % 10)) {
+                /* Past u64: the remaining integer digits only scale the
+                   Float. */
+                int32_t exponent = 0;
+                while (_wc_json_at_digit(r)) {
+                    r->p++;
+                    if (exponent < _WC_I32_MAX) exponent++;
+                }
+                double d;
+                int ok;
+                if (_wc_json_at(r, '.')) ok = _wc_json_read_fraction(r, positive, significand, exponent, &d);
+                else if (_wc_json_at(r, 'e') || _wc_json_at(r, 'E')) ok = _wc_json_read_exponent(r, positive, significand, exponent, &d);
+                else ok = _wc_json_f64_from_parts(positive, significand, exponent, &d);
+                if (!ok) return 0;
+                v->type = WC_JSON_FLOAT;
+                v->float_val = d;
+                return 1;
+            }
+            r->p++;
+            significand = significand * 10 + digit;
+        }
+    }
+    if (_wc_json_at(r, '.') || _wc_json_at(r, 'e') || _wc_json_at(r, 'E')) {
+        double d;
+        int ok = _wc_json_at(r, '.')
+            ? _wc_json_read_fraction(r, positive, significand, 0, &d)
+            : _wc_json_read_exponent(r, positive, significand, 0, &d);
+        if (!ok) return 0;
+        v->type = WC_JSON_FLOAT;
+        v->float_val = d;
+        return 1;
+    }
+    if (positive) {
+        if (significand <= (uint64_t)TAIDA_WASM_I64_MAX) {
+            v->type = WC_JSON_INT;
+            v->int_val = (int64_t)significand;
+            v->float_val = (double)v->int_val;
+        } else {
+            /* Beyond Int: only a Float schema can take it. */
+            v->type = WC_JSON_FLOAT;
+            v->float_val = (double)significand;
+        }
+        return 1;
+    }
+    if (significand > (uint64_t)TAIDA_WASM_I64_MAX + 1 || significand == 0) {
+        /* Below the Int range, or `-0`: a Float. */
+        v->type = WC_JSON_FLOAT;
+        v->float_val = -(double)significand;
+        return 1;
+    }
+    v->type = WC_JSON_INT;
+    v->int_val = significand == (uint64_t)TAIDA_WASM_I64_MAX + 1 ? TAIDA_WASM_I64_MIN : -(int64_t)significand;
+    v->float_val = (double)v->int_val;
+    return 1;
+}
+
+static int _wc_json_parse_literal(_wc_json_reader *r, const char *word, int len) {
+    if (r->end - r->p < len || _wf_strncmp((const char *)r->p, word, len) != 0) return 0;
+    r->p += len;
+    return 1;
+}
+
+static int _wc_json_parse_array(_wc_json_reader *r, wc_json_val *v) {
+    if (r->nesting >= _WC_JSON_MAX_NESTING) return 0;
+    r->nesting++;
+    r->p++;  /* '[' */
+    v->type = WC_JSON_ARRAY;
+    v->arr = (wc_json_array *)wasm_alloc(sizeof(wc_json_array));
+    v->arr->count = 0;
+    v->arr->cap = 4;
+    v->arr->items = (wc_json_val *)wasm_alloc((unsigned int)(4 * sizeof(wc_json_val)));
+    _wc_json_skip_ws(r);
+    if (_wc_json_at(r, ']')) {
+        r->p++;
+        r->nesting--;
+        return 1;
+    }
+    for (;;) {
+        wc_json_val item;
+        if (!_wc_json_parse_value(r, &item)) return 0;
+        if (v->arr->count >= v->arr->cap) {
+            int new_cap = v->arr->cap * 2;
             wc_json_val *new_items = (wc_json_val *)wasm_alloc(
                 (unsigned int)(new_cap * sizeof(wc_json_val)));
-            for (int i = 0; i < v.arr->count; i++) new_items[i] = v.arr->items[i];
-            v.arr->items = new_items;
-            v.arr->cap = new_cap;
+            for (int i = 0; i < v->arr->count; i++) new_items[i] = v->arr->items[i];
+            v->arr->items = new_items;
+            v->arr->cap = new_cap;
         }
-        v.arr->items[v.arr->count++] = item;
-        _wc_json_skip_ws(p);
-        if (**p == ',') { (*p)++; _wc_json_skip_ws(p); }
-        else break;
+        v->arr->items[v->arr->count++] = item;
+        _wc_json_skip_ws(r);
+        if (_wc_json_at(r, ',')) {
+            r->p++;
+            continue;
+        }
+        if (_wc_json_at(r, ']')) {
+            r->p++;
+            break;
+        }
+        return 0;
     }
-    if (**p == ']') (*p)++;
-    return v;
+    r->nesting--;
+    return 1;
 }
 
-static wc_json_val _wc_json_parse_object(const char **p) {
-    wc_json_val v;
-    v.type = WC_JSON_OBJECT;
-    v.str_val = (char *)0; v.arr = (wc_json_array *)0;
-    v.int_val = 0; v.float_val = 0.0;
-    v.obj = (wc_json_obj *)wasm_alloc(sizeof(wc_json_obj));
-    v.obj->count = 0;
-    v.obj->cap = 8;
-    v.obj->entries = (wc_json_obj_entry *)wasm_alloc(
+static int _wc_json_parse_object(_wc_json_reader *r, wc_json_val *v) {
+    if (r->nesting >= _WC_JSON_MAX_NESTING) return 0;
+    r->nesting++;
+    r->p++;  /* '{' */
+    v->type = WC_JSON_OBJECT;
+    v->obj = (wc_json_obj *)wasm_alloc(sizeof(wc_json_obj));
+    v->obj->count = 0;
+    v->obj->cap = 8;
+    v->obj->entries = (wc_json_obj_entry *)wasm_alloc(
         (unsigned int)(8 * sizeof(wc_json_obj_entry)));
-    (*p)++;
-    _wc_json_skip_ws(p);
-    if (**p == '}') { (*p)++; return v; }
-    while (**p) {
-        _wc_json_skip_ws(p);
-        char *key = _wc_json_parse_string_raw(p);
-        _wc_json_skip_ws(p);
-        if (**p == ':') (*p)++;
-        _wc_json_skip_ws(p);
-        wc_json_val val = _wc_json_parse_value(p);
-        if (v.obj->count >= v.obj->cap) {
-            int new_cap = v.obj->cap * 2;
+    _wc_json_skip_ws(r);
+    if (_wc_json_at(r, '}')) {
+        r->p++;
+        r->nesting--;
+        return 1;
+    }
+    for (;;) {
+        _wc_json_skip_ws(r);
+        int key_len = 0;
+        char *key = _wc_json_read_string(r, &key_len);
+        if (!key) return 0;
+        _wc_json_skip_ws(r);
+        if (!_wc_json_at(r, ':')) return 0;
+        r->p++;
+        wc_json_val val;
+        if (!_wc_json_parse_value(r, &val)) return 0;
+        if (v->obj->count >= v->obj->cap) {
+            int new_cap = v->obj->cap * 2;
             wc_json_obj_entry *new_entries = (wc_json_obj_entry *)wasm_alloc(
                 (unsigned int)(new_cap * sizeof(wc_json_obj_entry)));
-            for (int i = 0; i < v.obj->count; i++) new_entries[i] = v.obj->entries[i];
-            v.obj->entries = new_entries;
-            v.obj->cap = new_cap;
+            for (int i = 0; i < v->obj->count; i++) new_entries[i] = v->obj->entries[i];
+            v->obj->entries = new_entries;
+            v->obj->cap = new_cap;
         }
-        v.obj->entries[v.obj->count].key = key;
-        v.obj->entries[v.obj->count].value = val;
-        v.obj->count++;
-        _wc_json_skip_ws(p);
-        if (**p == ',') { (*p)++; _wc_json_skip_ws(p); }
-        else break;
+        v->obj->entries[v->obj->count].key = key;
+        v->obj->entries[v->obj->count].key_len = key_len;
+        v->obj->entries[v->obj->count].value = val;
+        v->obj->count++;
+        _wc_json_skip_ws(r);
+        if (_wc_json_at(r, ',')) {
+            r->p++;
+            continue;
+        }
+        if (_wc_json_at(r, '}')) {
+            r->p++;
+            break;
+        }
+        return 0;
     }
-    if (**p == '}') (*p)++;
-    return v;
+    r->nesting--;
+    return 1;
 }
 
-static wc_json_val _wc_json_parse_value(const char **p) {
-    _wc_json_skip_ws(p);
-    wc_json_val v;
-    v.str_val = (char *)0; v.arr = (wc_json_array *)0; v.obj = (wc_json_obj *)0;
-    v.int_val = 0; v.float_val = 0.0;
-    if (**p == '"') return _wc_json_parse_string(p);
-    if (**p == '{') return _wc_json_parse_object(p);
-    if (**p == '[') return _wc_json_parse_array(p);
-    if (**p == 't' && _wf_strncmp(*p, "true", 4) == 0) {
-        *p += 4; v.type = WC_JSON_BOOL; v.int_val = 1; return v;
+static int _wc_json_parse_value(_wc_json_reader *r, wc_json_val *out) {
+    _wc_json_val_clear(out);
+    _wc_json_skip_ws(r);
+    if (r->p >= r->end) return 0;
+    switch (*r->p) {
+        case 'n':
+            return _wc_json_parse_literal(r, "null", 4);
+        case 't':
+            if (!_wc_json_parse_literal(r, "true", 4)) return 0;
+            out->type = WC_JSON_BOOL;
+            out->int_val = 1;
+            return 1;
+        case 'f':
+            if (!_wc_json_parse_literal(r, "false", 5)) return 0;
+            out->type = WC_JSON_BOOL;
+            out->int_val = 0;
+            return 1;
+        case '"': {
+            int len = 0;
+            char *s = _wc_json_read_string(r, &len);
+            if (!s) return 0;
+            out->type = WC_JSON_STRING;
+            out->str_val = s;
+            out->str_len = len;
+            return 1;
+        }
+        case '[':
+            return _wc_json_parse_array(r, out);
+        case '{':
+            return _wc_json_parse_object(r, out);
+        default:
+            if (*r->p == '-' || (*r->p >= '0' && *r->p <= '9')) {
+                return _wc_json_parse_number(r, out);
+            }
+            return 0;
     }
-    if (**p == 'f' && _wf_strncmp(*p, "false", 5) == 0) {
-        *p += 5; v.type = WC_JSON_BOOL; v.int_val = 0; return v;
-    }
-    if (**p == 'n' && _wf_strncmp(*p, "null", 4) == 0) {
-        *p += 4; v.type = WC_JSON_NULL; v.int_val = 0; return v;
-    }
-    if (**p == '-' || (**p >= '0' && **p <= '9')) return _wc_json_parse_number(p);
-    v.type = WC_JSON_NULL; v.int_val = 0;
-    return v;
+}
+
+/* A whole document: one value, surrounded by whitespace only. */
+static int _wc_json_parse_document(const char *raw, wc_json_val *out) {
+    _wc_json_reader r;
+    r.p = (const unsigned char *)raw;
+    r.end = r.p + _wf_strlen(raw);
+    r.nesting = 0;
+    if (!_wc_json_parse_value(&r, out)) return 0;
+    _wc_json_skip_ws(&r);
+    return r.p == r.end;
 }
 
 /* ── JSON object field lookup ── */
+/* A repeated key keeps its last value, as in the interpreter. */
 static wc_json_val *_wc_json_obj_get(wc_json_obj *obj, const char *key) {
     if (!obj) return (wc_json_val *)0;
-    for (int i = 0; i < obj->count; i++) {
-        if (_wf_strcmp(obj->entries[i].key, key) == 0) {
-            return &obj->entries[i].value;
+    int key_len = _wf_strlen(key);
+    for (int i = obj->count - 1; i >= 0; i--) {
+        wc_json_obj_entry *e = &obj->entries[i];
+        if (e->key_len == key_len && _wf_strncmp(e->key, key, key_len) == 0) {
+            return &e->value;
         }
     }
     return (wc_json_val *)0;
@@ -642,16 +957,114 @@ static int _wc_schema_find_closing_brace(const char *desc) {
     return i;
 }
 
-static int64_t _wc_json_default_value_for_desc(const char *desc) {
+/* A self-referential type cannot be spelled out in full, so the compiler
+   writes `N{Name}` where a type refers back to an enclosing
+   `T{Name|...}` (the same scheme as the native runtime). The walkers keep
+   a chain of the TypeDefs they are inside; `N{Name}` resolves to the
+   nearest one with that name. `defaulting` marks a TypeDef being built
+   from its defaults (the value is missing, null or not an object): a
+   reference back to it from inside becomes the `@(__type <= Name)` stub,
+   like the default of a self-referential type built anywhere else. */
+typedef struct _wc_json_schema_frame {
+    const char *type_desc;    /* the 'T' that opens the TypeDef */
+    const char *name;
+    int name_len;
+    int defaulting;
+    const struct _wc_json_schema_frame *parent;
+} _wc_json_schema_frame;
+
+static const _wc_json_schema_frame *_wc_json_schema_resolve_ref(
+        const char **desc, const _wc_json_schema_frame *frames) {
+    const char *d = *desc;
+    if (d[1] != '{') {
+        *desc = d + 1;
+        return (const _wc_json_schema_frame *)0;
+    }
+    d += 2;
+    const char *name = d;
+    while (*d && *d != '}') d++;
+    int name_len = (int)(d - name);
+    if (*d == '}') d++;
+    *desc = d;
+    for (const _wc_json_schema_frame *f = frames; f; f = f->parent) {
+        if (f->name_len == name_len && _wf_strncmp(f->name, name, name_len) == 0) return f;
+    }
+    return (const _wc_json_schema_frame *)0;
+}
+
+static const char *_wc_json_schema_enter_typedef(const char *d, _wc_json_schema_frame *frame,
+                                                 const _wc_json_schema_frame *parent,
+                                                 int defaulting) {
+    frame->type_desc = d;
+    frame->parent = parent;
+    frame->defaulting = defaulting;
+    d += 2;  /* skip "T{" */
+    frame->name = d;
+    while (*d && *d != '|' && *d != '}') d++;
+    frame->name_len = (int)(d - frame->name);
+    if (*d == '|') d++;
+    return d;
+}
+
+static int64_t _wc_json_type_name_str(const _wc_json_schema_frame *frame) {
+    char *s = _wasm_str_alloc((unsigned int)(frame->name_len + 1));
+    _wf_memcpy(s, frame->name, frame->name_len);
+    s[frame->name_len] = '\0';
+    return (int64_t)(intptr_t)s;
+}
+
+/* `@(__type <= Name)`: the default of a self-referential type at the
+   point where it refers back to itself. */
+static int64_t _wc_json_self_ref_stub(const _wc_json_schema_frame *frame) {
+    int64_t pack = taida_pack_new(1);
+    taida_pack_set_hash(pack, 0, (int64_t)_wc_fnv1a("__type", 6));
+    taida_pack_set(pack, 0, _wc_json_type_name_str(frame));
+    taida_pack_set_tag(pack, 0, WASM_TAG_STR);
+    return pack;
+}
+
+/* The rebuild hooks the compiler passes for TypeDefs with methods: a list
+   `[TypeName, function, ...]`. The reader only fills in the data fields
+   of a pack; the function turns that pack into the full instance
+   (`TypeName(...)` with the same fields, methods included). */
+static int64_t _wc_json_run_type_hook(int64_t hooks, const _wc_json_schema_frame *frame, int64_t pack) {
+    if (!hooks) return pack;
+    int64_t *list = (int64_t *)(intptr_t)hooks;
+    int64_t len = list[1];
+    for (int64_t i = 0; i + 1 < len; i += 2) {
+        const char *name = (const char *)(intptr_t)list[WASM_LIST_ELEMS + i];
+        if (!name) continue;
+        if (_wf_strlen(name) == frame->name_len
+            && _wf_strncmp(name, frame->name, frame->name_len) == 0) {
+            return taida_invoke_callback1(list[WASM_LIST_ELEMS + i + 1], pack);
+        }
+    }
+    return pack;
+}
+
+static void _wc_json_skip_schema_desc(const char **desc) {
+    const char *d = *desc;
+    if (!d || !*d) return;
+    if ((d[0] == 'T' || d[0] == 'L' || d[0] == 'E' || d[0] == 'N') && d[1] == '{') {
+        d += 2;
+        d += _wc_schema_find_closing_brace(d);
+        if (*d == '}') d++;
+        *desc = d;
+        return;
+    }
+    *desc = d + 1;
+}
+
+static int64_t _wc_json_apply_schema(wc_json_val *jval, const char **desc,
+                                     const _wc_json_schema_frame *frames, int64_t hooks,
+                                     int64_t *out_tag);
+
+static int64_t _wc_json_default_value_for_desc(const char *desc, int64_t hooks) {
     if (!desc || !*desc) return 0;
     switch (desc[0]) {
         case 'i': return 0;
         case 'f': return _d2l(0.0);
-        case 's': {
-            char *empty = _wasm_str_alloc(1);
-            empty[0] = '\0';
-            return (int64_t)(intptr_t)empty;
-        }
+        case 's': return taida_str_alloc(0);
         case 'b': return 0;
         case 'y': return _wc_json_bytes_from_raw((const unsigned char *)"", 0);
         /* F62B-015: defaults are built through the MISSING-value path
@@ -665,7 +1078,8 @@ static int64_t _wc_json_default_value_for_desc(const char *desc) {
             return _wc_json_apply_web_response((wc_json_val *)0);
         }
         case 'T': {
-            return _wc_json_apply_schema((wc_json_val *)0, &desc);
+            int64_t tag;
+            return _wc_json_apply_schema((wc_json_val *)0, &desc, (const _wc_json_schema_frame *)0, hooks, &tag);
         }
         case 'L': {
             return taida_list_new();
@@ -689,23 +1103,6 @@ static int64_t _wc_json_to_int(wc_json_val *jv) {
             return r;
         }
         default: return 0;
-    }
-}
-
-static int64_t _wc_json_to_float(wc_json_val *jv) {
-    if (!jv) return _d2l(0.0);
-    switch (jv->type) {
-        case WC_JSON_FLOAT: return _d2l(jv->float_val);
-        case WC_JSON_INT: return _d2l((double)jv->int_val);
-        case WC_JSON_BOOL: return _d2l(jv->int_val ? 1.0 : 0.0);
-        case WC_JSON_STRING: {
-            if (!jv->str_val) return _d2l(0.0);
-            const char *end;
-            double r = _wc_strtod(jv->str_val, &end);
-            if (*end != '\0') return _d2l(0.0);
-            return _d2l(r);
-        }
-        default: return _d2l(0.0);
     }
 }
 
@@ -735,63 +1132,153 @@ static int64_t _wc_json_to_str(wc_json_val *jv) {
     }
 }
 
-static int64_t _wc_json_to_bool(wc_json_val *jv) {
-    if (!jv) return 0;
-    switch (jv->type) {
-        case WC_JSON_BOOL: return jv->int_val;
-        case WC_JSON_INT: return jv->int_val != 0 ? 1 : 0;
-        case WC_JSON_FLOAT: return jv->float_val != 0.0 ? 1 : 0;
-        case WC_JSON_STRING: return (jv->str_val && jv->str_val[0]) ? 1 : 0;
-        case WC_JSON_NULL: return 0;
-        default: return 0;
+/* Whether a JSON value has the kinds the schema asks for, like the
+   interpreter's json_to_typed_value_checked: a present value of the wrong
+   kind (a null list element included) fails the cast, while a missing or
+   null object field just takes its default. */
+static int _wc_json_matches_schema(wc_json_val *jval, const char **desc,
+                                   const _wc_json_schema_frame *frames) {
+    const char *d = *desc;
+    if (!d || !*d) return 0;
+    switch (d[0]) {
+        case 'i':
+            *desc = d + 1;
+            return jval && jval->type == WC_JSON_INT;
+        case 'f':
+            *desc = d + 1;
+            return jval && (jval->type == WC_JSON_INT || jval->type == WC_JSON_FLOAT);
+        case 's':
+            *desc = d + 1;
+            return jval && jval->type == WC_JSON_STRING;
+        case 'b':
+            *desc = d + 1;
+            return jval && jval->type == WC_JSON_BOOL;
+        case 'T': {
+            if (d[1] != '{') {
+                *desc = d + 1;
+                return 0;
+            }
+            _wc_json_schema_frame frame;
+            d = _wc_json_schema_enter_typedef(d, &frame, frames, 0);
+            int object_ok = (jval && jval->type == WC_JSON_OBJECT);
+            int matches = object_ok;
+            while (*d && *d != '}') {
+                char fname[256];
+                int fn_len = 0;
+                while (*d && *d != ':' && *d != '}' && fn_len < 255) { fname[fn_len++] = *d; d++; }
+                fname[fn_len] = '\0';
+                if (*d == ':') d++;
+                wc_json_val *field_jval = object_ok ? _wc_json_obj_get(jval->obj, fname) : (wc_json_val *)0;
+                if (field_jval && field_jval->type != WC_JSON_NULL) {
+                    if (!_wc_json_matches_schema(field_jval, &d, &frame)) matches = 0;
+                } else {
+                    _wc_json_skip_schema_desc(&d);
+                }
+                if (*d == ',') d++;
+            }
+            if (*d == '}') d++;
+            *desc = d;
+            return matches;
+        }
+        case 'N': {
+            const _wc_json_schema_frame *target = _wc_json_schema_resolve_ref(desc, frames);
+            if (!target) return 0;
+            const char *type_desc = target->type_desc;
+            return _wc_json_matches_schema(jval, &type_desc, frames);
+        }
+        case 'L': {
+            if (d[1] != '{') {
+                *desc = d + 1;
+                return 0;
+            }
+            d += 2;
+            int inner_len = _wc_schema_find_closing_brace(d);
+            int matches = (jval && jval->type == WC_JSON_ARRAY && jval->arr);
+            if (matches) {
+                for (int i = 0; i < jval->arr->count; i++) {
+                    const char *elem_desc = d;
+                    if (!_wc_json_matches_schema(&jval->arr->items[i], &elem_desc, frames)) {
+                        matches = 0;
+                        break;
+                    }
+                }
+            }
+            d += inner_len;
+            if (*d == '}') d++;
+            *desc = d;
+            return matches;
+        }
+        case 'E': {
+            /* E{EnumName|Variant1,Variant2,...}: a string naming a variant */
+            if (d[1] != '{') {
+                *desc = d + 1;
+                return 0;
+            }
+            d += 2;
+            while (*d && *d != '|' && *d != '}') d++;
+            if (*d == '|') d++;
+            int matches = 0;
+            int is_string = (jval && jval->type == WC_JSON_STRING && jval->str_val);
+            while (*d && *d != '}') {
+                const char *vstart = d;
+                while (*d && *d != ',' && *d != '}') d++;
+                int vlen = (int)(d - vstart);
+                if (!matches && is_string && jval->str_len == vlen
+                    && _wf_strncmp(jval->str_val, vstart, vlen) == 0) {
+                    matches = 1;
+                }
+                if (*d == ',') d++;
+            }
+            if (*d == '}') d++;
+            *desc = d;
+            return matches;
+        }
+        default:
+            /* Bytes / WebRequest / WebResponse report their own decode
+               failures through _wc_json_schema_fail. */
+            _wc_json_skip_schema_desc(desc);
+            return 1;
     }
 }
 
 /* ── Apply schema descriptor to JSON value ── */
-/* F62B-015: schema casting validates JSON kinds like the interpreter
-   (json_to_typed_value_checked). A missing field (NULL jval — object-field
-   misses are normalised to NULL in the 'T' arm, including explicit JSON
-   null) takes the type default and stays a successful cast; a PRESENT
-   value of the wrong JSON kind marks the whole cast failed so the mold
-   returns Lax.has_value=false instead of silently coercing. */
-static int64_t _wc_json_apply_schema(wc_json_val *jval, const char **desc) {
+/* Builds the typed value; `*out_tag` receives its kind tag so containers
+   can record it. A missing or null object field takes the type default.
+   Whether the value's kinds matched is decided by _wc_json_matches_schema. */
+static int64_t _wc_json_apply_schema(wc_json_val *jval, const char **desc,
+                                     const _wc_json_schema_frame *frames, int64_t hooks,
+                                     int64_t *out_tag) {
+    /* WASM_TAG_UNKNOWN: no kind to record (the container keeps its
+       unstamped slot, as before kinds were recorded here). */
+    *out_tag = WASM_TAG_UNKNOWN;
     if (!desc || !*desc || !**desc) return 0;
     const char *d = *desc;
 
     switch (d[0]) {
         case 'i': {
             *desc = d + 1;
-            if (!jval) return 0;
-            if (jval->type == WC_JSON_INT) return jval->int_val;
-            if (jval->type == WC_JSON_FLOAT
-                && jval->float_val == (double)(int64_t)jval->float_val) {
-                return (int64_t)jval->float_val;
-            }
-            _wc_json_schema_fail("JSON schema decode failed: expected an integer");
-            return 0;
+            *out_tag = WASM_TAG_INT;
+            return (jval && jval->type == WC_JSON_INT) ? jval->int_val : 0;
         }
         case 'f': {
             *desc = d + 1;
-            if (!jval) return _d2l(0.0);
-            if (jval->type == WC_JSON_INT || jval->type == WC_JSON_FLOAT) {
-                return _wc_json_to_float(jval);
-            }
-            _wc_json_schema_fail("JSON schema decode failed: expected a number");
+            *out_tag = WASM_TAG_FLOAT;
+            if (jval && jval->type == WC_JSON_INT) return _d2l((double)jval->int_val);
+            if (jval && jval->type == WC_JSON_FLOAT) return _d2l(jval->float_val);
             return _d2l(0.0);
         }
         case 's': {
             *desc = d + 1;
-            if (!jval) return taida_str_alloc(0);
-            if (jval->type == WC_JSON_STRING) return _wc_json_to_str(jval);
-            _wc_json_schema_fail("JSON schema decode failed: expected a string");
+            *out_tag = WASM_TAG_STR;
+            if (jval && jval->type == WC_JSON_STRING && jval->str_val) {
+                return taida_str_new_copy((int64_t)(intptr_t)jval->str_val);
+            }
             return taida_str_alloc(0);
         }
         case 'b': {
             *desc = d + 1;
-            if (!jval) return 0;
-            if (jval->type == WC_JSON_BOOL) return jval->int_val ? 1 : 0;
-            _wc_json_schema_fail("JSON schema decode failed: expected a boolean");
-            return 0;
+            *out_tag = WASM_TAG_BOOL;
+            return (jval && jval->type == WC_JSON_BOOL && jval->int_val) ? 1 : 0;
         }
         case 'y': {
             *desc = d + 1;
@@ -814,12 +1301,9 @@ static int64_t _wc_json_apply_schema(wc_json_val *jval, const char **desc) {
         }
         case 'T': {
             if (d[1] != '{') { *desc = d + 1; return 0; }
-            d += 2;
-            char type_name[256];
-            int tn_len = 0;
-            while (*d && *d != '|' && tn_len < 255) { type_name[tn_len++] = *d; d++; }
-            type_name[tn_len] = '\0';
-            if (*d == '|') d++;
+            int is_object = (jval && jval->type == WC_JSON_OBJECT);
+            _wc_json_schema_frame frame;
+            d = _wc_json_schema_enter_typedef(d, &frame, frames, !is_object);
 
             int field_count = 0;
             {
@@ -836,13 +1320,6 @@ static int64_t _wc_json_apply_schema(wc_json_val *jval, const char **desc) {
 
             int64_t pack = taida_pack_new(field_count + 1);
 
-            /* A present non-object (including explicit null) cannot cast to
-               a record schema; a NULL jval (missing nested field) builds
-               the all-defaults pack and stays successful. */
-            if (jval && jval->type != WC_JSON_OBJECT) {
-                _wc_json_schema_fail("JSON schema decode failed: expected an object");
-            }
-
             int idx = 0;
             while (*d && *d != '}') {
                 char fname[256];
@@ -855,7 +1332,7 @@ static int64_t _wc_json_apply_schema(wc_json_val *jval, const char **desc) {
                 taida_pack_set_hash(pack, idx, (int64_t)hash);
 
                 wc_json_val *field_jval = (wc_json_val *)0;
-                if (jval && jval->type == WC_JSON_OBJECT) {
+                if (is_object) {
                     field_jval = _wc_json_obj_get(jval->obj, fname);
                 }
                 /* Explicit JSON null is field absence (null-exclusion
@@ -864,8 +1341,10 @@ static int64_t _wc_json_apply_schema(wc_json_val *jval, const char **desc) {
                     field_jval = (wc_json_val *)0;
                 }
 
-                int64_t field_val = _wc_json_apply_schema(field_jval, &d);
+                int64_t field_tag;
+                int64_t field_val = _wc_json_apply_schema(field_jval, &d, &frame, hooks, &field_tag);
                 taida_pack_set(pack, idx, field_val);
+                if (field_tag != WASM_TAG_UNKNOWN) taida_pack_set_tag(pack, idx, field_tag);
                 idx++;
 
                 if (*d == ',') d++;
@@ -874,32 +1353,37 @@ static int64_t _wc_json_apply_schema(wc_json_val *jval, const char **desc) {
 
             uint64_t type_hash = _wc_fnv1a("__type", 6);
             taida_pack_set_hash(pack, idx, (int64_t)type_hash);
-            char *type_str = _wasm_str_alloc((unsigned int)(tn_len + 1));
-            _wf_memcpy(type_str, type_name, tn_len + 1);
-            taida_pack_set(pack, idx, (int64_t)(intptr_t)type_str);
+            taida_pack_set(pack, idx, _wc_json_type_name_str(&frame));
+            taida_pack_set_tag(pack, idx, WASM_TAG_STR);
 
             *desc = d;
-            return pack;
+            *out_tag = WASM_TAG_PACK;
+            return _wc_json_run_type_hook(hooks, &frame, pack);
+        }
+        case 'N': {
+            const _wc_json_schema_frame *target = _wc_json_schema_resolve_ref(desc, frames);
+            if (!target) return 0;
+            *out_tag = WASM_TAG_PACK;
+            if (!jval && target->defaulting) return _wc_json_self_ref_stub(target);
+            const char *type_desc = target->type_desc;
+            return _wc_json_apply_schema(jval, &type_desc, frames, hooks, out_tag);
         }
         case 'L': {
+            *out_tag = WASM_TAG_LIST;
             if (d[1] != '{') { *desc = d + 1; return taida_list_new(); }
             d += 2;
             int inner_len = _wc_schema_find_closing_brace(d);
-            char *inner_desc = _wasm_str_alloc((unsigned int)(inner_len + 1));
-            _wf_memcpy(inner_desc, d, inner_len);
-            inner_desc[inner_len] = '\0';
 
             int64_t list = taida_list_new();
-
-            /* Present non-array (including explicit null) is a failed cast;
-               a missing field stays the empty-list default. */
-            if (jval && jval->type != WC_JSON_ARRAY) {
-                _wc_json_schema_fail("JSON schema decode failed: expected an array");
-            }
             if (jval && jval->type == WC_JSON_ARRAY && jval->arr) {
                 for (int i = 0; i < jval->arr->count; i++) {
-                    const char *elem_desc = inner_desc;
-                    int64_t elem = _wc_json_apply_schema(&jval->arr->items[i], &elem_desc);
+                    const char *elem_desc = d;
+                    wc_json_val *item = &jval->arr->items[i];
+                    int64_t elem_tag;
+                    int64_t elem = _wc_json_apply_schema(
+                        item->type == WC_JSON_NULL ? (wc_json_val *)0 : item,
+                        &elem_desc, frames, hooks, &elem_tag);
+                    if (elem_tag != WASM_TAG_UNKNOWN) taida_list_set_elem_tag(list, elem_tag);
                     list = taida_list_push(list, elem);
                 }
             }
@@ -908,6 +1392,43 @@ static int64_t _wc_json_apply_schema(wc_json_val *jval, const char **desc) {
             if (*d == '}') d++;
             *desc = d;
             return list;
+        }
+        case 'E': {
+            /* E{EnumName|Variant1,Variant2,...}: a string naming a variant
+               becomes its ordinal; anything else is the failed Lax[Enum]
+               (value and default 0, the first variant). */
+            if (d[1] != '{') {
+                *desc = d + 1;
+                *out_tag = WASM_TAG_PACK;
+                return taida_lax_empty(0);
+            }
+            d += 2;
+            while (*d && *d != '|' && *d != '}') d++;
+            if (*d == '|') d++;
+            int is_string = (jval && jval->type == WC_JSON_STRING && jval->str_val);
+            int matched = 0;
+            int64_t ordinal = 0;
+            int64_t current = 0;
+            while (*d && *d != '}') {
+                const char *vstart = d;
+                while (*d && *d != ',' && *d != '}') d++;
+                int vlen = (int)(d - vstart);
+                if (!matched && is_string && jval->str_len == vlen
+                    && _wf_strncmp(jval->str_val, vstart, vlen) == 0) {
+                    ordinal = current;
+                    matched = 1;
+                }
+                current++;
+                if (*d == ',') d++;
+            }
+            if (*d == '}') d++;
+            *desc = d;
+            if (matched) {
+                *out_tag = WASM_TAG_INT;
+                return ordinal;
+            }
+            *out_tag = WASM_TAG_PACK;
+            return taida_lax_empty(0);
         }
         default: {
             *desc = d + 1;
@@ -920,49 +1441,49 @@ static int64_t _wc_json_apply_schema(wc_json_val *jval, const char **desc) {
    WC-4: Public JSON API functions
    ══════════════════════════════════════════════════════════════════════════ */
 
-/* JSON[raw, Schema]() -> Lax[T] */
-int64_t taida_json_schema_cast(int64_t raw_ptr, int64_t schema_ptr) {
+/* JSON[raw, Schema]() -> Lax[T]. `hooks` is 0 or the rebuild hooks for
+   TypeDefs with methods (see _wc_json_run_type_hook). */
+int64_t taida_json_schema_cast_hooked(int64_t raw_ptr, int64_t schema_ptr, int64_t hooks) {
     const char *raw = (const char *)(intptr_t)raw_ptr;
     const char *schema = (const char *)(intptr_t)schema_ptr;
 
     if (!raw || !schema) {
-        int64_t def = _wc_json_default_value_for_desc(schema);
+        int64_t def = _wc_json_default_value_for_desc(schema, hooks);
         return taida_lax_empty_error(def, taida_make_error_with_kind(WSTR("JsonError"), WSTR("JSON parse error: missing raw value or schema"), WSTR("parse")));
     }
 
-    const char *p = raw;
-    _wc_json_skip_ws(&p);
-    if (!*p) {
-        int64_t def = _wc_json_default_value_for_desc(schema);
-        return taida_lax_empty_error(def, taida_make_error_with_kind(WSTR("JsonError"), WSTR("JSON parse error: empty input"), WSTR("parse")));
-    }
-
-    const char *before_parse = p;
-    wc_json_val jval = _wc_json_parse_value(&p);
-
-    if (p == before_parse) {
-        int64_t def = _wc_json_default_value_for_desc(schema);
+    wc_json_val jval;
+    if (!_wc_json_parse_document(raw, &jval)) {
+        /* Every malformed document reports the same error, like the
+           interpreter. */
+        int64_t def = _wc_json_default_value_for_desc(schema, hooks);
         return taida_lax_empty_error(def, taida_make_error_with_kind(WSTR("JsonError"), WSTR("JSON parse error: invalid input"), WSTR("parse")));
-    }
-
-    _wc_json_skip_ws(&p);
-    if (*p != '\0') {
-        int64_t def = _wc_json_default_value_for_desc(schema);
-        return taida_lax_empty_error(def, taida_make_error_with_kind(WSTR("JsonError"), WSTR("JSON parse error: trailing input"), WSTR("parse")));
     }
 
     const char *desc = schema;
     _wc_json_schema_error = 0;
     _wc_json_schema_error_message = (const char *)0;
-    int64_t result = _wc_json_apply_schema(&jval, &desc);
-    int64_t def = _wc_json_default_value_for_desc(schema);
+    int64_t result_tag;
+    int64_t result = _wc_json_apply_schema(&jval, &desc, (const _wc_json_schema_frame *)0, hooks, &result_tag);
+    const char *match_desc = schema;
+    int matches = _wc_json_matches_schema(&jval, &match_desc, (const _wc_json_schema_frame *)0);
+    int64_t def = _wc_json_default_value_for_desc(schema, hooks);
     if (_wc_json_schema_error) {
         const char *message = _wc_json_schema_error_message
             ? _wc_json_schema_error_message
             : "JSON schema decode failed";
-        return taida_lax_empty_error(def, taida_make_error_with_kind(WSTR("JsonError"), (int64_t)(intptr_t)message, WSTR("schema")));
+        /* `message` is a C string: copy it into a Taida Str so it reads as
+           text, not as a pointer-valued integer. */
+        return taida_lax_empty_error(def, taida_make_error_with_kind(WSTR("JsonError"), taida_str_new_copy((int64_t)(intptr_t)message), WSTR("schema")));
     }
+    /* A kind mismatch keeps the typed value (fields that did match keep
+       their values), like the interpreter. */
+    if (!matches) return taida_lax_empty(result);
     return taida_lax_new(result, def);
+}
+
+int64_t taida_json_schema_cast(int64_t raw_ptr, int64_t schema_ptr) {
+    return taida_json_schema_cast_hooked(raw_ptr, schema_ptr, 0);
 }
 
 /* taida_json_parse: copy raw JSON string */
@@ -1114,6 +1635,53 @@ static void _wc_jb_ensure(_wc_json_buf *jb, int needed) {
     }
 }
 
+/* A finite Float in JSON (native twin: json_format_float): the shortest
+   digits that read back as the same double, in plain notation when the
+   decimal exponent is in -5..15 ("1.5", "100.0", "0.00015") and as
+   "1.5e-7" / "1e+21" otherwise. Writes at most 26 bytes and a NUL. */
+static void _wc_json_format_float(double d, char *out) {
+    uint64_t b = _tf_bits(d);
+    char dg[24];
+    int ex = 0, n, e, i, pos = 0;
+    if (b >> 63) out[pos++] = '-';
+    if ((b << 1) == 0) {
+        out[pos++] = '0'; out[pos++] = '.'; out[pos++] = '0'; out[pos] = '\0';
+        return;
+    }
+    n = _tf_shortest(d, dg, &ex); /* |d| = 0.dg * 10^ex */
+    e = ex - 1;                   /* |d| = d.g * 10^e */
+    if (e >= -5 && e <= 15) {
+        if (n - 1 <= e) {
+            for (i = 0; i < n; i++) out[pos++] = dg[i];
+            for (i = n; i <= e; i++) out[pos++] = '0';
+            out[pos++] = '.'; out[pos++] = '0';
+        } else if (e >= 0) {
+            for (i = 0; i < n; i++) {
+                out[pos++] = dg[i];
+                if (i == e) out[pos++] = '.';
+            }
+        } else {
+            out[pos++] = '0'; out[pos++] = '.';
+            for (i = 1; i < -e; i++) out[pos++] = '0';
+            for (i = 0; i < n; i++) out[pos++] = dg[i];
+        }
+        out[pos] = '\0';
+        return;
+    }
+    out[pos++] = dg[0];
+    if (n > 1) {
+        out[pos++] = '.';
+        for (i = 1; i < n; i++) out[pos++] = dg[i];
+    }
+    out[pos++] = 'e';
+    out[pos++] = e >= 0 ? '+' : '-';
+    if (e < 0) e = -e;
+    if (e >= 100) out[pos++] = (char)('0' + e / 100);
+    if (e >= 10) out[pos++] = (char)('0' + (e / 10) % 10);
+    out[pos++] = (char)('0' + e % 10);
+    out[pos] = '\0';
+}
+
 static void _wc_jb_append(_wc_json_buf *jb, const char *s) {
     int slen = _wf_strlen(s);
     _wc_jb_ensure(jb, slen);
@@ -1141,13 +1709,28 @@ static void _wc_jb_append_escaped_str(_wc_json_buf *jb, const char *s) {
     if (s) {
         const char *p = s;
         while (*p) {
-            switch (*p) {
+            unsigned char c = (unsigned char)*p;
+            switch (c) {
                 case '"':  _wc_jb_append(jb, "\\\""); break;
                 case '\\': _wc_jb_append(jb, "\\\\"); break;
                 case '\n': _wc_jb_append(jb, "\\n"); break;
                 case '\r': _wc_jb_append(jb, "\\r"); break;
                 case '\t': _wc_jb_append(jb, "\\t"); break;
-                default:   _wc_jb_append_char(jb, *p); break;
+                case '\b': _wc_jb_append(jb, "\\b"); break;
+                case '\f': _wc_jb_append(jb, "\\f"); break;
+                default:
+                    if (c < 0x20) {
+                        /* Every other control character must be escaped to
+                           keep the output valid JSON; `\u00XX` with
+                           lowercase hex, like the reference encoder. */
+                        char esc[7] = { '\\', 'u', '0', '0', 0, 0, 0 };
+                        esc[4] = "0123456789abcdef"[c >> 4];
+                        esc[5] = "0123456789abcdef"[c & 15];
+                        _wc_jb_append_len(jb, esc, 6);
+                    } else {
+                        _wc_jb_append_char(jb, (char)c);
+                    }
+                    break;
             }
             p++;
         }
@@ -1165,6 +1748,8 @@ static void _wc_jb_append_indent(_wc_json_buf *jb, int indent, int depth) {
 
 /* Forward declare */
 static void _wc_json_serialize_typed(_wc_json_buf *jb, int64_t val, int indent, int depth, int type_hint);
+static void _wc_json_serialize_desc(_wc_json_buf *jb, int64_t val, const char *desc, const char *root, int indent, int depth);
+static const char *_wc_desc_field(const char *body, const char *name);
 
 /* F62B-019: map a container element's recorded kind (WASM_TAG_* | aux) to
    the serializer's type_hint (0 none / 1 Int / 2 Float / 3 Str / 4 Bool) so
@@ -1179,6 +1764,25 @@ static int _wc_elem_hint_from_ekind(uint32_t ekind) {
         case 3: return 3;  /* WASM_TAG_STR */
         default: return 0;
     }
+}
+
+/* Write the quoted name of the value `ordinal` of the Enum the kind entry
+   `ek` names (native twin: json_append_enum_name). 0 when that Enum's
+   names were never registered (the caller writes the ordinal). */
+static int _wc_jb_append_enum_name(_wc_json_buf *jb, uint32_t ek, int64_t ordinal) {
+    uint32_t id = ek >> 8;
+    if (id == 0 || id >= WASM_ENUM_NAMES_CAP || ordinal < 0) return 0;
+    const char *p = _wasm_enum_names_by_id[id];
+    if (!p) return 0;
+    for (int64_t i = 0; i < ordinal; i++) {
+        while (*p && *p != ',') p++;
+        if (!*p) return 0;
+        p++;
+    }
+    _wc_jb_append_char(jb, '"');
+    while (*p && *p != ',') _wc_jb_append_char(jb, *p++);
+    _wc_jb_append_char(jb, '"');
+    return 1;
 }
 
 /* Helper: check whether a wasm value is a Gorillax / RelaxedGorillax
@@ -1207,6 +1811,27 @@ static int _wc_is_lax_specifically(int64_t *pack) {
     return pack[1 + 2 * 3] == WASM_HASH___DEFAULT ? 1 : 0;
 }
 
+/* The name of variant `ordinal` in "A,B,C" as a JSON string; the
+   ordinal itself when it is out of range. */
+static void _wc_json_append_enum_variant(_wc_json_buf *jb, int64_t ordinal, const char *variants) {
+    const char *start = variants;
+    int64_t idx = 0;
+    for (const char *p = variants;; p++) {
+        if (*p == ',' || *p == '\0' || *p == '}') {
+            if (idx == ordinal) {
+                _wc_jb_append_char(jb, '"');
+                _wc_jb_append_len(jb, start, (int)(p - start));
+                _wc_jb_append_char(jb, '"');
+                return;
+            }
+            if (*p == '\0' || *p == '}') break;
+            idx++;
+            start = p + 1;
+        }
+    }
+    _wc_jb_append(jb, _wc_i64_to_str(ordinal));
+}
+
 /* Helper: serialize pack fields as JSON object (alphabetically sorted)
  *
  * C25B-028: monadic packs (Lax / Gorillax / RelaxedGorillax / Result)
@@ -1219,7 +1844,7 @@ static int _wc_is_lax_specifically(int64_t *pack) {
  * doesn't render as `{}` and an empty-string ptr (or unset) renders as
  * `""`. Matches the native runtime C25B-028 fix.
  */
-static void _wc_json_serialize_pack_fields(_wc_json_buf *jb, int64_t *pack, int64_t fc, int indent, int depth) {
+static void _wc_json_serialize_pack_fields(_wc_json_buf *jb, int64_t *pack, int64_t fc, int indent, int depth, const char *fields_desc, const char *root) {
     int is_monadic = _wc_is_monadic_pack((int64_t)(intptr_t)pack);
     int lax_default_force_type = 0; /* 0 none, 1 Int, 3 Str */
     if (is_monadic && _wc_is_lax_specifically(pack)) {
@@ -1250,12 +1875,17 @@ static void _wc_json_serialize_pack_fields(_wc_json_buf *jb, int64_t *pack, int6
         }
     }
 
-    typedef struct { const char *name; int64_t val; int type_hint; } _WcJsonField;
+    typedef struct { const char *name; int64_t val; int type_hint; const char *variants; const char *desc; } _WcJsonField;
     _WcJsonField fields[100];
     int nfields = 0;
+    /* A Result given no error writes the empty Error its `throw` reads as. */
+    int is_result = _wasm_is_result((int64_t)(intptr_t)pack);
     for (int64_t i = 0; i < fc && nfields < 100; i++) {
         int64_t field_hash = pack[1 + i * 3];
         int64_t field_val = pack[1 + i * 3 + 2];
+        if (is_result && field_hash == WASM_HASH_THROW && field_val == 0) {
+            field_val = taida_result_throw_field((int64_t)(intptr_t)pack);
+        }
         int64_t fname_ptr = taida_lookup_field_name(field_hash);
         const char *fname = (const char *)(intptr_t)fname_ptr;
         if (!fname) continue;
@@ -1270,6 +1900,18 @@ static void _wc_json_serialize_pack_fields(_wc_json_buf *jb, int64_t *pack, int6
         /* Non-monadic packs hide all __ fields. Monadic packs expose
            them so jsonEncode matches the interpreter. */
         if (!is_monadic && fname[0] == '_' && fname[1] == '_') continue;
+        /* Methods belong to the type, not to the value. */
+        if (_wasm_pack_field_is_method(pack, fc, fname)) continue;
+        /* A function has no JSON form; the reference writes null. */
+        if (pack[1 + i * 3 + 1] == WASM_TAG_CLOSURE || taida_is_closure_value(field_val)) {
+            fields[nfields].name = fname;
+            fields[nfields].val = 0;
+            fields[nfields].type_hint = -1;
+            fields[nfields].variants = 0;
+            fields[nfields].desc = 0;
+            nfields++;
+            continue;
+        }
 
         /* F62B-019: the per-slot tag wins over the global field-name
            registry. The registry keys on the FIELD NAME hash alone, so two
@@ -1312,9 +1954,19 @@ static void _wc_json_serialize_pack_fields(_wc_json_buf *jb, int64_t *pack, int6
                 field_val = WSTR("");
             }
         }
+        /* An Enum-typed field holds the ordinal; the wire carries the
+           variant name. The per-pack registration wins over the per-name
+           one (see _wasm_lookup_pack_enum_variants). */
+        const char *variants = _wasm_lookup_pack_enum_variants((int64_t)(intptr_t)pack, field_hash);
+        if (!variants && ftype == WASM_FIELD_TYPE_ENUM)
+            variants = _wasm_lookup_field_enum_variants(field_hash);
         fields[nfields].name = fname;
         fields[nfields].val = field_val;
         fields[nfields].type_hint = (int)ftype;
+        fields[nfields].variants = variants;
+        /* The field's static type, when the caller knows the pack's. */
+        const char *fdesc = fields_desc ? _wc_desc_field(fields_desc, fname) : 0;
+        fields[nfields].desc = (fdesc && fdesc[0] != 'a') ? fdesc : 0;
         nfields++;
     }
     for (int i = 1; i < nfields; i++) {
@@ -1333,13 +1985,54 @@ static void _wc_json_serialize_pack_fields(_wc_json_buf *jb, int64_t *pack, int6
         _wc_jb_append_escaped_str(jb, fields[i].name);
         _wc_jb_append_char(jb, ':');
         if (indent > 0) _wc_jb_append_char(jb, ' ');
-        _wc_json_serialize_typed(jb, fields[i].val, indent, depth + 1, fields[i].type_hint);
+        if (fields[i].type_hint == -1) {
+            _wc_jb_append(jb, "null");
+        } else if (fields[i].desc) {
+            _wc_json_serialize_desc(jb, fields[i].val, fields[i].desc, root, indent, depth + 1);
+        } else if (fields[i].variants) {
+            _wc_json_append_enum_variant(jb, fields[i].val, fields[i].variants);
+        } else {
+            _wc_json_serialize_typed(jb, fields[i].val, indent, depth + 1, fields[i].type_hint);
+        }
     }
     if (indent > 0 && nfields > 0) _wc_jb_append_indent(jb, indent, depth);
     _wc_jb_append_char(jb, '}');
 }
 
+/* jsonEncode / jsonPretty stop past this many levels of nesting, with the
+   message and exit status the native runtime gives (native twin:
+   TAIDA_JSON_MAX_DEPTH): the writer recurses once per level, and a deeper
+   value would run the stack out. */
+#define TAIDA_WASM_JSON_MAX_DEPTH 128
+
+static void _wc_json_depth_exceeded(void) {
+    extern int fd_write(int fd, const void *iovs, int iovs_len, int *nwritten)
+        __attribute__((import_module("wasi_snapshot_preview1"), import_name("fd_write")));
+    const char *msg = "taida: JSON nesting depth limit exceeded\n";
+    int len = 0;
+    while (msg[len]) len++;
+    struct { const char *buf; int len; } iov = { msg, len };
+    int nwritten;
+    fd_write(2, &iov, 1, &nwritten);
+#ifdef TAIDA_WASM_PROFILE_EDGE
+    __builtin_trap();
+#else
+    extern void proc_exit(int code)
+        __attribute__((import_module("wasi_snapshot_preview1"), import_name("proc_exit")));
+    proc_exit(1);
+#endif
+}
+
 static void _wc_json_serialize_typed(_wc_json_buf *jb, int64_t val, int indent, int depth, int type_hint) {
+    if (depth > TAIDA_WASM_JSON_MAX_DEPTH) {
+        _wc_json_depth_exceeded();
+        return;
+    }
+    /* A function has no JSON form; the reference writes null. */
+    if (type_hint == 0 && taida_is_closure_value(val)) {
+        _wc_jb_append(jb, "null");
+        return;
+    }
     if (type_hint == 4) {
         _wc_jb_append(jb, val ? "true" : "false");
         return;
@@ -1356,7 +2049,16 @@ static void _wc_json_serialize_typed(_wc_json_buf *jb, int64_t val, int indent, 
        output wrote the raw bits into the JSON. Render through the
        shared formatter so the output round-trips (native twin). */
     if (type_hint == 2) {
-        _wc_jb_append(jb, (const char *)(intptr_t)taida_float_to_str(val));
+        /* JSON has no NaN / Infinity: non-finite values encode as `null`,
+           as the reference encoder does. */
+        double d = _l2d(val);
+        if (d != d || d - d != 0.0) {
+            _wc_jb_append(jb, "null");
+            return;
+        }
+        char num[40];
+        _wc_json_format_float(d, num);
+        _wc_jb_append(jb, num);
         return;
     }
     if (val == 0) {
@@ -1424,13 +2126,24 @@ static void _wc_json_serialize_typed(_wc_json_buf *jb, int64_t val, int indent, 
                    JSON object-key form. The interpreter skips non-Str keys
                    silently; skip here too instead of emitting whatever the
                    key slot holds as a char*. */
+                uint32_t key_ek = _wasm_hm_key_ek(hm, cap, slot);
+                if (WASM_EKIND_KIND(key_ek) != (uint32_t)WASM_TAG_STR) continue;
                 if (!_wasm_is_string_ptr(sk)) continue;
+                uint32_t value_ek = WASM_HM_VALUE_EK(hm[WASM_HM_KIND_SLOT(cap, slot)]);
+                int entry_hint = WASM_EKIND_KIND(value_ek) == WASM_EKIND_UNKNOWN
+                    ? value_hint : _wc_elem_hint_from_ekind(value_ek);
                 if (count > 0) _wc_jb_append_char(jb, ',');
                 if (indent > 0) _wc_jb_append_indent(jb, indent, depth + 1);
                 _wc_jb_append_escaped_str(jb, (const char *)(intptr_t)sk);
                 _wc_jb_append_char(jb, ':');
                 if (indent > 0) _wc_jb_append_char(jb, ' ');
-                _wc_json_serialize_typed(jb, hm[WASM_HM_HEADER + slot * 3 + 2], indent, depth + 1, value_hint);
+                int64_t value = hm[WASM_HM_HEADER + slot * 3 + 2];
+                if (WASM_EKIND_KIND(value_ek) == (uint32_t)WASM_TAG_ENUM
+                    && _wc_jb_append_enum_name(jb, value_ek, value)) {
+                    count++;
+                    continue;
+                }
+                _wc_json_serialize_typed(jb, value, indent, depth + 1, entry_hint);
                 count++;
             }
         }
@@ -1460,7 +2173,7 @@ static void _wc_json_serialize_typed(_wc_json_buf *jb, int64_t val, int indent, 
     if (_wc_is_result(val) || _wc_is_lax(val) || _wc_is_gorillax_local(val)) {
         int64_t *pack = (int64_t *)(intptr_t)val;
         int64_t fc = pack[0];
-        _wc_json_serialize_pack_fields(jb, pack, fc, indent, depth);
+        _wc_json_serialize_pack_fields(jb, pack, fc, indent, depth, 0, 0);
         return;
     }
 
@@ -1509,7 +2222,7 @@ static void _wc_json_serialize_typed(_wc_json_buf *jb, int64_t val, int indent, 
         if (fc > 0 && fc < 200) {
             int64_t hash0 = obj[1];
             if (hash0 > 0x10000 || hash0 < 0) {
-                _wc_json_serialize_pack_fields(jb, obj, fc, indent, depth);
+                _wc_json_serialize_pack_fields(jb, obj, fc, indent, depth, 0, 0);
                 return;
             }
         }
@@ -1518,6 +2231,145 @@ static void _wc_json_serialize_typed(_wc_json_buf *jb, int64_t val, int indent, 
     /* Default: integer */
     char *num = _wc_i64_to_str(val);
     _wc_jb_append(jb, num);
+}
+
+/* ── jsonEncode / jsonPretty with the argument's static type ──
+   The lowering passes the checked type as a schema descriptor (the JSON
+   reader's format: i f s b y, L{..}, T{Name|field:desc,...}, N{Name},
+   E{Name|A,B}; `a` where the kind is not known statically). Parts the
+   descriptor names are written by that kind; the rest keep the
+   value-based detection. */
+
+/* One past the end of the descriptor starting at `d`. */
+static const char *_wc_desc_end(const char *d) {
+    if (d[0] && d[1] == '{') {
+        int depth = 0;
+        for (const char *p = d + 1; *p; p++) {
+            if (*p == '{') depth++;
+            else if (*p == '}' && --depth == 0) return p + 1;
+        }
+        return d + wasm_strlen(d);
+    }
+    return d[0] ? d + 1 : d;
+}
+
+/* The descriptor of field `name` in a `field:desc,...}` body. */
+static const char *_wc_desc_field(const char *body, const char *name) {
+    int name_len = (int)wasm_strlen(name);
+    const char *p = body;
+    while (*p && *p != '}') {
+        const char *colon = p;
+        while (*colon && *colon != ':' && *colon != '}') colon++;
+        if (*colon != ':') return 0;
+        const char *d = colon + 1;
+        if ((int)(colon - p) == name_len && _wf_strncmp(p, name, name_len) == 0) return d;
+        p = _wc_desc_end(d);
+        if (*p == ',') p++;
+    }
+    return 0;
+}
+
+/* The `T{Name|...}` a `N{Name}` reference (name at `name`) points back to. */
+static const char *_wc_desc_named(const char *root, const char *name) {
+    int name_len = 0;
+    while (name[name_len] && name[name_len] != '}') name_len++;
+    for (const char *p = root; p && *p; p++) {
+        if (p[0] == 'T' && p[1] == '{' && _wf_strncmp(p + 2, name, name_len) == 0
+            && p[2 + name_len] == '|') return p;
+    }
+    return 0;
+}
+
+static void _wc_json_serialize_desc(_wc_json_buf *jb, int64_t val, const char *desc, const char *root, int indent, int depth) {
+    if (depth > TAIDA_WASM_JSON_MAX_DEPTH) {
+        _wc_json_depth_exceeded();
+        return;
+    }
+    switch (desc[0]) {
+        case 'i': _wc_json_serialize_typed(jb, val, indent, depth, 1); return;
+        case 'f': _wc_json_serialize_typed(jb, val, indent, depth, 2); return;
+        case 's':
+            /* An absent Str is the empty string, not an object. A value that
+               is not a string after all (a type name the checker resolved to
+               another module's type) keeps the value-based detection. */
+            if (!val) {
+                _wc_json_serialize_typed(jb, WSTR(""), indent, depth, 3);
+                return;
+            }
+            if (_wc_looks_like_string(val)) {
+                _wc_json_serialize_typed(jb, val, indent, depth, 3);
+                return;
+            }
+            break;
+        case 'b': _wc_json_serialize_typed(jb, val, indent, depth, 4); return;
+        /* Bytes have no JSON form; the reference writes null. */
+        case 'y': _wc_jb_append(jb, "null"); return;
+        case 'E': {
+            const char *v = desc + 2;
+            while (*v && *v != '|' && *v != '}') v++;
+            if (desc[1] == '{' && *v == '|') {
+                _wc_json_append_enum_variant(jb, val, v + 1);
+                return;
+            }
+            break;
+        }
+        case 'L':
+            if (desc[1] == '{' && _wc_looks_like_list(val) && !_wc_is_hashmap(val) && !_wc_is_set(val)) {
+                int64_t *list = (int64_t *)(intptr_t)val;
+                int64_t list_len = list[1];
+                _wc_jb_append_char(jb, '[');
+                for (int64_t i = 0; i < list_len; i++) {
+                    if (i > 0) _wc_jb_append_char(jb, ',');
+                    if (indent > 0) _wc_jb_append_indent(jb, indent, depth + 1);
+                    _wc_json_serialize_desc(jb, list[WASM_LIST_ELEMS + i], desc + 2, root, indent, depth + 1);
+                }
+                if (indent > 0 && list_len > 0) _wc_jb_append_indent(jb, indent, depth);
+                _wc_jb_append_char(jb, ']');
+                return;
+            }
+            break;
+        case 'T':
+            if (desc[1] == '{' && _wc_is_valid_ptr(val, 8)) {
+                int64_t *obj = (int64_t *)(intptr_t)val;
+                int64_t fc = obj[0];
+                if (fc > 0 && fc < 200) {
+                    const char *body = desc + 2;
+                    while (*body && *body != '|' && *body != '}') body++;
+                    if (*body == '|') body++;
+                    _wc_json_serialize_pack_fields(jb, obj, fc, indent, depth, body, root);
+                    return;
+                }
+            }
+            break;
+        case 'N':
+            if (desc[1] == '{') {
+                const char *named = _wc_desc_named(root, desc + 2);
+                if (named) {
+                    _wc_json_serialize_desc(jb, val, named, root, indent, depth);
+                    return;
+                }
+            }
+            break;
+        default:
+            break;
+    }
+    _wc_json_serialize_typed(jb, val, indent, depth, 0);
+}
+
+int64_t taida_json_encode_desc(int64_t val, int64_t desc_ptr) {
+    const char *desc = (const char *)(intptr_t)desc_ptr;
+    _wc_json_buf jb;
+    _wc_jb_init(&jb);
+    _wc_json_serialize_desc(&jb, val, desc, desc, 0, 0);
+    return (int64_t)(intptr_t)jb.buf;
+}
+
+int64_t taida_json_pretty_desc(int64_t val, int64_t desc_ptr) {
+    const char *desc = (const char *)(intptr_t)desc_ptr;
+    _wc_json_buf jb;
+    _wc_jb_init(&jb);
+    _wc_json_serialize_desc(&jb, val, desc, desc, 2, 0);
+    return (int64_t)(intptr_t)jb.buf;
 }
 
 static int _wc_wire_schema_desc_len(const char *d) {
@@ -1799,6 +2651,50 @@ int64_t taida_async_err(int64_t error) {
     return (int64_t)(intptr_t)obj;
 }
 
+/* AsyncReject[x]() — a rejected Async holding `x` (native twin:
+   taida_async_err_kinded). `ekind` is the static kind of `x`; its tag is
+   kept so the payload is displayed and thrown as what it is. */
+int64_t taida_async_err_kinded(int64_t error, int64_t ekind) {
+    int64_t obj_ptr = taida_async_err(error);
+    if (!obj_ptr) return 0;
+    int64_t kind = ekind & 0xFF;
+    int64_t tag = kind != 0xFF ? kind
+                : (taida_is_buchi_pack(error) ? WASM_TAG_PACK : WASM_ASYNC_TAG_UNKNOWN);
+    ((int64_t *)(intptr_t)obj_ptr)[6] = tag;
+    return obj_ptr;
+}
+
+/* The text of a rejected Async's payload of kind `tag`, as the reference
+   displays it (native twin: taida_async_payload_display). */
+static int64_t _wasm_async_payload_display(int64_t payload, int64_t tag) {
+    switch (tag) {
+    case WASM_TAG_INT:
+    case WASM_TAG_ENUM:
+        return taida_str_from_int(payload);
+    case WASM_TAG_FLOAT:
+        return taida_str_from_float(payload);
+    case WASM_TAG_BOOL:
+        return taida_str_from_bool(payload);
+    default:
+        return _wasm_value_to_display_string(payload);
+    }
+}
+
+/* The error a rejected Async throws (native twin:
+   taida_async_rejection_error): a pack as it is; any other payload, such as
+   the Str of `AsyncReject["timeout"]()`, as an AsyncError whose message is
+   the payload's text, so an `|== e: Error` handler can read it. */
+static int64_t _wasm_async_rejection_error(int64_t error, int64_t etag) {
+    if (error == 0) {
+        return taida_make_error(WSTR("AsyncError"), WSTR("Async rejected"));
+    }
+    if (etag != WASM_TAG_INT && etag != WASM_TAG_FLOAT && etag != WASM_TAG_BOOL
+        && etag != WASM_TAG_ENUM && taida_is_buchi_pack(error)) {
+        return error;
+    }
+    return taida_make_error(WSTR("AsyncError"), _wasm_async_payload_display(error, etag));
+}
+
 int64_t taida_async_pending_with_error(int64_t error) {
     int64_t *obj = (int64_t *)wasm_alloc(7 * 8);
     if (!obj) return 0;
@@ -1823,13 +2719,9 @@ int64_t taida_async_unmold(int64_t async_ptr) {
     int64_t status = obj[1];
     if (status == 1) return obj[2];  /* fulfilled -> value */
     if (status == 2) {
-        /* rejected -> throw */
-        int64_t error = obj[3];
-        if (taida_can_throw_payload(error)) return taida_throw(error);
-        int64_t err = taida_make_error(
-            WSTR("AsyncError"),
-            WSTR("Async rejected"));
-        return taida_throw(err);
+        /* rejected -> throw. A pack payload (an Error value of any
+           subtype) is thrown as-is; other payloads become an AsyncError. */
+        return taida_throw(_wasm_async_rejection_error(obj[3], obj[6]));
     }
     if (status == 0 && obj[3] != 0) {
         return taida_throw(obj[3]);
@@ -1892,12 +2784,7 @@ int64_t taida_async_all(int64_t list_ptr) {
             int64_t *aobj = (int64_t *)(intptr_t)item;
             if (aobj[1] == 2) {
                 /* One rejected -> throw (matches native behavior) */
-                int64_t error = aobj[3];
-                if (taida_can_throw_payload(error)) return taida_throw(error);
-                int64_t err = taida_make_error(
-                    WSTR("AsyncError"),
-                    WSTR("All: async rejected"));
-                return taida_throw(err);
+                return taida_throw(_wasm_async_rejection_error(aobj[3], aobj[6]));
             }
             value = aobj[2];
         } else {
@@ -1923,12 +2810,7 @@ int64_t taida_async_race(int64_t list_ptr) {
         int64_t *aobj = (int64_t *)(intptr_t)first;
         if (aobj[1] == 2) {
             /* rejected -> throw (matches native behavior) */
-            int64_t error = aobj[3];
-            if (taida_can_throw_payload(error)) return taida_throw(error);
-            int64_t err = taida_make_error(
-                WSTR("AsyncError"),
-                WSTR("Race: async rejected"));
-            return taida_throw(err);
+            return taida_throw(_wasm_async_rejection_error(aobj[3], aobj[6]));
         }
         return taida_async_ok_tagged(aobj[2], aobj[5]);
     }
@@ -2002,6 +2884,43 @@ int64_t taida_async_spawn(int64_t fn_ptr, int64_t arg) {
 }
 
 /* Async toString helper */
+/* The reason a rejected Async shows (native twin: taida_rejection_display):
+   an error the runtime itself raised shows as `Error(type: message)`;
+   anything else shows as a value. */
+static int64_t _wasm_rejection_display(int64_t error) {
+    if (_looks_like_pack(error)
+        && taida_pack_has_hash(error, WASM_HASH_TYPE)
+        && taida_pack_has_hash(error, WASM_HASH_MESSAGE)
+        && taida_pack_has_hash(error, WASM_HASH___TYPE)) {
+        int64_t type = taida_pack_get(error, WASM_HASH___TYPE);
+        static const char *const runtime_types[] = {
+            "AssertionError", "AsyncError", "AsyncRaceError", "AsyncStateError",
+            "CancelledError", "HostCapabilityError", "HttpError", "ProcessError",
+            "RangeError", "ResultError", "TimeoutError", "ValueError", 0,
+        };
+        int runtime = 0;
+        if (_looks_like_string(type)) {
+            const char *t = (const char *)(intptr_t)type;
+            for (int i = 0; runtime_types[i]; i++) {
+                if (_wf_strcmp(t, runtime_types[i]) == 0) { runtime = 1; break; }
+            }
+            if (_wf_strncmp(t, "Addon", 5) == 0) runtime = 1;
+        }
+        int64_t message = taida_pack_get(error, WASM_HASH_MESSAGE);
+        if (runtime && _looks_like_string(message)) {
+            _wasm_strbuf sb;
+            _sb_init(&sb);
+            _sb_append(&sb, "Error(");
+            _sb_append(&sb, (const char *)(intptr_t)taida_pack_get(error, WASM_HASH_TYPE));
+            _sb_append(&sb, ": ");
+            _sb_append(&sb, (const char *)(intptr_t)message);
+            _sb_append(&sb, ")");
+            return _sb_finish(&sb);
+        }
+    }
+    return _wasm_value_to_display_string(error);
+}
+
 static int64_t _wasm_async_to_string(int64_t async_ptr) {
     int64_t *obj = (int64_t *)(intptr_t)async_ptr;
     int64_t status = obj[1];
@@ -2014,7 +2933,11 @@ static int64_t _wasm_async_to_string(int64_t async_ptr) {
         _sb_append(&sb, (const char *)(intptr_t)val_str);
     } else if (status == 2) {
         _sb_append(&sb, "rejected: ");
-        int64_t err_str = _wasm_value_to_display_string(obj[3]);
+        int64_t etag = obj[6];
+        int64_t err_str = (etag == WASM_TAG_INT || etag == WASM_TAG_FLOAT
+                           || etag == WASM_TAG_BOOL || etag == WASM_TAG_ENUM)
+                              ? _wasm_async_payload_display(obj[3], etag)
+                              : _wasm_rejection_display(obj[3]);
         _sb_append(&sb, (const char *)(intptr_t)err_str);
     } else {
         _sb_append(&sb, "pending");

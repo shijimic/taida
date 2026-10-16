@@ -45,6 +45,14 @@ pub struct Lexer {
 }
 
 impl Lexer {
+    /// A lexer for a fragment of a larger source: its first line is numbered
+    /// `first_line`, so the tokens carry the fragment's place in the file.
+    pub fn starting_at_line(source: &str, first_line: usize) -> Self {
+        let mut lexer = Self::new(source);
+        lexer.line = first_line.max(1);
+        lexer
+    }
+
     pub fn new(source: &str) -> Self {
         Self {
             source: source.chars().collect(),
@@ -839,8 +847,9 @@ impl Lexer {
             return raw;
         }
 
-        let code_point =
-            u32::from_str_radix(&hex, 16).expect("validated unicode escape should parse");
+        // Every digit is hex, so the only parse failure is a value too large
+        // for u32 — which is out of the Unicode range as well.
+        let code_point = u32::from_str_radix(&hex, 16).unwrap_or(u32::MAX);
         if code_point > 0x10FFFF {
             self.error(
                 &format!(

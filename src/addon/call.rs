@@ -85,6 +85,13 @@ pub enum AddonCallError {
         function: String,
         detail: String,
     },
+    /// The addon returned a status that is not a `TaidaAddonStatus`
+    /// value. Any value slots it filled are released unread.
+    InvalidStatus {
+        addon: String,
+        function: String,
+        raw: u32,
+    },
 }
 
 impl std::fmt::Display for AddonCallError {
@@ -135,6 +142,15 @@ impl std::fmt::Display for AddonCallError {
             } => write!(
                 f,
                 "addon call failed: '{addon}::{function}' produced malformed output ({detail})"
+            ),
+            Self::InvalidStatus {
+                addon,
+                function,
+                raw,
+            } => write!(
+                f,
+                "addon call failed: '{addon}::{function}' returned status {raw}, which is not a \
+                 TaidaAddonStatus value"
             ),
         }
     }
@@ -228,7 +244,7 @@ impl LoadedAddon {
         //    null; the addon writes them on success / failure.
         let mut out_value: *mut TaidaAddonValueV1 = core::ptr::null_mut();
         let mut out_error: *mut TaidaAddonErrorV1 = core::ptr::null_mut();
-        let status = (func.raw_call())(
+        let raw_status = (func.raw_call())(
             if arg_view.is_empty() {
                 core::ptr::null()
             } else {
@@ -246,7 +262,23 @@ impl LoadedAddon {
         drop(arg_view);
         release_many(built);
 
-        // 5. Route on status.
+        // 5. Route on status. The raw value is checked first: matching an
+        //    out-of-range value as `TaidaAddonStatus` would be undefined.
+        let Some(status) = crate::addon::loader::status_from_raw(raw_status) else {
+            if !out_value.is_null() {
+                // SAFETY: host-built.
+                unsafe { value_bridge::release_value_ptr(out_value) };
+            }
+            if !out_error.is_null() {
+                // SAFETY: host-built.
+                unsafe { release_error_ptr(out_error) };
+            }
+            return Err(AddonCallError::InvalidStatus {
+                addon: self.name().to_string(),
+                function: name.to_string(),
+                raw: raw_status,
+            });
+        };
         match status {
             TaidaAddonStatus::Ok => {
                 // Release any stray out_error the addon might have

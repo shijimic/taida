@@ -16,22 +16,38 @@
 //! is reported as `removed + added` and therefore classified as
 //! Breaking.
 //!
+//! ## What the public API is
+//!
+//! The names a consumer can import from the package:
+//!
+//! - the package facade of `packages.tdm` (`<<<@ver owner/name @(...)`),
+//!   or, when it lists no symbols, the exports of its entry module
+//!   (`>>> ./main.td`);
+//! - for an addon package (`native/addon.toml`), the manifest's
+//!   `[functions]` and the exports of the addon facade
+//!   `taida/<stem>.td`, where `<stem>` is the last segment of the
+//!   manifest's `package`;
+//! - otherwise, the exports of every top-level `taida/*.td` file.
+//!
+//! Files below `taida/` subdirectories are internal to the package.
+//!
 //! ## Snapshot sources
 //!
-//! - `snapshot_head(root)` — walks `root/taida/*.td` from the working
-//! tree (ignoring hidden / build directories).
-//! - `snapshot_at_tag(root, tag)` — uses `git ls-tree` + `git show` to
-//! read the contents of `taida/*.td` as they existed at the tag,
-//! without checking out the tree.
+//! - `snapshot_head(root)` — reads those files from the working tree.
+//! - `snapshot_at_tag(root, tag)` — reads them as they existed at the
+//! tag with `git ls-tree` + `git show`, without checking out the tree.
 //!
-//! Both paths feed through the same parser + export extractor so the
-//! behaviour is byte-identical modulo the file source.
+//! Both paths apply the same rules through the same parser, so they
+//! differ only in where the file contents come from.
 
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Command;
 
+use crate::addon::manifest::parse_addon_manifest_str;
 use crate::parser::{Statement, parse};
+use crate::pkg::facade::effective_exports_from_source;
+use crate::pkg::manifest::Manifest;
 
 /// A snapshot of the public API of a Taida package at a specific
 /// point in time (either HEAD on disk or a git tag).
@@ -40,7 +56,8 @@ use crate::parser::{Statement, parse};
 /// signature / pack / arity fields alongside without removing this.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PublicApiSnapshot {
-    /// Export symbol names harvested from `taida/*.td`.
+    /// Export symbol names of the package's public API (see the module
+    /// docs for which files contribute).
     ///
     /// Canonical form: the symbol string as it appears in the
     /// `<<< @(...)` list of the source file. No normalisation is
@@ -76,45 +93,45 @@ pub enum ApiDiff {
     },
 }
 
-/// Take a snapshot of the public API at `root/taida/*.td` (working tree).
+/// Take a snapshot of the public API of the package in the working tree
+/// at `root`.
 ///
 /// Files that fail to parse are reported as errors (first error wins)
 /// rather than silently skipped — publishing a package with parse
 /// errors should not succeed.
 pub fn snapshot_head(root: &Path) -> Result<PublicApiSnapshot, String> {
-    let taida_dir = root.join("taida");
-    if !taida_dir.exists() {
-        // Source-only packages without a `taida/` directory have no
-        // public API from this detector's point of view. The detector
-        // still returns Ok so `taida ingot publish` does not fail hard on
-        // packages that are just manifests + main.td.
-        return Ok(PublicApiSnapshot::default());
-    }
-
-    let mut exports: BTreeSet<String> = BTreeSet::new();
-    let mut entries: Vec<_> = std::fs::read_dir(&taida_dir)
-        .map_err(|e| format!("api_diff: cannot read '{}': {}", taida_dir.display(), e))?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("td"))
-        .collect();
-    entries.sort();
-
-    for path in entries {
-        let source = std::fs::read_to_string(&path)
-            .map_err(|e| format!("api_diff: cannot read '{}': {}", path.display(), e))?;
-        collect_exports_into(&source, &mut exports)?;
-    }
-
-    Ok(PublicApiSnapshot { exports })
+    let read = |rel: &str| -> Result<Option<String>, String> {
+        let path = root.join(rel);
+        match std::fs::read_to_string(&path) {
+            Ok(source) => Ok(Some(source)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("api_diff: cannot read '{}': {}", path.display(), e)),
+        }
+    };
+    let list_taida = || -> Result<Vec<String>, String> {
+        let taida_dir = root.join("taida");
+        if !taida_dir.is_dir() {
+            return Ok(Vec::new());
+        }
+        let mut names: Vec<String> = std::fs::read_dir(&taida_dir)
+            .map_err(|e| format!("api_diff: cannot read '{}': {}", taida_dir.display(), e))?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_file() && p.extension().and_then(|s| s.to_str()) == Some("td"))
+            .filter_map(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| format!("taida/{}", n))
+            })
+            .collect();
+        names.sort();
+        Ok(names)
+    };
+    snapshot_from(root, &read, &list_taida)
 }
 
 /// Take a snapshot of the public API at `tag` by reading from git
 /// history. Does not modify the working tree.
-///
-/// The enumeration uses `git ls-tree <tag> -- taida/` to find the
-/// `*.td` blob names, then `git show <tag>:<path>` to read each
-/// file's contents at the tag.
 pub fn snapshot_at_tag(root: &Path, tag: &str) -> Result<PublicApiSnapshot, String> {
     // Check the tag exists locally; otherwise a helpful error message
     // is much more useful than `git show` failing with "unknown revision".
@@ -130,43 +147,109 @@ pub fn snapshot_at_tag(root: &Path, tag: &str) -> Result<PublicApiSnapshot, Stri
         ));
     }
 
-    // List `taida/*.td` entries at the tag.
-    let ls = Command::new("git")
-        .args(["ls-tree", "--name-only", "-r", tag, "--", "taida"])
-        .current_dir(root)
-        .output()
-        .map_err(|e| format!("api_diff: cannot invoke git ls-tree: {}", e))?;
-    if !ls.status.success() {
-        // No `taida/` directory at that tag → empty snapshot.
-        return Ok(PublicApiSnapshot::default());
-    }
-
-    let listing = String::from_utf8_lossy(&ls.stdout).to_string();
-    let mut td_paths: Vec<String> = listing
-        .lines()
-        .map(str::trim)
-        .filter(|p| p.ends_with(".td"))
-        .map(String::from)
-        .collect();
-    td_paths.sort();
-
-    let mut exports: BTreeSet<String> = BTreeSet::new();
-    for path in td_paths {
+    let read = |rel: &str| -> Result<Option<String>, String> {
+        let spec = format!("{}:{}", tag, rel);
+        let exists = Command::new("git")
+            .args(["cat-file", "-e", &spec])
+            .current_dir(root)
+            .output()
+            .map_err(|e| format!("api_diff: cannot invoke git cat-file: {}", e))?;
+        if !exists.status.success() {
+            return Ok(None);
+        }
         let show = Command::new("git")
-            .args(["show", &format!("{}:{}", tag, path)])
+            .args(["show", &spec])
             .current_dir(root)
             .output()
             .map_err(|e| format!("api_diff: cannot invoke git show: {}", e))?;
         if !show.status.success() {
             return Err(format!(
-                "api_diff: git show {}:{} failed: {}",
-                tag,
-                path,
+                "api_diff: git show {} failed: {}",
+                spec,
                 String::from_utf8_lossy(&show.stderr).trim()
             ));
         }
-        let source = String::from_utf8_lossy(&show.stdout).into_owned();
-        collect_exports_into(&source, &mut exports)?;
+        Ok(Some(String::from_utf8_lossy(&show.stdout).into_owned()))
+    };
+    let list_taida = || -> Result<Vec<String>, String> {
+        // Immediate children of `taida/` only (no `-r`), like the
+        // working-tree listing: subdirectories are package internals.
+        let ls = Command::new("git")
+            .args(["ls-tree", tag, "--", "taida/"])
+            .current_dir(root)
+            .output()
+            .map_err(|e| format!("api_diff: cannot invoke git ls-tree: {}", e))?;
+        if !ls.status.success() {
+            return Ok(Vec::new());
+        }
+        let mut names: Vec<String> = String::from_utf8_lossy(&ls.stdout)
+            .lines()
+            .filter_map(|line| {
+                // `<mode> <type> <object>\t<path>`
+                let (meta, path) = line.split_once('\t')?;
+                (meta.split_whitespace().nth(1) == Some("blob") && path.ends_with(".td"))
+                    .then(|| path.to_string())
+            })
+            .collect();
+        names.sort();
+        Ok(names)
+    };
+    snapshot_from(root, &read, &list_taida)
+}
+
+/// Build a snapshot from one file source (working tree or tag): `read`
+/// returns a file's contents by path relative to the package root
+/// (`None` when it does not exist) and `list_taida` names the top-level
+/// `taida/*.td` files. See the module docs for the rules.
+fn snapshot_from(
+    root: &Path,
+    read: &dyn Fn(&str) -> Result<Option<String>, String>,
+    list_taida: &dyn Fn() -> Result<Vec<String>, String>,
+) -> Result<PublicApiSnapshot, String> {
+    let mut exports: BTreeSet<String> = BTreeSet::new();
+
+    if let Some(source) = read("packages.tdm")? {
+        let manifest =
+            Manifest::parse(&source, root).map_err(|e| format!("api_diff: packages.tdm: {}", e))?;
+        if !manifest.exports.is_empty() {
+            exports.extend(manifest.exports.iter().cloned());
+        } else {
+            let entry = manifest
+                .entry
+                .strip_prefix("./")
+                .unwrap_or(&manifest.entry)
+                .to_string();
+            if let Some(entry_source) = read(&entry)? {
+                exports.extend(effective_exports_from_source(
+                    &entry_source,
+                    Path::new(&entry),
+                )?);
+            }
+        }
+    }
+
+    if let Some(source) = read("native/addon.toml")? {
+        let manifest = parse_addon_manifest_str(Path::new("native/addon.toml"), &source)
+            .map_err(|e| format!("api_diff: {}", e))?;
+        exports.extend(manifest.functions.keys().cloned());
+        let stem = manifest
+            .package
+            .rsplit('/')
+            .next()
+            .unwrap_or(manifest.package.as_str());
+        let facade = format!("taida/{}.td", stem);
+        if let Some(facade_source) = read(&facade)? {
+            exports.extend(effective_exports_from_source(
+                &facade_source,
+                Path::new(&facade),
+            )?);
+        }
+    } else {
+        for rel in list_taida()? {
+            if let Some(source) = read(&rel)? {
+                collect_exports_into(&source, &mut exports)?;
+            }
+        }
     }
 
     Ok(PublicApiSnapshot { exports })

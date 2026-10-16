@@ -278,8 +278,7 @@ jobs:
   #
   # Scope (curated to user-facing tutorials + reference packages):
   #   - Top-level `examples/*.td` minus compiler regression fixtures
-  #     (`compile_*.td`) and known-incompatible legacy fixtures
-  #     (`addon_terminal.td` has parse errors).
+  #     (`compile_*.td`).
   #   - `examples/complex/` (multi-file demo apps).
   #   - `examples/embedding/` (host-language embedding samples).
   #
@@ -311,13 +310,13 @@ jobs:
         run: |
           set -e
           # Curated scope — exclude compile_*.td (codegen regression
-          # fixtures), addon_terminal.td (baseline parse errors), and
-          # the quality/ subtree (compiler quality gate fixtures).
+          # fixtures) and the quality/ subtree (compiler quality gate
+          # fixtures).
           # Iterate via glob + case-pattern guard (SC2010 avoids ls|grep).
           shopt -s nullglob
           for f in examples/*.td; do
             case "$f" in
-              examples/compile_*|examples/addon_terminal*) continue ;;
+              examples/compile_*) continue ;;
             esac
             ./target/debug/taida way lint --quiet "$f" || {
               echo "Lint failed for $f:"

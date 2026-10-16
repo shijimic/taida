@@ -17,6 +17,16 @@ impl Lowering {
         method: &str,
         args: &[Expr],
     ) -> Result<IrVar, LowerError> {
+        if method == "toString" {
+            self.reject_untyped_addon_value(func, obj)?;
+        }
+        // A method the receiver's own type declares wins over a built-in
+        // method of the same name (`length`, `first`, `add`, ...): the type's
+        // methods and function fields live in the value itself.
+        if self.receiver_declares_member(obj, method) {
+            return self.lower_pack_field_call(func, obj, method, args);
+        }
+
         // F-58: If the receiver is known to be a BuchiPack/TypeInst and the method
         // name conflicts with a built-in method (get, set, has, keys, values, etc.),
         // dispatch to BuchiPack field call instead of the built-in method.
@@ -68,13 +78,25 @@ impl Lowering {
         let runtime_fn = match method {
             // Polymorphic methods (work on List + Result/Lax)
             "map" => {
-                return self.lower_polymorphic_map(func, obj_var, args);
+                return self.lower_polymorphic_map(func, obj_var, args, &arg_vars[1..]);
             }
             "flatMap" => {
-                return self.lower_monadic_hof(func, obj_var, args, "taida_monadic_flat_map");
+                return self.lower_monadic_hof(
+                    func,
+                    obj_var,
+                    args,
+                    &arg_vars[1..],
+                    "taida_monadic_flat_map",
+                );
             }
             "mapError" => {
-                return self.lower_monadic_hof(func, obj_var, args, "taida_result_map_error");
+                return self.lower_monadic_hof(
+                    func,
+                    obj_var,
+                    args,
+                    &arg_vars[1..],
+                    "taida_result_map_error",
+                );
             }
             "isEmpty" => "taida_polymorphic_is_empty",
             "toString" | "toStr" => {
@@ -85,6 +107,9 @@ impl Lowering {
                     return Ok(obj_var);
                 } else if self.expr_returns_float(obj) {
                     "taida_float_to_str"
+                } else if self.checked_tag(obj) == Some(crate::codegen::tag_prop::TAG_INT) {
+                    // An Int is written as a number, whatever its value.
+                    "taida_str_from_int"
                 } else {
                     "taida_polymorphic_to_string"
                 }
@@ -219,7 +244,7 @@ impl Lowering {
                             message: ".get() requires exactly 1 argument".to_string(),
                         });
                     }
-                    let arg_var = self.lower_expr(func, &args[0])?;
+                    let arg_var = arg_vars[1];
                     let result = func.alloc_var();
                     func.push(IrInst::Call(
                         result,
@@ -228,7 +253,7 @@ impl Lowering {
                     ));
                     return Ok(result);
                 }
-                return self.lower_polymorphic_get(func, obj_var, args);
+                return self.lower_polymorphic_get(func, obj_var, args, &arg_vars[1..]);
             }
             "take" | "drop" | "push" | "append" | "sum" | "reverse" | "concat" | "join"
             | "sort" | "unique" | "flatten" | "zip" => {
@@ -248,16 +273,40 @@ impl Lowering {
             }
             // List predicate methods (any/all/none take lambda)
             "any" => {
-                return self.lower_list_predicate(func, obj_var, args, "taida_list_any");
+                return self.lower_list_predicate(
+                    func,
+                    obj_var,
+                    args,
+                    &arg_vars[1..],
+                    "taida_list_any",
+                );
             }
             "all" => {
-                return self.lower_list_predicate(func, obj_var, args, "taida_list_all");
+                return self.lower_list_predicate(
+                    func,
+                    obj_var,
+                    args,
+                    &arg_vars[1..],
+                    "taida_list_all",
+                );
             }
             "none" => {
-                return self.lower_list_predicate(func, obj_var, args, "taida_list_none");
+                return self.lower_list_predicate(
+                    func,
+                    obj_var,
+                    args,
+                    &arg_vars[1..],
+                    "taida_list_none",
+                );
             }
             "fold" | "reduce" => {
-                return self.lower_list_fold(func, obj_var, args, "taida_list_fold");
+                return self.lower_list_fold(
+                    func,
+                    obj_var,
+                    args,
+                    &arg_vars[1..],
+                    "taida_list_fold",
+                );
             }
             // Async methods
             "isPending" => "taida_async_is_pending",
@@ -271,13 +320,13 @@ impl Lowering {
             }
             // HashMap methods (immutable semantics)
             "set" => {
-                return self.lower_hashmap_set(func, obj_var, args);
+                return self.lower_hashmap_set(func, obj_var, args, &arg_vars[1..]);
             }
             "remove" => {
-                return self.lower_hashmap_remove(func, obj_var, args);
+                return self.lower_hashmap_remove(func, obj_var, args, &arg_vars[1..]);
             }
             "has" => {
-                return self.lower_hashmap_has(func, obj_var, args);
+                return self.lower_hashmap_has(func, obj_var, args, &arg_vars[1..]);
             }
             "keys" => "taida_hashmap_keys",
             "values" => "taida_hashmap_values",
@@ -288,7 +337,7 @@ impl Lowering {
             // QF-16: Set.add() は引数1個。引数数が一致しない場合は BuchiPack フィールド呼び出しに
             // フォールバック（モジュールからインポートした BuchiPack の .add() フィールドとの衝突回避）
             "add" if args.len() == 1 => {
-                return self.lower_set_add(func, obj_var, args);
+                return self.lower_set_add(func, obj_var, args, &arg_vars[1..]);
             }
             "union" => "taida_set_union",
             "intersect" => "taida_set_intersect",
@@ -297,7 +346,8 @@ impl Lowering {
             _ => {
                 // Fallback: treat as BuchiPack field function call.
                 // obj.method(args) → taida_pack_call_fieldN(obj, hash(method), args...)
-                return self.lower_pack_field_call(func, obj, method, args);
+                // The receiver and arguments are already evaluated.
+                return self.lower_pack_field_call_vars(func, method, &arg_vars);
             }
         };
 
@@ -312,6 +362,7 @@ impl Lowering {
         func: &mut IrFunction,
         list_var: IrVar,
         args: &[Expr],
+        arg_vars: &[IrVar],
         runtime_fn: &str,
     ) -> Result<IrVar, LowerError> {
         if args.len() != 1 {
@@ -319,7 +370,7 @@ impl Lowering {
                 message: format!(".{}() requires exactly 1 argument", runtime_fn),
             });
         }
-        let fn_var = self.lower_expr(func, &args[0])?;
+        let fn_var = arg_vars[0];
         let result = func.alloc_var();
         func.push(IrInst::Call(
             result,
@@ -335,6 +386,7 @@ impl Lowering {
         func: &mut IrFunction,
         list_var: IrVar,
         args: &[Expr],
+        arg_vars: &[IrVar],
         runtime_fn: &str,
     ) -> Result<IrVar, LowerError> {
         if args.len() != 2 {
@@ -342,8 +394,8 @@ impl Lowering {
                 message: format!(".{}() requires exactly 2 arguments", runtime_fn),
             });
         }
-        let init_var = self.lower_expr(func, &args[0])?;
-        let fn_var = self.lower_expr(func, &args[1])?;
+        let init_var = arg_vars[0];
+        let fn_var = arg_vars[1];
         let result = func.alloc_var();
         func.push(IrInst::Call(
             result,
@@ -359,13 +411,14 @@ impl Lowering {
         func: &mut IrFunction,
         obj_var: IrVar,
         args: &[Expr],
+        arg_vars: &[IrVar],
     ) -> Result<IrVar, LowerError> {
         if args.len() != 1 {
             return Err(LowerError {
                 message: ".map() requires exactly 1 argument".to_string(),
             });
         }
-        let fn_var = self.lower_expr(func, &args[0])?;
+        let fn_var = arg_vars[0];
         let result = func.alloc_var();
         // Use polymorphic runtime dispatch (detects list vs Result/Lax)
         func.push(IrInst::Call(
@@ -382,6 +435,7 @@ impl Lowering {
         func: &mut IrFunction,
         obj_var: IrVar,
         args: &[Expr],
+        arg_vars: &[IrVar],
         runtime_fn: &str,
     ) -> Result<IrVar, LowerError> {
         if args.len() != 1 {
@@ -389,7 +443,7 @@ impl Lowering {
                 message: format!(".{}() requires exactly 1 argument", runtime_fn),
             });
         }
-        let fn_var = self.lower_expr(func, &args[0])?;
+        let fn_var = arg_vars[0];
         let result = func.alloc_var();
         func.push(IrInst::Call(
             result,
@@ -405,13 +459,14 @@ impl Lowering {
         func: &mut IrFunction,
         obj_var: IrVar,
         args: &[Expr],
+        arg_vars: &[IrVar],
     ) -> Result<IrVar, LowerError> {
         if args.len() != 1 {
             return Err(LowerError {
                 message: ".get() requires exactly 1 argument".to_string(),
             });
         }
-        let arg_var = self.lower_expr(func, &args[0])?;
+        let arg_var = arg_vars[0];
         let result = func.alloc_var();
         func.push(IrInst::Call(
             result,
@@ -428,14 +483,15 @@ impl Lowering {
         func: &mut IrFunction,
         hm_var: IrVar,
         args: &[Expr],
+        arg_vars: &[IrVar],
     ) -> Result<IrVar, LowerError> {
         if args.len() != 2 {
             return Err(LowerError {
                 message: ".set() requires exactly 2 arguments (key, value)".to_string(),
             });
         }
-        let key_var = self.lower_expr(func, &args[0])?;
-        let value_var = self.lower_expr(func, &args[1])?;
+        let key_var = arg_vars[0];
+        let value_var = arg_vars[1];
         // NO-1: Set value_type_tag on the HashMap before storing.
         // This is idempotent — subsequent .set() calls will overwrite with the same tag.
         let val_tag = self.expr_type_tag(&args[1]);
@@ -461,7 +517,173 @@ impl Lowering {
             "taida_hashmap_set_immut".to_string(),
             vec![hm_var, key_hash, key_var, value_var],
         ));
+        // The entry keeps the static kinds of its key and value, so a Bool
+        // or Float key and each value of a mixed map show as their kinds,
+        // and an Enum value is named in jsonEncode.
+        if let Some(enum_name) = self.expr_enum_type_name(&args[1])
+            && let Some(id) = self.enum_type_ids.get(&enum_name).copied()
+            && let Some(variants) = self.enum_defs.get(&enum_name).cloned()
+        {
+            let id_var = func.alloc_var();
+            func.push(IrInst::ConstInt(id_var, id));
+            let names_var = func.alloc_var();
+            func.push(IrInst::ConstStr(names_var, variants.join(",")));
+            let dummy = func.alloc_var();
+            func.push(IrInst::Call(
+                dummy,
+                "taida_register_enum_variants".to_string(),
+                vec![id_var, names_var],
+            ));
+        }
+        let key_ek = self.emit_operand_ekind(func, &args[0]);
+        let value_ek = self.emit_operand_ekind(func, &args[1]);
+        let dummy = func.alloc_var();
+        func.push(IrInst::Call(
+            dummy,
+            "taida_hashmap_note_kinds".to_string(),
+            vec![result, key_hash, key_var, key_ek, value_ek],
+        ));
         Ok(result)
+    }
+
+    /// `hashMap(src)`: the runtime builds the map from a list of
+    /// `@(key, value)` packs or from a pack's fields, keeping the kinds the
+    /// keys and values carry. The entries of a list share its element type,
+    /// so the key and value kinds it fixes are passed along (an Enum's with
+    /// its type id, which a value's own tag does not carry); the entries of
+    /// a pack's Enum fields have their kinds noted after it is built.
+    pub(super) fn lower_hashmap_from(
+        &mut self,
+        func: &mut IrFunction,
+        src: &Expr,
+    ) -> Result<IrVar, LowerError> {
+        use crate::types::Type;
+        let src_var = self.lower_expr(func, src)?;
+        let src_ty = self.typed_expr_table.lookup(src).cloned();
+        let (key_ty, value_ty) = match &src_ty {
+            Some(Type::List(elem)) => match elem.as_ref() {
+                Type::BuchiPack(fields) => {
+                    let named = |name: &str| {
+                        fields
+                            .iter()
+                            .find(|(n, _)| n == name)
+                            .map(|(_, ty)| ty.clone())
+                    };
+                    match (named("key"), named("value")) {
+                        (Some(key), Some(value)) => (Some(key), Some(value)),
+                        _ if fields.len() >= 2 => {
+                            (Some(fields[0].1.clone()), Some(fields[1].1.clone()))
+                        }
+                        _ => (None, None),
+                    }
+                }
+                Type::List(inner) => (Some((**inner).clone()), Some((**inner).clone())),
+                _ => (None, None),
+            },
+            _ => (None, None),
+        };
+        let key_ek = self.static_entry_ekind(func, key_ty.as_ref());
+        let value_ek = self.static_entry_ekind(func, value_ty.as_ref());
+        let key_ek_var = func.alloc_var();
+        func.push(IrInst::ConstInt(key_ek_var, key_ek));
+        let value_ek_var = func.alloc_var();
+        func.push(IrInst::ConstInt(value_ek_var, value_ek));
+        let result = func.alloc_var();
+        func.push(IrInst::Call(
+            result,
+            "taida_hashmap_from".to_string(),
+            vec![src_var, key_ek_var, value_ek_var],
+        ));
+        let enum_fields: Vec<(String, String)> = match &src_ty {
+            Some(Type::BuchiPack(fields)) => fields
+                .iter()
+                .filter_map(|(name, ty)| match ty {
+                    Type::Named(enum_name) if self.enum_defs.contains_key(enum_name) => {
+                        Some((name.clone(), enum_name.clone()))
+                    }
+                    _ => None,
+                })
+                .collect(),
+            Some(Type::Named(type_name)) => self
+                .type_field_types
+                .get(type_name)
+                .map(|fields| {
+                    fields
+                        .iter()
+                        .filter_map(|(name, _)| {
+                            self.type_field_enum_name(type_name, name)
+                                .map(|enum_name| (name.clone(), enum_name))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        for (field, enum_name) in enum_fields {
+            if field.starts_with("__") {
+                continue;
+            }
+            let value_ek = self.static_entry_ekind(func, Some(&Type::Named(enum_name)));
+            let key_var = func.alloc_var();
+            func.push(IrInst::ConstStr(key_var, field));
+            let key_hash = func.alloc_var();
+            func.push(IrInst::Call(
+                key_hash,
+                "taida_value_hash".to_string(),
+                vec![key_var],
+            ));
+            let key_ek_var = func.alloc_var();
+            func.push(IrInst::ConstInt(
+                key_ek_var,
+                crate::codegen::tag_prop::TAG_STR,
+            ));
+            let value_ek_var = func.alloc_var();
+            func.push(IrInst::ConstInt(value_ek_var, value_ek));
+            let dummy = func.alloc_var();
+            func.push(IrInst::Call(
+                dummy,
+                "taida_hashmap_note_kinds".to_string(),
+                vec![result, key_hash, key_var, key_ek_var, value_ek_var],
+            ));
+        }
+        Ok(result)
+    }
+
+    /// The entry kind (EKIND) a key or value of static type `ty` has: an
+    /// Enum's kind with its type id (registering the Enum's value names
+    /// for jsonEncode), a primitive's kind, or unknown (0xFF) when the
+    /// value's own tag decides.
+    fn static_entry_ekind(
+        &mut self,
+        func: &mut IrFunction,
+        ty: Option<&crate::types::Type>,
+    ) -> i64 {
+        use crate::types::Type;
+        match ty {
+            Some(Type::Named(name)) => {
+                let (Some(id), Some(variants)) = (
+                    self.enum_type_ids.get(name).copied(),
+                    self.enum_defs.get(name).cloned(),
+                ) else {
+                    return 0xFF;
+                };
+                let id_var = func.alloc_var();
+                func.push(IrInst::ConstInt(id_var, id));
+                let names_var = func.alloc_var();
+                func.push(IrInst::ConstStr(names_var, variants.join(",")));
+                let dummy = func.alloc_var();
+                func.push(IrInst::Call(
+                    dummy,
+                    "taida_register_enum_variants".to_string(),
+                    vec![id_var, names_var],
+                ));
+                9 | (id << 8)
+            }
+            Some(ty @ (Type::Int | Type::Float | Type::Bool | Type::Str)) => {
+                self.type_runtime_tag(ty).unwrap_or(0xFF)
+            }
+            _ => 0xFF,
+        }
     }
 
     /// HashMap.remove(key) -- compute key hash, then call taida_hashmap_remove_immut
@@ -470,13 +692,14 @@ impl Lowering {
         func: &mut IrFunction,
         hm_var: IrVar,
         args: &[Expr],
+        arg_vars: &[IrVar],
     ) -> Result<IrVar, LowerError> {
         if args.len() != 1 {
             return Err(LowerError {
                 message: ".remove() requires exactly 1 argument".to_string(),
             });
         }
-        let key_var = self.lower_expr(func, &args[0])?;
+        let key_var = arg_vars[0];
         // For HashMap: compute key hash, then call taida_collection_remove
         // taida_collection_remove auto-detects HashMap vs Set.
         // Value-tag track: the probe's kind rides along so Set removal
@@ -505,13 +728,14 @@ impl Lowering {
         func: &mut IrFunction,
         obj_var: IrVar,
         args: &[Expr],
+        arg_vars: &[IrVar],
     ) -> Result<IrVar, LowerError> {
         if args.len() != 1 {
             return Err(LowerError {
                 message: ".has() requires exactly 1 argument".to_string(),
             });
         }
-        let item_var = self.lower_expr(func, &args[0])?;
+        let item_var = arg_vars[0];
         // The probe kind honours the unmold shadow variable (runtime kind)
         // before the static EKIND constant — see lower_hashmap_remove.
         let ek_var = self.emit_operand_ekind(func, &args[0]);
@@ -535,13 +759,14 @@ impl Lowering {
         func: &mut IrFunction,
         set_var: IrVar,
         args: &[Expr],
+        arg_vars: &[IrVar],
     ) -> Result<IrVar, LowerError> {
         if args.len() != 1 {
             return Err(LowerError {
                 message: ".add() requires exactly 1 argument".to_string(),
             });
         }
-        let item_var = self.lower_expr(func, &args[0])?;
+        let item_var = arg_vars[0];
         // The inserted item's kind honours the unmold shadow variable
         // (runtime kind) before the static EKIND constant — see
         // lower_hashmap_remove.
@@ -553,6 +778,25 @@ impl Lowering {
             vec![set_var, item_var, ek_var],
         ));
         Ok(result)
+    }
+
+    /// Whether the checker's type of `obj` is a pack type declaring a method
+    /// or field named `member`.
+    fn receiver_declares_member(&self, obj: &Expr, member: &str) -> bool {
+        use crate::types::Type;
+        match self.typed_expr_table.lookup(obj) {
+            Some(Type::Named(name)) => {
+                self.type_method_defs
+                    .get(name)
+                    .is_some_and(|methods| methods.iter().any(|(m, _)| m == member))
+                    || self
+                        .type_fields
+                        .get(name)
+                        .is_some_and(|fields| fields.iter().any(|f| f == member))
+            }
+            Some(Type::BuchiPack(fields)) => fields.iter().any(|(f, _)| f == member),
+            _ => false,
+        }
     }
 
     /// BuchiPack field function call: `obj.field(args)`
@@ -575,7 +819,30 @@ impl Lowering {
             });
         }
 
-        let obj_var = self.lower_expr(func, obj)?;
+        let mut vars = vec![self.lower_expr(func, obj)?];
+        for arg in args {
+            vars.push(self.lower_expr(func, arg)?);
+        }
+        self.lower_pack_field_call_vars(func, method, &vars)
+    }
+
+    /// [`Self::lower_pack_field_call`] with the receiver (`vars[0]`) and the
+    /// arguments already evaluated.
+    fn lower_pack_field_call_vars(
+        &mut self,
+        func: &mut IrFunction,
+        method: &str,
+        vars: &[IrVar],
+    ) -> Result<IrVar, LowerError> {
+        let argc = vars.len() - 1;
+        if argc > 3 {
+            return Err(LowerError {
+                message: format!(
+                    "BuchiPack field call .{}() supports up to 3 arguments, got {}",
+                    method, argc
+                ),
+            });
+        }
 
         // Compute field name hash (FNV-1a, same as taida_pack_get uses)
         let field_hash = simple_hash(method);
@@ -583,13 +850,10 @@ impl Lowering {
         func.push(IrInst::ConstInt(hash_var, field_hash as i64));
 
         // Build call args: (pack_ptr, field_hash, arg0, arg1, ...)
-        let mut call_args = vec![obj_var, hash_var];
-        for arg in args {
-            let var = self.lower_expr(func, arg)?;
-            call_args.push(var);
-        }
+        let mut call_args = vec![vars[0], hash_var];
+        call_args.extend_from_slice(&vars[1..]);
 
-        let runtime_fn = format!("taida_pack_call_field{}", args.len());
+        let runtime_fn = format!("taida_pack_call_field{}", argc);
         let result = func.alloc_var();
         func.push(IrInst::Call(result, runtime_fn, call_args));
 

@@ -268,7 +268,7 @@ data => filter(_) => map(_) => result
 
 右の値を左に渡します。変数への代入と、逆方向パイプライン（`<=` チェーン）に使います。
 
-```taida
+```taida fragment
 // 変数への代入
 x <= 42
 name <= "Misato"
@@ -286,7 +286,7 @@ chained <= plusOne(_) <= double(_) <= 4
 
 `<=` チェーンは型注釈付きでも書けます。
 
-```taida
+```taida fragment
 typed: Int <= plusOne(_) <= double(_) <= 10
 ```
 
@@ -422,7 +422,7 @@ err.throw()
 
 モジュールをインポートします。
 
-```taida
+```taida fragment
 // ローカルファイル（シンボル指定）
 >>> ./utils.td => @(helper)
 
@@ -790,7 +790,7 @@ processData input =
 
 ### モジュール構成
 
-```taida
+```taida fragment
 // インポート
 >>> ./utils.td => @(helper)
 

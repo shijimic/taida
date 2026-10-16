@@ -3,14 +3,247 @@
 /// Contains `resolve_module_path`, `find_project_root`, `eval_import`, and `eval_export`.
 ///
 /// These are `impl Interpreter` methods split from eval.rs for maintainability.
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use super::env::Environment;
 use super::eval::{Interpreter, LoadedModule, RuntimeError, Signal};
-use super::value::Value;
+use super::value::{ModuleId, Value};
 use crate::parser::*;
 
+/// Outcome of running a source file as a module.
+pub(crate) struct ModuleRun {
+    pub(crate) module: ModuleId,
+    /// The module's top-level bindings when it finished.
+    pub(crate) scope: Arc<HashMap<String, Value>>,
+    /// Symbols the module listed with `<<<` (empty: it exports everything).
+    pub(crate) exported: Vec<String>,
+    pub(crate) result: Result<Value, RuntimeError>,
+}
+
 impl Interpreter {
+    /// Run `program` as the module at `path`, with a module scope and type
+    /// registries of its own. `prepare` seeds the fresh scope (bundled
+    /// package sentinels) before the program runs. The importer's state is
+    /// restored whatever the outcome.
+    pub(crate) fn run_module_program(
+        &mut self,
+        program: &Program,
+        path: &Path,
+        prepare: impl FnOnce(&mut Self),
+    ) -> ModuleRun {
+        let module = self.new_module();
+        // A user module (not an addon facade, whose `RustAddon[...]` bindings
+        // only the facade loader resolves).
+        if self.check_imports && self.loading_addon_facade_ctx.is_none() {
+            // The module's own types, for the defaults of failed lookups in
+            // its code (the main program's table cannot serve it: node ids
+            // restart in every file).
+            let mut checker = crate::types::TypeChecker::new();
+            checker.set_compile_target(crate::types::CompileTarget::Interpreter);
+            checker.set_source_file(path);
+            checker.check_program(program);
+            self.modules[module].typed = Some(Arc::new(checker.typed_expr_table));
+        }
+        let prev_file = self.current_file.replace(path.to_path_buf());
+        self.loading_modules.insert(path.to_path_buf());
+        let prev_env = std::mem::take(&mut self.env);
+        let prev_top = std::mem::replace(&mut self.top_module, module);
+        let prev_active = self.switch_module(module);
+        let prev_exported_symbols = std::mem::take(&mut self.module_exported_symbols);
+        // A module's top level is not inside any caller's function.
+        let prev_function = self.take_active_function();
+
+        prepare(self);
+        let result = self.eval_program(program);
+
+        self.restore_active_function(prev_function);
+        let exported = std::mem::replace(&mut self.module_exported_symbols, prev_exported_symbols);
+        let module_env = std::mem::replace(&mut self.env, prev_env);
+        // Stashes the module's registries into its record.
+        self.switch_module(prev_active);
+        self.top_module = prev_top;
+        self.current_file = prev_file;
+        self.loading_modules.remove(path);
+
+        let scope = Arc::new(module_env.into_globals());
+        self.modules[module].scope = Some(scope.clone());
+        ModuleRun {
+            module,
+            scope,
+            exported,
+            result,
+        }
+    }
+
+    /// Seed the module scope of a core-bundled package with the sentinels
+    /// its `<<<` list exports. The implementations live in the prelude / os
+    /// runtime dispatch.
+    fn inject_bundled_sentinels(&mut self, module_path: &Path) {
+        let path_str = module_path.to_string_lossy();
+        let in_bundled = |pkg: &str| {
+            // Global path: ~/.taida/bundled/{pkg}/
+            let global_unix = format!(".taida/bundled/{}/", pkg);
+            let global_win = format!(".taida\\bundled\\{}\\", pkg);
+            // Deps path: .taida/deps/taida-lang/{pkg}/ (symlink or direct)
+            let deps_unix = format!(".taida/deps/taida-lang/{}/", pkg);
+            let deps_win = format!(".taida\\deps\\taida-lang\\{}\\", pkg);
+            path_str.contains(&global_unix)
+                || path_str.contains(&global_win)
+                || path_str.contains(&deps_unix)
+                || path_str.contains(&deps_win)
+        };
+
+        if in_bundled("os") {
+            for sym in super::os::OS_SYMBOLS {
+                self.env
+                    .define_force(sym, Value::str(format!("__os_builtin_{}", sym)));
+            }
+        } else if in_bundled("crypto") {
+            // F55 S4: sentinel list derived from the catalog so the
+            // injected surface cannot drift from the export list.
+            if let Some(spec) = crate::pkg::catalog::find("crypto") {
+                for sym in spec.exports {
+                    self.env
+                        .define_force(sym, Value::str(format!("__crypto_builtin_{}", sym)));
+                }
+            }
+        } else if in_bundled("net") {
+            for sym in super::net::eval::NET_SYMBOLS {
+                self.env
+                    .define_force(sym, Value::str(format!("__net_builtin_{}", sym)));
+            }
+        } else if in_bundled("pool") {
+            // F54: sentinel list derived from the catalog so the
+            // injected surface cannot drift from the export list.
+            if let Some(spec) = crate::pkg::catalog::find("pool") {
+                for sym in spec.exports {
+                    self.env
+                        .define_force(sym, Value::str(format!("__pool_builtin_{}", sym)));
+                }
+            }
+        } else if in_bundled("abi") {
+            // WebRequest/WebResponse are defined by the
+            // package body itself, so pre-injecting their names would
+            // turn the body's definition into a redefinition error.
+            // Only inject what the body does NOT define.
+            for sym in ["HostCall", "HostStep", "HostCapability"] {
+                self.env.define_force(sym, Value::str(sym.to_string()));
+            }
+            for sym in super::abi::abi_symbols() {
+                self.env
+                    .define_force(sym, Value::str(format!("__abi_builtin_{}", sym)));
+            }
+        } else if in_bundled("build") {
+            // F54: descriptor-only package. The descriptor parser
+            // recognizes `BuildUnit(...)` & co. by TYPE NAME, with or
+            // without an import; these sentinels only make the
+            // documented `>>> taida-lang/build => @(...)` import
+            // resolve instead of failing at the export-collection
+            // step. They are not runtime constructors.
+            if let Some(spec) = crate::pkg::catalog::find("build") {
+                for sym in spec.exports {
+                    self.env
+                        .define_force(sym, Value::str(format!("__build_descriptor_{}", sym)));
+                }
+            }
+        } else if in_bundled("js") {
+            // F54 (D-2 fix): `taida-lang/js` materialized but never
+            // injected sentinels, so the import itself silently
+            // half-worked. The descriptors are JS-backend-only; the
+            // interpreter rejects their use at evaluation time, but
+            // the import statement documents itself honestly now.
+            if let Some(spec) = crate::pkg::catalog::find("js") {
+                for sym in spec.exports {
+                    self.env
+                        .define_force(sym, Value::str(format!("__js_descriptor_{}", sym)));
+                }
+            }
+        }
+    }
+
+    /// Record a finished module's exports (the `<<<` list, or everything)
+    /// and the type metadata that goes with them.
+    pub(crate) fn loaded_module_from_run(&self, run: &ModuleRun) -> LoadedModule {
+        let exports: HashMap<String, Value> = run
+            .scope
+            .iter()
+            .filter(|(k, _)| run.exported.is_empty() || run.exported.contains(k))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let registry = &self.modules[run.module].registry;
+        let pick = |map: &HashMap<String, Vec<FieldDef>>| -> HashMap<String, Vec<FieldDef>> {
+            map.iter()
+                .filter(|(k, _)| exports.contains_key(*k))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        };
+        LoadedModule {
+            module: run.module,
+            type_defs: pick(&registry.type_defs),
+            mold_defs: pick(&registry.mold_defs),
+            enum_defs: registry
+                .enum_defs
+                .iter()
+                .filter(|(k, _)| exports.contains_key(*k))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            type_methods: registry
+                .type_methods
+                .iter()
+                .filter(|(k, _)| exports.contains_key(*k))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            exports,
+        }
+    }
+
+    /// Make an imported type, mold or enum visible under `local_name` in
+    /// the active module. The name keeps pointing at the declaring
+    /// module's declaration: instances made here are the same type as
+    /// the ones the module makes, and their methods run there.
+    fn bind_imported_type(&mut self, loaded: &LoadedModule, name: &str, local_name: &str) {
+        if let Some(td_fields) = loaded.type_defs.get(name) {
+            self.type_defs
+                .insert(local_name.to_string(), td_fields.clone());
+        }
+        if let Some(mold_fields) = loaded.mold_defs.get(name) {
+            self.mold_defs
+                .insert(local_name.to_string(), mold_fields.clone());
+        }
+        if let Some(enum_variants) = loaded.enum_defs.get(name) {
+            self.enum_defs
+                .insert(local_name.to_string(), enum_variants.clone());
+        }
+        if let Some(td_methods) = loaded.type_methods.get(name) {
+            self.type_methods
+                .insert(local_name.to_string(), td_methods.clone());
+        }
+        let Some(registry) = self.registry_of(loaded.module) else {
+            return;
+        };
+        let key = registry.enum_keys.get(name).cloned();
+        let tag = registry.type_tags.get(name).cloned();
+        if let Some(key) = key {
+            self.enum_keys.insert(local_name.to_string(), key);
+        }
+        let Some(tag) = tag else {
+            return;
+        };
+        let tag = if local_name == name {
+            tag
+        } else {
+            // An alias gets a tag of its own, so its instances display
+            // under the alias, standing for the same declaration.
+            match self.origin_of_tag(&tag).cloned() {
+                Some(origin) => {
+                    self.alias_type_tag(local_name, origin.module, &origin.name, origin.def_site)
+                }
+                None => tag,
+            }
+        };
+        self.type_tags.insert(local_name.to_string(), tag);
+    }
     // ── Module System ────────────────────────────────────────
 
     /// Resolve a module path relative to the current file.
@@ -354,321 +587,41 @@ impl Interpreter {
                 });
             }
 
-            // Save current state
-            let prev_file = self.current_file.clone();
-            let prev_env = self.env.clone();
-            let prev_exported_symbols = std::mem::take(&mut self.module_exported_symbols);
-            // QF-17: TypeDef 登録情報を退避（モジュール実行中の TypeDef はモジュールのスコープ）
-            let prev_type_defs = self.type_defs.clone();
-            let prev_mold_defs = self.mold_defs.clone();
-            let prev_type_methods = self.type_methods.clone();
-            // enum_defs も同様に退避しないと、モジュール内で定義された
-            // Enum（エクスポート対象外の私的 Enum 含む）がインポート側レジストリに
-            // 残存し、同名 Enum を上書きして ordinal を無音に入れ替える。
-            let prev_enum_defs = self.enum_defs.clone();
-
-            // Set up for module execution
-            self.current_file = Some(module_path.clone());
-            self.loading_modules.insert(module_path.clone());
-            self.env = Environment::new();
-
-            // Inject core-bundled package symbols.
-            // The actual implementations live in prelude/os runtime dispatch.
-            // Here we inject sentinel values so that <<< exports resolve correctly.
-            {
-                let path_str = module_path.to_string_lossy();
-                let in_bundled = |pkg: &str| {
-                    // Global path: ~/.taida/bundled/{pkg}/
-                    let global_unix = format!(".taida/bundled/{}/", pkg);
-                    let global_win = format!(".taida\\bundled\\{}\\", pkg);
-                    // Deps path: .taida/deps/taida-lang/{pkg}/ (symlink or direct)
-                    let deps_unix = format!(".taida/deps/taida-lang/{}/", pkg);
-                    let deps_win = format!(".taida\\deps\\taida-lang\\{}\\", pkg);
-                    path_str.contains(&global_unix)
-                        || path_str.contains(&global_win)
-                        || path_str.contains(&deps_unix)
-                        || path_str.contains(&deps_win)
-                };
-
-                if in_bundled("os") {
-                    for sym in super::os::OS_SYMBOLS {
-                        self.env
-                            .define_force(sym, Value::str(format!("__os_builtin_{}", sym)));
-                    }
-                } else if in_bundled("crypto") {
-                    // F55 S4: sentinel list derived from the catalog so the
-                    // injected surface cannot drift from the export list.
-                    if let Some(spec) = crate::pkg::catalog::find("crypto") {
-                        for sym in spec.exports {
-                            self.env
-                                .define_force(sym, Value::str(format!("__crypto_builtin_{}", sym)));
-                        }
-                    }
-                } else if in_bundled("net") {
-                    for sym in super::net::eval::NET_SYMBOLS {
-                        self.env
-                            .define_force(sym, Value::str(format!("__net_builtin_{}", sym)));
-                    }
-                } else if in_bundled("pool") {
-                    // F54: sentinel list derived from the catalog so the
-                    // injected surface cannot drift from the export list.
-                    if let Some(spec) = crate::pkg::catalog::find("pool") {
-                        for sym in spec.exports {
-                            self.env
-                                .define_force(sym, Value::str(format!("__pool_builtin_{}", sym)));
-                        }
-                    }
-                } else if in_bundled("abi") {
-                    // WebRequest/WebResponse are defined by the
-                    // package body itself, so pre-injecting their names would
-                    // turn the body's definition into a redefinition error.
-                    // Only inject what the body does NOT define.
-                    for sym in ["HostCall", "HostStep", "HostCapability"] {
-                        self.env.define_force(sym, Value::str(sym.to_string()));
-                    }
-                    for sym in super::abi::abi_symbols() {
-                        self.env
-                            .define_force(sym, Value::str(format!("__abi_builtin_{}", sym)));
-                    }
-                } else if in_bundled("build") {
-                    // F54: descriptor-only package. The descriptor parser
-                    // recognizes `BuildUnit(...)` & co. by TYPE NAME, with or
-                    // without an import; these sentinels only make the
-                    // documented `>>> taida-lang/build => @(...)` import
-                    // resolve instead of failing at the export-collection
-                    // step. They are not runtime constructors.
-                    if let Some(spec) = crate::pkg::catalog::find("build") {
-                        for sym in spec.exports {
-                            self.env.define_force(
-                                sym,
-                                Value::str(format!("__build_descriptor_{}", sym)),
-                            );
-                        }
-                    }
-                } else if in_bundled("js") {
-                    // F54 (D-2 fix): `taida-lang/js` materialized but never
-                    // injected sentinels, so the import itself silently
-                    // half-worked. The descriptors are JS-backend-only; the
-                    // interpreter rejects their use at evaluation time, but
-                    // the import statement documents itself honestly now.
-                    if let Some(spec) = crate::pkg::catalog::find("js") {
-                        for sym in spec.exports {
-                            self.env
-                                .define_force(sym, Value::str(format!("__js_descriptor_{}", sym)));
-                        }
-                    }
-                }
-            }
-
-            // Execute the module
-            let result = self.eval_program(&program);
-
-            // Collect exports: snapshot all symbols, then filter by <<< declarations
-            let module_env = self.env.clone();
-            let exported_symbols = std::mem::take(&mut self.module_exported_symbols);
-            // QF-17: モジュール内で定義された TypeDef 情報を取得
-            let module_type_defs = self.type_defs.clone();
-            let module_mold_defs = self.mold_defs.clone();
-            let module_type_methods = self.type_methods.clone();
-            // C20B-015 / ROOT-18: Snapshot enum_defs from the defining module so
-            // exported functions can resolve their own JSON schemas even when the
-            // caller module does not import the typedef.
-            let module_enum_defs = self.enum_defs.clone();
-
-            // Restore state
-            self.env = prev_env;
-            self.current_file = prev_file;
-            self.loading_modules.remove(&module_path);
-            self.module_exported_symbols = prev_exported_symbols;
-            self.type_defs = prev_type_defs;
-            self.mold_defs = prev_mold_defs;
-            self.type_methods = prev_type_methods;
-            // restore the importer's enum registry (the module's own
-            // definitions live on in `module_enum_defs` below).
-            self.enum_defs = prev_enum_defs;
+            let run = self.run_module_program(&program, &module_path, |this| {
+                // Inject core-bundled package symbols.
+                // The actual implementations live in prelude/os runtime dispatch.
+                // Here we inject sentinel values so that <<< exports resolve correctly.
+                this.inject_bundled_sentinels(&module_path);
+            });
 
             // Check for module execution errors
-            if let Err(e) = result {
+            if let Err(e) = &run.result {
                 return Err(RuntimeError {
                     message: format!("Error executing module '{}': {}", module_path.display(), e),
                 });
             }
+            // A `><` in the module ends the whole program.
+            if matches!(run.result, Ok(Value::Gorilla)) {
+                return Err(self.gorilla_escape());
+            }
 
-            // Extract exported symbols from module environment.
-            // If the module has <<< declarations, only export those symbols.
-            // If no <<< exists, export everything (backward compatibility).
-            let all_symbols = module_env.snapshot();
-            let module_exports = if exported_symbols.is_empty() {
-                // No <<< found — export all symbols (backward compat)
-                all_symbols
-            } else {
-                // <<< found — filter to only declared exports
-                all_symbols
-                    .into_iter()
-                    .filter(|(k, _)| exported_symbols.contains(k))
-                    .collect()
-            };
-
-            // F-56 fix: Enrich exported function closures with all module-level symbols.
-            // When a function is defined, its closure captures env.snapshot() at that point,
-            // which may not include functions defined later or even itself (for recursion).
-            // By enriching closures with the final module env, exported functions can
-            // reference any module-level symbol (including other exports) without the
-            // importer having to explicitly import those symbols.
-            //
-            // Two-pass approach:
-            // 1. First, enrich all Function values in the full env so that every function's
-            //    closure includes all module-level symbols (including itself for recursion).
-            // 2. Then, rebuild module_exports using the enriched values.
-            let module_exports = {
-                let full_env = module_env.snapshot();
-                // C20B-015 / ROOT-18: Share the defining module's typedef / enum
-                // registries across every enriched function. Arc-wrapped so we pay
-                // only the clone-of-Arc cost per function, not the full map clone.
-                let module_td_arc = if module_type_defs.is_empty() {
-                    None
-                } else {
-                    Some(std::sync::Arc::new(module_type_defs.clone()))
-                };
-                let module_ed_arc = if module_enum_defs.is_empty() {
-                    None
-                } else {
-                    Some(std::sync::Arc::new(module_enum_defs.clone()))
-                };
-                // F62B-001: the defining module's full symbol table, shared by
-                // every function of this module. The closure enrichment below
-                // only reaches two levels (the exported function and the
-                // function values inside its closure), so deep call chains used
-                // to degrade to definition-order-truncated closures. Functions
-                // resolved through this table are re-attached to the same table
-                // at call/retarget time (see `attach_module_context`), so any
-                // chain depth keeps resolving module siblings.
-                let module_symbols_arc = std::sync::Arc::new(full_env.clone());
-                // Pass 1: Create enriched versions of all Function values
-                let mut enriched_env: std::collections::HashMap<String, Value> =
-                    std::collections::HashMap::new();
-                for (name, value) in &full_env {
-                    if let Value::Function(fv) = value {
-                        let mut new_closure = (*fv.closure).clone();
-                        for (k, v) in &full_env {
-                            if !new_closure.contains_key(k) {
-                                new_closure.insert(k.clone(), v.clone());
-                            }
-                        }
-                        let mut enriched_fv = fv.clone();
-                        enriched_fv.closure = std::sync::Arc::new(new_closure);
-                        // C20B-015 / ROOT-18: attach defining-module scope so
-                        // `JSON[raw, Schema]()` inside this function can resolve
-                        // Schema even after the function crosses a module boundary.
-                        if enriched_fv.module_type_defs.is_none() {
-                            enriched_fv.module_type_defs = module_td_arc.clone();
-                        }
-                        if enriched_fv.module_enum_defs.is_none() {
-                            enriched_fv.module_enum_defs = module_ed_arc.clone();
-                        }
-                        if enriched_fv.module_symbols.is_none() {
-                            enriched_fv.module_symbols = Some(module_symbols_arc.clone());
-                        }
-                        enriched_env.insert(name.clone(), Value::Function(enriched_fv));
-                    } else {
-                        enriched_env.insert(name.clone(), value.clone());
-                    }
-                }
-                // Pass 2: For enriched functions, update their closures to reference
-                // enriched versions of other functions (so recursive calls also get enriched closures)
-                let enriched_snapshot = enriched_env.clone();
-                for (_name, value) in enriched_env.iter_mut() {
-                    if let Value::Function(fv) = value {
-                        let mut updated_closure = (*fv.closure).clone();
-                        for (k, v) in &enriched_snapshot {
-                            // Overwrite with enriched version
-                            updated_closure.insert(k.clone(), v.clone());
-                        }
-                        fv.closure = std::sync::Arc::new(updated_closure);
-                    }
-                }
-                // Filter to only exported symbols
-                module_exports
-                    .into_keys()
-                    .map(|name| {
-                        // Falls back to Unit if export symbol is declared but not
-                        // defined in the environment (e.g., forward-declared but
-                        // never assigned). This matches Taida's null-exclusion
-                        // philosophy where Unit serves as the universal default.
-                        let enriched_val = enriched_env.get(&name).cloned().unwrap_or(Value::Unit);
-                        (name, enriched_val)
-                    })
-                    .collect::<std::collections::HashMap<String, Value>>()
-            };
-
-            // QF-17: export された TypeDef の情報をフィルタリング
-            let exported_type_defs: std::collections::HashMap<
-                String,
-                Vec<crate::parser::FieldDef>,
-            > = module_type_defs
-                .into_iter()
-                .filter(|(k, _)| module_exports.contains_key(k))
-                .collect();
-            let exported_mold_defs: std::collections::HashMap<
-                String,
-                Vec<crate::parser::FieldDef>,
-            > = module_mold_defs
-                .into_iter()
-                .filter(|(k, _)| module_exports.contains_key(k))
-                .collect();
-            // filter the SNAPSHOT taken right after the module ran,
-            // not the (now-restored) importer registry — the importer's own
-            // enums must not leak into the module's export table.
-            let exported_enum_defs: std::collections::HashMap<String, Vec<String>> =
-                module_enum_defs
-                    .iter()
-                    .filter(|(k, _)| module_exports.contains_key(*k))
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-            let exported_type_methods: std::collections::HashMap<
-                String,
-                std::collections::HashMap<String, crate::parser::FuncDef>,
-            > = module_type_methods
-                .into_iter()
-                .filter(|(k, _)| module_exports.contains_key(k))
-                .collect();
-
-            // Cache the module
-            self.loaded_modules.insert(
-                module_path.clone(),
-                LoadedModule {
-                    exports: module_exports.clone(),
-                    type_defs: exported_type_defs,
-                    mold_defs: exported_mold_defs,
-                    enum_defs: exported_enum_defs,
-                    type_methods: exported_type_methods,
-                },
-            );
-
+            // Exported symbols: the `<<<` list, or every top-level binding
+            // when the module has no `<<<`. A function keeps resolving the
+            // names of its own module (see `enter_call_scope`), so exporting
+            // one never needs the rest of the module to come along.
+            let loaded = self.loaded_module_from_run(&run);
+            let module_exports = loaded.exports.clone();
+            self.loaded_modules.insert(module_path.clone(), loaded);
             module_exports
         };
 
-        // QF-17: キャッシュから TypeDef 情報を取得（import 後の TypeDef 登録用）
-        let cached_type_defs = self
+        let loaded = self
             .loaded_modules
             .get(&module_path)
-            .map(|m| m.type_defs.clone())
-            .unwrap_or_default();
-        let cached_enum_defs = self
-            .loaded_modules
-            .get(&module_path)
-            .map(|m| m.enum_defs.clone())
-            .unwrap_or_default();
-        let cached_mold_defs = self
-            .loaded_modules
-            .get(&module_path)
-            .map(|m| m.mold_defs.clone())
-            .unwrap_or_default();
-        let cached_type_methods = self
-            .loaded_modules
-            .get(&module_path)
-            .map(|m| m.type_methods.clone())
-            .unwrap_or_default();
+            .cloned()
+            .ok_or_else(|| RuntimeError {
+                message: format!("Module '{}' did not finish loading", module_path.display()),
+            })?;
 
         // B11-9d: If manifest.exports is set (package root import with facade),
         // validate each imported symbol against the manifest facade.
@@ -699,6 +652,28 @@ impl Interpreter {
             }
         }
 
+        // An import without a symbol list brings in every export
+        // (`docs/guide/10_modules.md`); the importer's own definitions take
+        // precedence over those names.
+        if import.symbols.is_empty() {
+            // A package facade (`manifest.exports`) limits what "every
+            // export" means.
+            let mut names: Vec<&String> = exports
+                .keys()
+                .filter(|name| {
+                    manifest_exports_filter
+                        .as_ref()
+                        .is_none_or(|facade| facade.contains(*name))
+                })
+                .collect();
+            names.sort();
+            for name in names {
+                self.env.define_star_import(name, exports[name].clone());
+                self.bind_imported_type(&loaded, name, name);
+            }
+            return Ok(Signal::Value(Value::Unit));
+        }
+
         // Bind imported symbols into current scope
         for sym in &import.symbols {
             let name = &sym.name;
@@ -719,22 +694,7 @@ impl Interpreter {
                     });
                 }
                 // QF-17: TypeDef がインポートされた場合、type_defs と type_methods も登録
-                if let Some(td_fields) = cached_type_defs.get(name) {
-                    self.type_defs
-                        .insert(local_name.to_string(), td_fields.clone());
-                }
-                if let Some(mold_fields) = cached_mold_defs.get(name) {
-                    self.mold_defs
-                        .insert(local_name.to_string(), mold_fields.clone());
-                }
-                if let Some(enum_variants) = cached_enum_defs.get(name) {
-                    self.enum_defs
-                        .insert(local_name.to_string(), enum_variants.clone());
-                }
-                if let Some(td_methods) = cached_type_methods.get(name) {
-                    self.type_methods
-                        .insert(local_name.to_string(), td_methods.clone());
-                }
+                self.bind_imported_type(&loaded, name, local_name);
             } else {
                 return Err(RuntimeError {
                     message: format!(
@@ -1053,67 +1013,20 @@ impl Interpreter {
             });
         }
 
-        let prev_file = self.current_file.clone();
-        let prev_env = self.env.clone();
-        let prev_exported_symbols = std::mem::take(&mut self.module_exported_symbols);
-        let prev_type_defs = self.type_defs.clone();
-        let prev_mold_defs = self.mold_defs.clone();
-        let prev_type_methods = self.type_methods.clone();
-        // same enum-registry isolation as the plain import path.
-        let prev_enum_defs = self.enum_defs.clone();
-        // E30B-007 / Lock-G: stash the previous facade context (if any) so
-        // nested facade loads (currently disallowed but defensively handled)
-        // restore correctly. The new context exposes the package id + arity
-        // map to `RustAddon["fn"](arity <= N)` evaluation inside the facade.
-        let prev_addon_facade_ctx = self.loading_addon_facade_ctx.take();
-
-        self.current_file = Some(canonical.clone());
-        self.loading_modules.insert(canonical.clone());
-        self.env = Environment::new();
-        self.loading_addon_facade_ctx = Some((
+        // Stash the previous facade context (if any) so nested facade loads
+        // (currently disallowed but defensively handled) restore correctly.
+        // The new context exposes the package id + arity map to
+        // `RustAddon["fn"](arity <= N)` evaluation inside the facade: each
+        // addon function is bound explicitly there, and a bare reference to
+        // a manifest function is an undefined identifier (`[E1413]`).
+        let prev_addon_facade_ctx = self.loading_addon_facade_ctx.replace((
             resolved.package_id.clone(),
             resolved.manifest.functions.clone(),
         ));
-
-        // E30B-007 sub-step B-5 (Lock-G Sub-G4 verdict 2026-04-28):
-        // legacy implicit pre-inject is REMOVED in @e.30. E gen は破壊的
-        // 変更許容のため、deprecation period なしで撤廃する。各 addon
-        // function は facade で **明示的に** `Name <= RustAddon["fn"](arity
-        // <= N)` と binding する必要がある。`taida-lang/terminal` 等の
-        // 公式 addon は v@b.8 → v@b.9 で migration 済 (TMB-029 解消)。
-        //
-        // bare 参照 (例えば `size <= terminalSize()` のように `terminalSize`
-        // を未 binding 状態で呼ぶ) は facade load 時に identifier 未定義
-        // エラーとなり、`eval_program` が `[E1413]` 等価のエラーで reject
-        // する。明示 binding 経路は `eval_rust_addon_binding` (eval.rs) で
-        // sentinel string `__taida_addon_call::<pkg>::<fn>` を生成し、
-        // 旧 pre-inject 経路と structurally identical な値を bind する。
-        //
-        // (loading_addon_facade_ctx は L995-998 で既に set 済で、これが
-        // RustAddon[...] binding 評価の前提 context となる。)
-
-        let exec_result = self.eval_program(&program);
-
-        let module_env = self.env.clone();
-        let exported_symbols = std::mem::take(&mut self.module_exported_symbols);
-        let module_type_defs = self.type_defs.clone();
-        let module_mold_defs = self.mold_defs.clone();
-        let module_type_methods = self.type_methods.clone();
-        // snapshot the facade's enums before restoring the caller's.
-        let module_enum_defs = self.enum_defs.clone();
-
-        self.env = prev_env;
-        self.current_file = prev_file;
-        self.loading_modules.remove(&canonical);
-        self.module_exported_symbols = prev_exported_symbols;
-        self.type_defs = prev_type_defs;
-        self.mold_defs = prev_mold_defs;
-        self.type_methods = prev_type_methods;
-        // restore the importer's enum registry.
-        self.enum_defs = prev_enum_defs;
+        let run = self.run_module_program(&program, &canonical, |_| {});
         self.loading_addon_facade_ctx = prev_addon_facade_ctx;
 
-        if let Err(e) = exec_result {
+        if let Err(e) = &run.result {
             return Err(RuntimeError {
                 message: format!(
                     "Error executing addon facade '{}': {}",
@@ -1122,86 +1035,18 @@ impl Interpreter {
                 ),
             });
         }
+        if matches!(run.result, Ok(Value::Gorilla)) {
+            return Err(self.gorilla_escape());
+        }
 
         // Collect facade exports. If the facade used `<<<`, only the
         // listed symbols survive. Otherwise every top-level binding is
-        // exported (same rule as regular modules).
-        let all_symbols = module_env.snapshot();
-        let mut exports: std::collections::HashMap<String, Value> = if exported_symbols.is_empty() {
-            all_symbols.into_iter().collect()
-        } else {
-            all_symbols
-                .into_iter()
-                .filter(|(k, _)| exported_symbols.contains(k))
-                .collect()
-        };
-
-        // C20B-015 / ROOT-18: Attach the facade's TypeDef / enum scope onto
-        // any exported function so that `JSON[raw, Schema]()` inside a facade
-        // helper resolves against the facade's own typedefs, not the
-        // importing module's.
-        {
-            let facade_td_arc = if module_type_defs.is_empty() {
-                None
-            } else {
-                Some(std::sync::Arc::new(module_type_defs.clone()))
-            };
-            let facade_ed_arc = if module_enum_defs.is_empty() {
-                None
-            } else {
-                Some(std::sync::Arc::new(module_enum_defs.clone()))
-            };
-            for value in exports.values_mut() {
-                if let Value::Function(fv) = value {
-                    if fv.module_type_defs.is_none() {
-                        fv.module_type_defs = facade_td_arc.clone();
-                    }
-                    if fv.module_enum_defs.is_none() {
-                        fv.module_enum_defs = facade_ed_arc.clone();
-                    }
-                }
-            }
-        }
-
-        // Persist TypeDef / method metadata for exported symbols so
-        // user code can pattern-match on facade-declared types if the
-        // facade ever introduces them. Today the terminal facade only
-        // exports packs + aliases, but keeping the hook in place
-        // avoids a future gotcha.
-        let exported_type_defs: std::collections::HashMap<String, Vec<crate::parser::FieldDef>> =
-            module_type_defs
-                .into_iter()
-                .filter(|(k, _)| exports.contains_key(k))
-                .collect();
-        let exported_mold_defs: std::collections::HashMap<String, Vec<crate::parser::FieldDef>> =
-            module_mold_defs
-                .into_iter()
-                .filter(|(k, _)| exports.contains_key(k))
-                .collect();
-        // export from the facade's own snapshot.
-        let exported_enum_defs: std::collections::HashMap<String, Vec<String>> = module_enum_defs
-            .iter()
-            .filter(|(k, _)| exports.contains_key(*k))
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        let exported_type_methods: std::collections::HashMap<
-            String,
-            std::collections::HashMap<String, crate::parser::FuncDef>,
-        > = module_type_methods
-            .into_iter()
-            .filter(|(k, _)| exports.contains_key(k))
-            .collect();
-
-        self.loaded_modules.insert(
-            canonical,
-            LoadedModule {
-                exports: exports.clone(),
-                type_defs: exported_type_defs,
-                mold_defs: exported_mold_defs,
-                enum_defs: exported_enum_defs,
-                type_methods: exported_type_methods,
-            },
-        );
+        // exported (same rule as regular modules). Type metadata for the
+        // exported symbols is kept so user code can use facade-declared
+        // types if a facade ever introduces them.
+        let loaded = self.loaded_module_from_run(&run);
+        let exports = loaded.exports.clone();
+        self.loaded_modules.insert(canonical, loaded);
 
         Ok(exports)
     }

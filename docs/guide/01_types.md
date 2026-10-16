@@ -270,6 +270,8 @@ err => r                      // r: Result[Int, _]（述語は未評価）
 Result[age, _ x = x >= 18](throw <= err) >=> validAge
 ```
 
+`throw <=` を渡していない Result の `throw` フィールドは、空の Error（`type` と `message` が `""`）として読めます。
+
 ### Lax[T] -- 必ず値を返すモールド型
 
 「操作が失敗しても必ず値を返す」ことを保証するモールド型です。失敗時は型 T のデフォルト値にフォールバックします。
@@ -320,7 +322,7 @@ rilax.relax() => relaxed     // relaxed: RelaxedGorillax[Int]
 
 非同期処理を表現します。`>=>` がブロッキング await として機能します。
 
-```taida
+```taida fragment
 fetchData url: Str =
   httpGet(url)
 => :Async[@(body: Str)]
@@ -346,6 +348,7 @@ data >=> response          // 完了まで待ちます
 | Molten | `Molten`（空の溶鉄） |
 | JSON 分岐 | `{}` |
 | Lax[T] | T のデフォルト値 |
+| 関数型 (`:A => :R` など) | 引数を受け取って R のデフォルト値を返す無名関数 |
 
 ```taida
 // 型を定義すれば、省略されたフィールドはデフォルト値になります
@@ -574,7 +577,7 @@ enum値は ordinal（0始まりの Int）として評価されます。`Status:O
 
 Enum 型は `<<< @(...)` でエクスポート、`>>> ./mod.td => @(...)` でインポートできます。インポート先では `Status:Ok()` を直接呼び出せます。
 
-```taida
+```taida fragment
 // status.td
 Enum => Status = :Ok :Fail :Retry
 <<< @(Status)
@@ -667,6 +670,7 @@ stdout(jsonEncode(rec))  // {"state":"Running"}
 | プリミティブ | JSON 分岐 | `{}` (メソッドなし) |
 | コレクション | @[T] (リスト) | `@[]` |
 | コレクション | @(...) (ぶちパック) | 各フィールドのデフォルト値 |
+| 関数 | `:A => :R` | R のデフォルト値を返す無名関数 |
 | モールド | Result[T, P] | T のデフォルト値 |
 | モールド | Lax[T] | T のデフォルト値 |
 | モールド | Async[T] | T のデフォルト値 |

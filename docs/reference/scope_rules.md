@@ -14,7 +14,11 @@ Taida Langには2種類のスコープがあります。
 `>>> ./module.td`、`>>> ../module.td`、`>>> /absolute/module.td` の
 ような filesystem import は、実行中ソースから親方向に探索した
 プロジェクトルートを境界にします。プロジェクトルート マーカー は
-`packages.tdm`、`taida.toml`、`.git/` のいずれかです。
+`packages.tdm`、`taida.toml`、`.git/` のいずれかです。共有の一時
+ディレクトリ (システムの一時ディレクトリそのものと、`/tmp` のように
+誰でも書き込めてスティッキービットの付いたディレクトリ) に直接置かれた
+マーカーは採用しません ([CLI リファレンス](cli.md) の「プロジェクト
+ルート解決」を参照)。
 
 `.taida/` は依存・ビルド出力・ユーザーキャッシュなどの状態置き場であり、
 プロジェクトルート マーカー ではありません。特に `~/.taida/` はグローバル
@@ -26,6 +30,15 @@ Taida Langには2種類のスコープがあります。
 を含む import がその境界の外へ出る場合、Interpreter / Native /
 WASM ビルドのいずれも、共通のパストラバーサル拒否診断で reject
 します。
+
+パッケージ形式の import (`>>> owner/name`、`>>> owner/name/sub`) は
+`.taida/deps/` の中で解決します。依存パッケージの中に書かれた import も、
+まず実行・ビルド・検査しているプログラムのプロジェクトの `.taida/deps/` を探し、
+見つからなければ依存パッケージ自身のプロジェクトの `.taida/deps/` を探します
+(`taida ingot install` は依存パッケージの依存もプログラムの `.taida/deps/` に入れます)。
+`.`・`..`・空のセグメントを含む指定はパッケージとして扱いません。依存パッケージの `packages.tdm` が
+指す entry module (`>>> ./main.td`) は、パッケージのディレクトリの中の
+相対パスでなければなりません。
 
 ---
 
@@ -53,7 +66,7 @@ pilot <= Pilot(name <= "Misato", age <= MAX_SYNC_RATE)
 - `<<<` でエクスポートすると他のモジュールからもアクセス可能
 - インポートしたシンボルもモジュールスコープで利用可能
 
-```taida
+```taida fragment
 >>> ./utils.td => @(helper)  // helperがモジュールスコープに追加される
 
 result <= helper(data)  // どこからでも使用可能
@@ -243,7 +256,7 @@ updated_pilot <= @(name <= pilot.name, age <= pilot.age + 1)
 
 ## スコープのまとめ
 
-```taida
+```taida fragment
 // === モジュールスコープ ===
 Config = @(timeout: Int)  // 型定義
 DEFAULT_TIMEOUT <= 5000   // 定数

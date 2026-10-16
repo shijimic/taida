@@ -250,7 +250,7 @@ fn load_facade_file(
             e
         ),
     })?;
-    let (program, parse_errors) = crate::parser::parse(&source);
+    let (program, parse_errors) = crate::parser::parse_detached(&source);
     if !parse_errors.is_empty() {
         visiting.remove(&canonical);
         return Err(FacadeLoadError {
@@ -272,14 +272,39 @@ fn load_facade_file(
     let mut local_funcs: HashMap<String, FuncDef> = HashMap::new();
     let mut local_exports: HashSet<String> = HashSet::new();
     let mut child_imports: Vec<(PathBuf, HashMap<String, String>)> = Vec::new();
+    // Names a relative `>>>` import has bound so far, and aliases to
+    // them, resolved once the child files are loaded.
+    let mut imported_here: HashSet<String> = HashSet::new();
+    let mut aliases_to_imports: Vec<(String, String)> = Vec::new();
 
     for stmt in &program.statements {
         match stmt {
             Statement::Assignment(assign) => match &assign.value {
                 // `Name <= Ident(B)` → alias if B is a known addon fn.
                 Expr::Ident(target_fn, _) => {
-                    if manifest.functions.contains_key(target_fn) {
-                        local_aliases.insert(assign.target.clone(), target_fn.clone());
+                    if let Some(arity) = manifest.functions.get(target_fn)
+                        && !local_aliases.contains_key(target_fn)
+                        && !imported_here.contains(target_fn)
+                    {
+                        // A manifest function is not pre-injected: the
+                        // facade binds it with `RustAddon[...]` before
+                        // referring to it, as the interpreter requires.
+                        visiting.remove(&canonical);
+                        return Err(FacadeLoadError {
+                            message: format!(
+                                "[E1413] addon facade for '{}': bare reference to addon \
+                                 manifest function '{}' is no longer pre-injected. Add an \
+                                 explicit binding to the top of the facade: `{} <= \
+                                 RustAddon[\"{}\"](arity <= {})`. AST migration tooling is \
+                                 not available; update the facade manually.",
+                                manifest.package, target_fn, target_fn, target_fn, arity
+                            ),
+                        });
+                    }
+                    if let Some(bound) = local_aliases.get(target_fn).cloned() {
+                        local_aliases.insert(assign.target.clone(), bound);
+                    } else if imported_here.contains(target_fn) {
+                        aliases_to_imports.push((assign.target.clone(), target_fn.clone()));
                     } else {
                         visiting.remove(&canonical);
                         return Err(FacadeLoadError {
@@ -514,6 +539,7 @@ fn load_facade_file(
                         )
                     })
                     .collect();
+                imported_here.extend(requested.values().cloned());
                 child_imports.push((child_canonical, requested));
             }
             Statement::Export(export_stmt) => {
@@ -638,6 +664,27 @@ fn load_facade_file(
                     .facade_funcs
                     .insert(local_name.clone(), fd.clone());
                 universe_funcs.insert(local_name.clone(), fd.clone());
+            }
+        }
+    }
+
+    for (name, imported) in aliases_to_imports {
+        match universe_aliases.get(&imported) {
+            Some(target) => {
+                local_aliases.insert(name, target.clone());
+            }
+            None => {
+                visiting.remove(&canonical);
+                return Err(FacadeLoadError {
+                    message: format!(
+                        "addon facade '{}' aliases '{}' to '{}', which its import does not \
+                         bind to an addon function. Chained facade aliasing across \
+                         pure-Taida helpers is not yet supported.",
+                        facade_path.display(),
+                        name,
+                        imported
+                    ),
+                });
             }
         }
     }

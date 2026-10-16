@@ -1,5 +1,7 @@
 use super::eval::{Interpreter, RuntimeError, Signal};
-use super::value::{AsyncStatus, AsyncValue, PendingState, Value};
+use super::value::{
+    AsyncStatus, AsyncValue, FuncValue, PRELUDE_FUNCTION_PREFIX, PendingState, Value,
+};
 use crate::crypto;
 /// Prelude (built-in) functions for the Taida interpreter.
 ///
@@ -93,12 +95,11 @@ impl Interpreter {
                     err.error_type.clone()
                 }
             }
-            Value::EnumVal(enum_name, ordinal) => self
-                .enum_defs
-                .get(enum_name)
+            Value::EnumVal(enum_key, ordinal) => self
+                .enum_variants_of(enum_key)
                 .and_then(|variants| variants.get(*ordinal as usize))
                 .cloned()
-                .unwrap_or_else(|| enum_name.clone()),
+                .unwrap_or_else(|| enum_key.clone()),
             other => Self::type_name_of(other).to_string(),
         }
     }
@@ -235,20 +236,128 @@ impl Interpreter {
                         });
                     }
                 };
+                // A bad count and an entropy failure are thrown as a
+                // CryptoError, so `|==` catches them; the count is at most
+                // 256 MiB. The wording is the compiled backends'.
+                let crypto_error = |message: String| -> Result<Signal, RuntimeError> {
+                    Ok(Signal::Throw(Value::Error(super::value::ErrorValue {
+                        error_type: "CryptoError".to_string(),
+                        message,
+                        fields: Vec::new(),
+                    })))
+                };
                 if n < 0 {
-                    return Err(RuntimeError {
-                        message: format!("randomBytes: count must be non-negative, got {}", n),
-                    });
+                    return crypto_error("randomBytes: count must be non-negative".to_string());
+                }
+                if n > 256 * 1024 * 1024 {
+                    return crypto_error("randomBytes: count exceeds 256 MiB limit".to_string());
                 }
                 match crypto::random_bytes(n as usize) {
                     Ok(bytes) => Ok(Signal::Value(Value::bytes(bytes))),
-                    Err(e) => Err(RuntimeError { message: e }),
+                    Err(e) => crypto_error(e),
                 }
             }
             other => Err(RuntimeError {
                 message: format!("unknown crypto builtin '{}'", other),
             }),
         }
+    }
+
+    /// Prelude functions that can be used as values (`f <= stdout`,
+    /// `Map[xs, jsonEncode]()`, `x => debug => y`). A name the program
+    /// binds itself shadows the prelude one.
+    pub(crate) const PRELUDE_FUNCTION_VALUES: &'static [&'static str] = &[
+        "stdout",
+        "stderr",
+        "stdin",
+        "stdinLine",
+        "nowMs",
+        "sleep",
+        "jsonEncode",
+        "jsonPretty",
+        "debug",
+        "range",
+        "exit",
+        "hashMap",
+        "setOf",
+        "strOf",
+        "zip",
+        "enumerate",
+        "typeof",
+        "assert",
+        "throw",
+    ];
+
+    /// The value of the unbound name `name` when it is a prelude function.
+    pub(crate) fn prelude_function_value(&self, name: &str) -> Option<Value> {
+        if !Self::PRELUDE_FUNCTION_VALUES.contains(&name) {
+            return None;
+        }
+        Some(Value::Function(FuncValue {
+            name: format!("{}{}", PRELUDE_FUNCTION_PREFIX, name),
+            params: Vec::new(),
+            type_params_count: 0,
+            body: Vec::new(),
+            closure: Arc::new(std::collections::HashMap::new()),
+            return_type: None,
+            module: self.active_module,
+            def_site: None,
+        }))
+    }
+
+    /// Call a prelude function through its function value: the arguments
+    /// reach the builtin exactly as in a direct call.
+    pub(crate) fn call_prelude_function_value(
+        &mut self,
+        name: &str,
+        arg_values: Vec<Value>,
+    ) -> Result<Signal, RuntimeError> {
+        let span = crate::lexer::Span::new(0, 0, 0, 0);
+        let mut scope = std::collections::HashMap::new();
+        let args: Vec<Expr> = arg_values
+            .into_iter()
+            .enumerate()
+            .map(|(i, value)| {
+                let arg_name = format!("__prelude_arg_{}", i);
+                scope.insert(arg_name.clone(), value);
+                Expr::Ident(arg_name, span.clone())
+            })
+            .collect();
+        // The arguments live in a scope of their own; no binding of the
+        // program can stand in for the builtin.
+        let mark = self.env.mark();
+        self.env
+            .push_linked_scope(scope, crate::interpreter::env::Link::End);
+        let result = self.try_builtin_func(name, &args);
+        self.env.truncate(mark);
+        match result? {
+            Some(signal) => Ok(signal),
+            None => Err(RuntimeError {
+                message: format!("Unknown prelude function '{}'", name),
+            }),
+        }
+    }
+
+    /// Call through a dispatch sentinel an import bound to `name`.
+    ///
+    /// `taida-lang/os` and `taida-lang/pool` builtins are matched by
+    /// their export name, which the sentinel carries — so an aliased
+    /// import (`>>> taida-lang/os => @(readFile: rf)`) reaches the same
+    /// builtin. The other families resolve the sentinel through the
+    /// environment themselves.
+    pub(crate) fn try_imported_builtin(
+        &mut self,
+        name: &str,
+        tag: &str,
+        args: &[Expr],
+    ) -> Result<Option<Signal>, RuntimeError> {
+        if let Some(sym) = tag.strip_prefix("__os_builtin_") {
+            return self.try_os_func(sym, args);
+        }
+        if let Some(sym) = tag.strip_prefix("__pool_builtin_") {
+            return self.try_pool_func(sym, args);
+        }
+        self.try_builtin_func(name, args)
     }
 
     /// Try to handle a built-in function call (prelude functions).
@@ -586,7 +695,7 @@ impl Interpreter {
                     Value::Json(j) => j.clone(),
                     _ => crate::interpreter::json::taida_value_to_json_with_enum_defs(
                         &val,
-                        &self.enum_defs,
+                        &self.enum_variants,
                     ),
                 };
                 Ok(Some(Signal::Value(Value::str(
@@ -617,7 +726,7 @@ impl Interpreter {
                     Value::Json(j) => j.clone(),
                     _ => crate::interpreter::json::taida_value_to_json_with_enum_defs(
                         &val,
-                        &self.enum_defs,
+                        &self.enum_variants,
                     ),
                 };
                 Ok(Some(Signal::Value(Value::str(
@@ -806,50 +915,62 @@ impl Interpreter {
             }
 
             // ── hashMap(entries): create HashMap ──
+            // A list of `@(key, value)` packs (as `entries()` returns) or a
+            // pack, whose fields become entries keyed by the field names.
+            // Entries are stored as successive `.set(key, value)` calls
+            // store them: a later duplicate key replaces the value and
+            // keeps the first position. A list element pack without `key`
+            // and `value` fields gives its first two fields, and a list
+            // element list its first two elements.
             "hashMap" => {
-                let entries = if let Some(arg) = args.first() {
+                let mut entries: Vec<(Value, Value)> = Vec::new();
+                let mut add = |key: Value, value: Value| {
+                    match entries.iter_mut().find(|(k, _)| *k == key) {
+                        Some(entry) => entry.1 = value,
+                        None => entries.push((key, value)),
+                    }
+                };
+                if let Some(arg) = args.first() {
                     match self.eval_expr(arg)? {
                         Signal::Value(Value::List(items)) => {
-                            let mut entries = Vec::new();
                             for item in items.iter() {
-                                if let Value::BuchiPack(fields) = item {
-                                    // Try tuple-like @(first, second) or @(key, value) patterns
-                                    if fields.len() >= 2 {
-                                        let key = fields[0].1.clone();
-                                        let value = fields[1].1.clone();
-                                        entries.push(Value::pack(vec![
-                                            ("key".into(), key),
-                                            ("value".into(), value),
-                                        ]));
+                                match item {
+                                    Value::BuchiPack(fields) => {
+                                        let named = |name: &str| {
+                                            fields.iter().find(|(n, _)| n == name).map(|(_, v)| v)
+                                        };
+                                        if let (Some(key), Some(value)) =
+                                            (named("key"), named("value"))
+                                        {
+                                            add(key.clone(), value.clone());
+                                        } else if fields.len() >= 2 {
+                                            add(fields[0].1.clone(), fields[1].1.clone());
+                                        }
                                     }
-                                } else if let Value::List(pair) = item
-                                    && pair.len() >= 2 {
-                                        entries.push(Value::pack(vec![
-                                            ("key".into(), pair[0].clone()),
-                                            ("value".into(), pair[1].clone()),
-                                        ]));
+                                    Value::List(pair) if pair.len() >= 2 => {
+                                        add(pair[0].clone(), pair[1].clone());
                                     }
+                                    _ => {}
+                                }
                             }
-                            entries
                         }
                         Signal::Value(Value::BuchiPack(fields)) => {
-                            // BuchiPack argument: each field becomes a key-value entry
-                            // hashMap(@(a <= 1, b <= 2)) -> [{key: "a", value: 1}, {key: "b", value: 2}]
-                            let mut entries = Vec::new();
                             for (name, value) in fields.iter() {
-                                entries.push(Value::pack(vec![
-                                    ("key".into(), Value::str(name.clone())),
-                                    ("value".into(), value.clone()),
-                                ]));
+                                if !name.starts_with("__") {
+                                    add(Value::str(name.clone()), value.clone());
+                                }
                             }
-                            entries
                         }
-                        Signal::Value(_) => Vec::new(),
+                        Signal::Value(_) => {}
                         other => return Ok(Some(other)),
                     }
-                } else {
-                    Vec::new()
-                };
+                }
+                let entries: Vec<Value> = entries
+                    .into_iter()
+                    .map(|(key, value)| {
+                        Value::pack(vec![("key".into(), key), ("value".into(), value)])
+                    })
+                    .collect();
                 Ok(Some(Signal::Value(Value::pack(vec![
                     ("__entries".into(), Value::list(entries)),
                     ("__type".into(), Value::str("HashMap".into())),

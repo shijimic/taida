@@ -31,7 +31,7 @@ type ModuleImports = Vec<(String, Vec<String>, Option<String>)>;
 /// feature, so we must not silently upgrade it.
 /// * `wasm-wasi` / `wasm-edge` / `wasm-full` — add `-msimd128` so clang's wasm
 /// backend is allowed to lower f32/f64 hot loops to `v128.*` when the
-/// auto-vectorizer finds a match. wasmtime 42+ and the target edge runtimes
+/// auto-vectorizer finds a match. wasmtime 33+ and the target edge runtimes
 /// all default-enable the simd128 feature, so this is compatible with the
 /// existing execution story.
 ///
@@ -42,6 +42,9 @@ const WASM_CLANG_FLAGS_COMMON: &[&str] = &[
     "-nostdlib",
     "-O2",
     "-fwrapv",
+    // the math kernel's error-free transformations need every operation
+    // rounded on its own
+    "-ffp-contract=off",
     "-c",
 ];
 const WASM_CLANG_FLAGS_MIN: &[&str] = &[];
@@ -572,6 +575,7 @@ fn compile_to_object_inner(
             message: format!("parse errors:\n{}", msgs.join("\n")),
         });
     }
+    reject_versioned_imports(input_path, &program)?;
 
     let mut lowering = Lowering::new();
     // QF-16/17: ソースディレクトリを設定（モジュールインポート解決用）
@@ -699,6 +703,9 @@ fn compile_file_inner(
                         rejected
                     ),
                 });
+            }
+            if let Some(package) = unresolved_package(&dep_path) {
+                return Err(missing_package_error(&package));
             }
             let canonical = dep_path.canonicalize().unwrap_or(dep_path.clone());
             if compiled.contains(&canonical) {
@@ -930,6 +937,51 @@ fn lexical_escapes_root(path: &Path, project_root: &Path) -> bool {
 /// import escapes the project root, and recover the original module
 /// path string so the caller can emit the canonical 3-backend
 /// rejection message. Returns `None` if `path` is a real on-disk path.
+/// The package (`name` or `name@version`) of a path `resolve_module_path`
+/// produced for a package import it could not resolve.
+fn unresolved_package(path: &Path) -> Option<String> {
+    let s = path.to_string_lossy();
+    let stripped = s.strip_prefix("<unresolved package: ")?.strip_suffix('>')?;
+    Some(stripped.to_string())
+}
+
+/// The error for an import of a package that is not installed, worded as
+/// the interpreter words it.
+fn missing_package_error(package: &str) -> CompileError {
+    CompileError {
+        message: format!(
+            "Package '{}' not found. Run 'taida ingot deps' to install dependencies.",
+            package
+        ),
+    }
+}
+
+/// A versioned import (`>>> pkg@a.1`) belongs in packages.tdm: a module
+/// that is not a `.tdm` file names the package without a version. The
+/// interpreter's rule and wording.
+fn reject_versioned_imports(
+    path: &Path,
+    program: &crate::parser::Program,
+) -> Result<(), CompileError> {
+    if path.extension().is_some_and(|ext| ext == "tdm") {
+        return Ok(());
+    }
+    for stmt in &program.statements {
+        if let crate::parser::Statement::Import(import) = stmt
+            && let Some(version) = &import.version
+        {
+            return Err(CompileError {
+                message: format!(
+                    "Versioned import '>>> {}@{}' is only allowed in packages.tdm. \
+                     In .td files, use '>>> {} => @(...)' without a version.",
+                    import.path, version, import.path
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn traversal_rejection_path(path: &Path) -> Option<String> {
     let s = path.to_string_lossy();
     let prefix = "<path traversal rejected: ";
@@ -1009,7 +1061,11 @@ fn link_objects_inner(
         if compiler.contains("clang") {
             // -lm is not needed on Windows (included in MSVC CRT).
             // -lpthread is required: native_runtime.c uses pthread for Async support.
-            c.arg("-fwrapv").arg("-o").arg(bin_path).arg("-lpthread");
+            c.arg("-fwrapv")
+                .arg("-ffp-contract=off")
+                .arg("-o")
+                .arg(bin_path)
+                .arg("-lpthread");
         } else {
             // cl.exe: pthread is not natively available; native_runtime.c's pthread
             // usage will need a pthreads-win32 library or Windows threads adaptation.
@@ -1021,7 +1077,9 @@ fn link_objects_inner(
     let mut cmd = {
         // Unix: cc でコンパイル + リンク（-no-pie で PIE 警告を回避）
         let mut c = Command::new("cc");
-        c.arg("-no-pie").arg("-fwrapv");
+        // -ffp-contract=off: the math kernel's error-free transformations
+        // need every floating-point operation rounded on its own.
+        c.arg("-no-pie").arg("-fwrapv").arg("-ffp-contract=off");
         if perf_counters_enabled() {
             c.arg("-DTAIDA_PERF_COUNTERS");
         }
@@ -1366,6 +1424,9 @@ fn inline_wasm_module_imports_with_backend(
                 ),
             });
         }
+        if let Some(package) = unresolved_package(&dep_path) {
+            return Err(missing_package_error(&package));
+        }
         let dep_source = fs::read_to_string(&dep_path).map_err(|e| CompileError {
             message: format!("failed to read module '{}': {}", dep_path.display(), e),
         })?;
@@ -1381,6 +1442,7 @@ fn inline_wasm_module_imports_with_backend(
                 ),
             });
         }
+        reject_versioned_imports(&dep_path, &dep_program)?;
 
         let mut dep_lowering = Lowering::new();
         if let Some(parent) = dep_path.parent() {
@@ -1555,6 +1617,7 @@ fn wasm_frontend(
             message: format!("parse errors:\n{}", msgs.join("\n")),
         });
     }
+    reject_versioned_imports(input_path, &program)?;
 
     let mut lowering = Lowering::new();
     if let Some(parent) = input_path.parent() {
@@ -1681,8 +1744,22 @@ pub(crate) fn wasm_arena_export_flags(profile: emit_wasm_c::WasmProfile) -> Vec<
     }
 }
 
+/// Size of the C shadow stack (the linear-memory stack clang's wasm
+/// code uses for address-taken locals). Big enough that the engine's own
+/// call-stack limit, not this one, bounds deep recursion.
+const WASM_SHADOW_STACK_BYTES: u32 = 256 * 1024;
+
 pub(crate) fn wasm_memory_ld_flags() -> Vec<String> {
-    let mut out = Vec::new();
+    // The shadow stack goes first, below the static data. wasm-ld's
+    // default layout puts it after the data, growing down into it, so an
+    // overflow silently overwrote string literals and globals and the
+    // program went on with corrupted values. Placed first, an overflow
+    // leaves linear memory and traps.
+    let mut out = vec![
+        "--stack-first".to_string(),
+        "-z".to_string(),
+        format!("stack-size={}", WASM_SHADOW_STACK_BYTES),
+    ];
     if let Ok(v) = std::env::var("TAIDA_WASM_INITIAL_PAGES")
         && let Ok(pages) = v.trim().parse::<u32>()
         && pages > 0

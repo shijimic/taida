@@ -262,18 +262,17 @@ pub struct TypeRegistry {
 impl TypeRegistry {
     pub fn new() -> Self {
         let mut registry = Self::default();
-        // Register built-in Error base type.
-        // kind/code are declared on the base Error
-        // because every caught error exposes the full ErrorInfo field set —
-        // the catch sites canonicalize thrown packs (interp / native / wasm)
-        // so `err.kind` handlers stay well-defined on every throw path.
+        // Register built-in Error base type: `@(type: Str, message: Str)`,
+        // as the docs define it. A user error type may declare any further
+        // fields, `kind` and `code` of any type included. The `kind` / `code`
+        // every caught error exposes come from the catch sites, which add
+        // them when the thrown value lacks them (interp / native / wasm); the
+        // checker types them on an error handler's parameter only.
         registry.type_defs.insert(
             "Error".to_string(),
             vec![
                 ("type".to_string(), Type::Str),
                 ("message".to_string(), Type::Str),
-                ("kind".to_string(), Type::Str),
-                ("code".to_string(), Type::Int),
             ],
         );
         registry.type_defs.insert(
@@ -478,11 +477,19 @@ impl TypeRegistry {
             ) => {
                 actual_name == expected_name
                     && actual_args.len() == expected_args.len()
-                    && actual_args.iter().zip(expected_args.iter()).all(
-                        |(actual_arg, expected_arg)| {
+                    && actual_args
+                        .iter()
+                        .zip(expected_args.iter())
+                        .enumerate()
+                        .all(|(idx, (actual_arg, expected_arg))| {
                             self.is_subtype_of_inner(actual_arg, expected_arg, strict_int_float)
-                        },
-                    )
+                                // A Result's error is read through
+                                // `errorInfo()`, which every error gives.
+                                || (actual_name == "Result"
+                                    && idx == 1
+                                    && self.is_error_like(actual_arg)
+                                    && self.is_error_like(expected_arg))
+                        })
             }
             (Type::Error(a), Type::Error(b)) => {
                 self.named_inherits_from(a, b) || self.named_fields_subtype(a, b, strict_int_float)
@@ -519,6 +526,15 @@ impl TypeRegistry {
                 }
             }
             _ => actual.is_subtype_of_inner(expected, strict_int_float),
+        }
+    }
+
+    /// An error type, or the `ErrorInfo` view of one.
+    fn is_error_like(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Error(_) => true,
+            Type::Named(name) => name == "ErrorInfo" || self.is_error_type(name),
+            _ => false,
         }
     }
 
@@ -946,20 +962,19 @@ mod tests {
         assert!(reg.is_error_type("ValidationError"));
 
         // Check field composition: ValidationError should have type, message,
-        // kind, code, app_code, field (kind/code come from the base
-        // Error declaration)
+        // app_code, field (the base Error declares only type / message)
         let ve_fields = reg
             .get_type_fields("ValidationError")
             .expect("ValidationError should be registered");
         assert_eq!(
             ve_fields.len(),
-            6,
-            "ValidationError should have 6 fields: type, message, kind, code, app_code, field"
+            4,
+            "ValidationError should have 4 fields: type, message, app_code, field"
         );
         assert!(ve_fields.iter().any(|(n, _)| n == "type"));
         assert!(ve_fields.iter().any(|(n, _)| n == "message"));
-        assert!(ve_fields.iter().any(|(n, _)| n == "kind"));
-        assert!(ve_fields.iter().any(|(n, _)| n == "code"));
+        assert!(!ve_fields.iter().any(|(n, _)| n == "kind"));
+        assert!(!ve_fields.iter().any(|(n, _)| n == "code"));
         assert!(ve_fields.iter().any(|(n, _)| n == "app_code"));
         assert!(ve_fields.iter().any(|(n, _)| n == "field"));
 

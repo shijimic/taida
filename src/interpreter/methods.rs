@@ -1,4 +1,4 @@
-use super::eval::{Interpreter, RuntimeError, Signal};
+use super::eval::{Interpreter, RuntimeError, Signal, TypeOrigin};
 use super::value::{AsyncStatus, AsyncValue, StreamStatus, StreamValue, Value};
 use super::value_key::ValueKey;
 /// Method dispatch for Taida values (auto-mold methods).
@@ -356,20 +356,22 @@ impl Interpreter {
                         }
                         if method == "errorInfo"
                             && let Some(type_name_str) = type_name
-                            && (type_name_str == "Error"
-                                || type_name_str == "RelaxedGorillaEscaped"
-                                || self.is_error_subtype(type_name_str, "Error"))
+                            && self.is_error_type_name(type_name_str)
                         {
                             return Ok(Signal::Value(Self::error_info_lax(Some(obj))));
                         }
-                        // Try user-defined methods from type_methods
+                        // User-defined methods: the value's own type decides,
+                        // wherever it was declared (see `resolve_user_method`).
                         if let Some(type_name_str) = type_name {
-                            let func_def_opt = self.type_methods
-                                .get(type_name_str)
-                                .and_then(|methods| methods.get(method))
-                                .cloned();
-                            if let Some(func_def) = func_def_opt {
-                                return self.eval_user_method(&func_def, fields, &arg_values);
+                            let tag = fields
+                                .iter()
+                                .find(|(n, _)| n == "__type")
+                                .map(|(_, v)| v.clone())
+                                .unwrap_or(Value::Unit);
+                            if let Some((func_def, origin)) =
+                                self.resolve_user_method(&tag, type_name_str, method)
+                            {
+                                return self.eval_user_method(&func_def, fields, &arg_values, &origin);
                             }
                         }
                         // Fallback: check for Function field in BuchiPack
@@ -477,54 +479,40 @@ impl Interpreter {
 
     // ── User-defined type methods ────────────────────────────
 
+    /// Run a user-defined method. The body sees the instance fields, its
+    /// parameters, and the top-level scope of the module that declared
+    /// the type — not the caller's scopes. Methods count toward the call
+    /// depth limit like functions.
     fn eval_user_method(
         &mut self,
         func_def: &FuncDef,
         instance_fields: &[(String, Value)],
         arg_values: &[Value],
+        origin: &TypeOrigin,
     ) -> Result<Signal, RuntimeError> {
-        // Instance fields scope (like closure scope)
-        self.env.push_scope();
-        // Inject instance fields as closure variables
-        for (name, val) in instance_fields {
-            if name != "__type" {
-                self.env.define_force(name, val.clone());
-            }
+        if func_def.params.len() > arg_values.len() {
+            let param = &func_def.params[arg_values.len()];
+            return Err(RuntimeError {
+                message: format!(
+                    "Method '{}' missing argument '{}'",
+                    func_def.name, param.name
+                ),
+            });
         }
-        // Local scope for parameters and body
-        self.env.push_scope();
-        // Bind parameters
-        for (i, param) in func_def.params.iter().enumerate() {
-            let val = if i < arg_values.len() {
-                arg_values[i].clone()
-            } else {
-                self.env.pop_scope();
-                self.env.pop_scope();
-                return Err(RuntimeError {
-                    message: format!(
-                        "Method '{}' missing argument '{}'",
-                        func_def.name, param.name
-                    ),
-                });
-            };
-            self.env.define_force(&param.name, val);
+        self.enter_call_depth()?;
+        // A method body is not part of the caller's function: no tail
+        // call from inside it may restart the caller.
+        let prev_active = self.take_active_function();
+        let scope = self.enter_method_scope(origin, instance_fields);
+        for (param, val) in func_def.params.iter().zip(arg_values) {
+            self.env.define_force(&param.name, val.clone());
         }
-        // C20B-015 (symmetric fix): body evaluation must NOT use `?`.
-        // A `RuntimeError` from the body would skip the two pops below,
-        // leaving the pushed instance-fields scope and local scope in
-        // place. In REPL mode the interpreter is reused across inputs,
-        // so the leak would let a subsequent input collide with a
-        // method parameter / instance field at the top level. This
-        // mirrors the Pattern B cleanup applied to the three
-        // `call_function*` body-evaluation paths in eval.rs.
-        //
-        // Note: `eval_user_method` does not touch `type_defs` /
-        // `enum_defs` overlays, `active_function`, or `call_depth`, so
-        // the cleanup here is limited to the two scope pops. Success
-        // path semantics are unchanged.
+        // Body evaluation must NOT use `?`: the scopes are always left
+        // before any error propagates.
         let body_result = self.eval_statements(&func_def.body);
-        self.env.pop_scope(); // pop local scope
-        self.env.pop_scope(); // pop instance fields scope
+        self.leave_call_scope(scope);
+        self.restore_active_function(prev_active);
+        self.exit_call_depth();
         body_result
     }
 
@@ -554,18 +542,17 @@ impl Interpreter {
             .map(|(_, v)| v.clone())
             .unwrap_or(Value::Unit);
 
-        // Determine success/failure:
-        // 1. If throw is explicitly set (not Unit), it's an error
-        // 2. If predicate exists, evaluate P(value) — true = success, false = error
+        // Determine success/failure — the same rule as unmolding (`>=>`):
+        // 1. If a predicate exists, P(value) decides — true = success, false = error
+        //    (`throw` is only the error to raise when it is false)
+        // 2. No predicate: an explicitly set `throw` is an error
         // 3. No predicate + no throw = success (backward compatible)
-        let is_error = if throw_val != Value::Unit {
-            true
-        } else if let Value::Function(ref func) = predicate {
+        let is_error = if let Value::Function(ref func) = predicate {
             let pred_result =
                 self.call_function_with_values(func, std::slice::from_ref(&inner_value))?;
             !pred_result.is_truthy()
         } else {
-            false
+            throw_val != Value::Unit
         };
         let is_success = !is_error;
 
@@ -2115,6 +2102,20 @@ impl Interpreter {
         method: &str,
         args: &[Value],
     ) -> Result<Signal, RuntimeError> {
+        // `map` and `getOrDefault` work on the settled value: an Async still
+        // running in the background (`sleep(ms)`, an async os call) is
+        // awaited first, so the function is applied to its value instead of
+        // being dropped.
+        let settled;
+        let async_val = if matches!(method, "map" | "getOrDefault")
+            && async_val.status == AsyncStatus::Pending
+            && async_val.task.is_some()
+        {
+            settled = self.resolve_async(async_val)?;
+            &settled
+        } else {
+            async_val
+        };
         match method {
             "isPending" => Ok(Signal::Value(Value::Bool(
                 async_val.status == AsyncStatus::Pending,

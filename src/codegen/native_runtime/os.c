@@ -198,12 +198,48 @@ taida_val taida_os_read(taida_val path_ptr) {
     FILE *f = fopen(path, "r");
     if (!f) return taida_os_read_lax_error(taida_os_error_kind(errno, strerror(errno)));
 
-    taida_val size = st.st_size;
-    char *buf = taida_str_alloc(size);
-    taida_val read_bytes = (taida_val)fread(buf, 1, size, f);
+    // Read to the end instead of trusting st_size: files such as those
+    // under /proc report a size of 0 but have contents. A read error (a
+    // directory opens fine but fails to read) is a failure, as is text
+    // that is not UTF-8 — a Str always holds UTF-8.
+    const size_t limit = 64 * 1024 * 1024;
+    size_t cap = st.st_size > 0 ? (size_t)st.st_size + 1 : 4096;
+    size_t len = 0;
+    char *data = (char*)TAIDA_MALLOC(cap, "os_read");
+    for (;;) {
+        if (len == cap) {
+            if (cap > limit) break;
+            cap *= 2;
+            TAIDA_REALLOC(data, cap, "os_read");
+        }
+        size_t n = fread(data + len, 1, cap - len, f);
+        len += n;
+        if (n == 0) break;
+    }
+    if (ferror(f)) {
+        int err = errno;
+        fclose(f);
+        free(data);
+        return taida_os_read_lax_error(taida_os_error_kind(err, strerror(err)));
+    }
     fclose(f);
-    buf[read_bytes] = '\0';
+    if (len > limit) {
+        free(data);
+        return taida_os_read_lax_error("too_large");
+    }
+    for (size_t pos = 0; pos < len;) {
+        size_t consumed = 0;
+        uint32_t cp = 0;
+        if (!taida_utf8_decode_one((const unsigned char *)data + pos, len - pos, &consumed, &cp)) {
+            free(data);
+            return taida_os_read_lax_error("invalid");
+        }
+        pos += consumed;
+    }
 
+    char *buf = taida_str_alloc(len);
+    memcpy(buf, data, len);
+    free(data);
     return taida_lax_new((taida_val)buf, TAIDA_EMPTY_STR);
 }
 
@@ -672,8 +708,21 @@ static int taida_os_mkdir_p(const char *path) {
         }
     }
     int r = mkdir(tmp, 0755);
+    int err = errno;
     free(tmp);
-    if (r != 0 && errno != EEXIST) return -1;
+    if (r != 0) {
+        if (err != EEXIST) {
+            errno = err;
+            return -1;
+        }
+        // Only an existing directory counts as done: a file of that name
+        // is an error (EEXIST), as the interpreter reports it.
+        struct stat st;
+        if (stat(path, &st) != 0 || !S_ISDIR(st.st_mode)) {
+            errno = EEXIST;
+            return -1;
+        }
+    }
     return 0;
 }
 
@@ -706,6 +755,11 @@ taida_val taida_os_rename(taida_val from_ptr, taida_val to_ptr) {
 }
 
 // ── run(program, args) → Gorillax[@(stdout, stderr, code)] ──
+// A program that cannot be started (ENOENT, EACCES, ...) is an IoError
+// with the exec errno, as for `runInteractive` (see the errno pipe there).
+static int taida_os_write_all(int fd, const void *buf, size_t len);
+static ssize_t taida_os_read_all(int fd, void *buf, size_t len);
+
 taida_val taida_os_run(taida_val program_ptr, taida_val args_list_ptr) {
     const char *program = (const char*)program_ptr;
     if (!program) return taida_gorillax_err(taida_make_io_error(EINVAL, "run: invalid arguments"));
@@ -714,23 +768,45 @@ taida_val taida_os_run(taida_val program_ptr, taida_val args_list_ptr) {
     taida_val *list = (taida_val*)args_list_ptr;
     taida_val argc = list ? list[2] : 0;
 
-    // Create pipes for stdout and stderr
-    int stdout_pipe[2], stderr_pipe[2];
-    if (pipe(stdout_pipe) != 0 || pipe(stderr_pipe) != 0) {
+    // Create pipes for stdout and stderr, and the CLOEXEC errno pipe
+    int stdout_pipe[2], stderr_pipe[2], err_pipe[2];
+    if (pipe(stdout_pipe) != 0) {
         return taida_gorillax_err(taida_make_io_error(errno, strerror(errno)));
+    }
+    if (pipe(stderr_pipe) != 0) {
+        int saved = errno;
+        close(stdout_pipe[0]); close(stdout_pipe[1]);
+        return taida_gorillax_err(taida_make_io_error(saved, strerror(saved)));
+    }
+    if (pipe(err_pipe) != 0) {
+        int saved = errno;
+        close(stdout_pipe[0]); close(stdout_pipe[1]);
+        close(stderr_pipe[0]); close(stderr_pipe[1]);
+        return taida_gorillax_err(taida_make_io_error(saved, strerror(saved)));
+    }
+    if (fcntl(err_pipe[0], F_SETFD, FD_CLOEXEC) != 0 ||
+        fcntl(err_pipe[1], F_SETFD, FD_CLOEXEC) != 0) {
+        int saved = errno;
+        close(stdout_pipe[0]); close(stdout_pipe[1]);
+        close(stderr_pipe[0]); close(stderr_pipe[1]);
+        close(err_pipe[0]); close(err_pipe[1]);
+        return taida_gorillax_err(taida_make_io_error(saved, strerror(saved)));
     }
 
     pid_t pid = fork();
     if (pid < 0) {
+        int saved = errno;
         close(stdout_pipe[0]); close(stdout_pipe[1]);
         close(stderr_pipe[0]); close(stderr_pipe[1]);
-        return taida_gorillax_err(taida_make_io_error(errno, strerror(errno)));
+        close(err_pipe[0]); close(err_pipe[1]);
+        return taida_gorillax_err(taida_make_io_error(saved, strerror(saved)));
     }
 
     if (pid == 0) {
         // Child
         close(stdout_pipe[0]);
         close(stderr_pipe[0]);
+        close(err_pipe[0]);
         dup2(stdout_pipe[1], STDOUT_FILENO);
         dup2(stderr_pipe[1], STDERR_FILENO);
         close(stdout_pipe[1]);
@@ -746,13 +822,21 @@ taida_val taida_os_run(taida_val program_ptr, taida_val args_list_ptr) {
         argv[argc + 1] = NULL;
 
         execvp(program, argv);
-        // If exec fails
+        // execvp failed — push errno to the parent before dying.
+        int exec_errno = errno;
+        (void)taida_os_write_all(err_pipe[1], &exec_errno, sizeof(exec_errno));
+        close(err_pipe[1]);
         _exit(127);
     }
 
     // Parent
     close(stdout_pipe[1]);
     close(stderr_pipe[1]);
+    close(err_pipe[1]);
+    // EOF here means execvp succeeded; an int is the child's exec errno.
+    int child_errno = 0;
+    ssize_t got = taida_os_read_all(err_pipe[0], &child_errno, sizeof(child_errno));
+    close(err_pipe[0]);
 
     // G3: drain stdout + stderr concurrently. Reading one pipe to EOF before
     // the other deadlocks if the child writes >64KB to the undrained pipe.
@@ -764,7 +848,12 @@ taida_val taida_os_run(taida_val program_ptr, taida_val args_list_ptr) {
 
     int status;
     waitpid(pid, &status, 0);
-    taida_val exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    if (got == (ssize_t)sizeof(child_errno) && child_errno != 0) {
+        free(out_buf);
+        free(err_buf);
+        return taida_gorillax_err(taida_make_io_error(child_errno, strerror(child_errno)));
+    }
+    taida_val exit_code = taida_os_extract_wait_code(status);
 
     if (exit_code == 0) {
         taida_val inner = taida_os_process_inner(out_buf, err_buf, exit_code);
@@ -776,7 +865,7 @@ taida_val taida_os_run(taida_val program_ptr, taida_val args_list_ptr) {
         free(err_buf);
         char msg[256];
         snprintf(msg, sizeof(msg), "Process '%s' exited with code %" PRId64 "", program, exit_code);
-        taida_val error = taida_make_error("ProcessError", msg);
+        taida_val error = taida_make_error_with_kind_code("ProcessError", msg, "ProcessError", exit_code);
         return taida_gorillax_err(error);
     }
 }
@@ -822,7 +911,7 @@ taida_val taida_os_exec_shell(taida_val command_ptr) {
 
     int status;
     waitpid(pid, &status, 0);
-    taida_val exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    taida_val exit_code = taida_os_extract_wait_code(status);
 
     if (exit_code == 0) {
         taida_val inner = taida_os_process_inner(out_buf, err_buf, exit_code);
@@ -834,7 +923,7 @@ taida_val taida_os_exec_shell(taida_val command_ptr) {
         free(err_buf);
         char msg[256];
         snprintf(msg, sizeof(msg), "Shell command exited with code %" PRId64 ": %s", exit_code, command);
-        taida_val error = taida_make_error("ProcessError", msg);
+        taida_val error = taida_make_error_with_kind_code("ProcessError", msg, "ProcessError", exit_code);
         return taida_gorillax_err(error);
     }
 }
@@ -973,7 +1062,7 @@ taida_val taida_os_run_interactive(taida_val program_ptr, taida_val args_list_pt
     }
     char msg[256];
     snprintf(msg, sizeof(msg), "Process '%s' exited with code %" PRId64, program, exit_code);
-    taida_val error = taida_make_error("ProcessError", msg);
+    taida_val error = taida_make_error_with_kind_code("ProcessError", msg, "ProcessError", exit_code);
     taida_release(inner);
     return taida_gorillax_err(error);
 }
@@ -1041,7 +1130,7 @@ taida_val taida_os_exec_shell_interactive(taida_val command_ptr) {
     }
     char msg[256];
     snprintf(msg, sizeof(msg), "Shell command exited with code %" PRId64 ": %s", exit_code, command);
-    taida_val error = taida_make_error("ProcessError", msg);
+    taida_val error = taida_make_error_with_kind_code("ProcessError", msg, "ProcessError", exit_code);
     taida_release(inner);
     return taida_gorillax_err(error);
 }

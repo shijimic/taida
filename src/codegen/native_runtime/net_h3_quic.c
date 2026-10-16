@@ -3585,6 +3585,7 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
 
     // NET2-5d: maxConnections (default 128, <= 0 falls back to 128)
     int64_t max_conn = (max_connections > 0) ? max_connections : 128;
+    if (max_conn > TAIDA_NET_MAX_CONNECTIONS) max_conn = TAIDA_NET_MAX_CONNECTIONS;
 
     // Bind to 127.0.0.1:port (v1 contract: always loopback)
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -3634,19 +3635,20 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
     }
 
     // NET2-5c: Create thread pool
-    // Number of worker threads = min(maxConnections, 16) to avoid thread explosion.
     // Each worker handles one connection at a time with keep-alive loop.
+    // min(maxConnections, 16) workers start up front; the accept loop adds
+    // workers on demand up to maxConnections, so connections that stay open
+    // (slow senders, idle keep-alive) never hold up the others.
     int num_workers = (int)max_conn;
     if (num_workers > 16) num_workers = 16;
     if (num_workers < 1) num_workers = 1;
 
     NetThreadPool pool;
-    net_pool_init(&pool, (int)max_conn + 16, handler, max_requests, timeout_ms, (int)handler_arity);
+    net_pool_init(&pool, (int)max_conn + 16, (int)max_conn, handler, max_requests, timeout_ms, (int)handler_arity);
     pool.ssl_ctx = ssl_ctx; // NET5-4a: NULL = plaintext, non-NULL = TLS
 
-    pthread_t *workers = (pthread_t*)TAIDA_MALLOC(sizeof(pthread_t) * (size_t)num_workers, "net_workers");
     for (int i = 0; i < num_workers; i++) {
-        pthread_create(&workers[i], NULL, net_worker_thread, &pool);
+        (void)net_pool_spawn_worker(&pool);
     }
 
     // Accept loop: accept connections and enqueue to worker pool
@@ -3693,6 +3695,7 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
             pthread_mutex_unlock(&pool.mutex);
             close(client_fd);
         } else {
+            net_pool_grow_if_busy(&pool);
             pthread_cond_signal(&pool.cond_available);
             pthread_mutex_unlock(&pool.mutex);
         }
@@ -3716,13 +3719,13 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
     pthread_mutex_unlock(&pool.mutex);
 
     // Workers currently in recv() will time out within SO_RCVTIMEO (effective_timeout ms).
-    for (int i = 0; i < num_workers; i++) {
-        pthread_join(workers[i], NULL);
+    // No worker is started after the accept loop has ended.
+    for (int i = 0; i < pool.worker_count; i++) {
+        pthread_join(pool.workers[i], NULL);
     }
 
     int64_t final_count = pool.request_count;
 
-    free(workers);
     net_pool_destroy(&pool);
 
     // NET5-4a: Free TLS context.
@@ -3763,9 +3766,9 @@ taida_val taida_net_http_serve(taida_val port, taida_val handler, taida_val max_
 /*   - Status::Error from a successful call is converted to a catchable Taida   */
 /*     `AddonError` variant via taida_throw — RC2.5-3a Phase 3.                 */
 /*                                                                              */
-/* Phase 1 scope:                                                               */
-/*   - Dispatcher present and linkable                                          */
-/*   - Minimal value bridge: Int / Str / Bool / Unit / Pack (pack as argv only) */
+/* Value bridge: every ABI v1 kind in both directions (Int / Float / Bool /    */
+/*   Str / Bytes / List / Pack, nested), from the argument's runtime kind; see  */
+/*   taida_addon_value_from_native / taida_addon_value_to_native.               */
 /*                                                                              */
 /* Phase 3 scope (RC2.5-3a/3b/3c):                                              */
 /*   - Status::Error → catchable AddonError variant (taida_throw)               */
@@ -4011,6 +4014,7 @@ static TaidaAddonValueV1 *taida_addon_host_new_bytes(const TaidaHostV1 *host,
 static TaidaAddonValueV1 *taida_addon_host_new_list(const TaidaHostV1 *host,
                                                      TaidaAddonValueV1 *const *items, size_t len) {
     (void)host;
+    if (len > 0 && items == NULL) return NULL;
     TaidaAddonListPayloadV1 *p =
         (TaidaAddonListPayloadV1 *)TAIDA_MALLOC(sizeof(TaidaAddonListPayloadV1), "addon_list");
     TaidaAddonValueV1 **copy = NULL;
@@ -4032,6 +4036,12 @@ static TaidaAddonValueV1 *taida_addon_host_new_pack(
     size_t len)
 {
     (void)host;
+    /* Reject a malformed request before taking ownership of anything, as
+     * the interpreter's host table does. */
+    if (len > 0 && (names == NULL || values == NULL)) return NULL;
+    for (size_t i = 0; i < len; i++) {
+        if (names[i] == NULL) return NULL;
+    }
     TaidaAddonPackPayloadV1 *p =
         (TaidaAddonPackPayloadV1 *)TAIDA_MALLOC(sizeof(TaidaAddonPackPayloadV1), "addon_pack");
     TaidaAddonPackEntryV1 *entries = NULL;
@@ -4052,52 +4062,83 @@ static TaidaAddonValueV1 *taida_addon_host_new_pack(
     return taida_addon_host_value_alloc(TAIDA_ADDON_TAG_PACK, p);
 }
 
-static void taida_addon_host_value_release_inner(TaidaAddonValueV1 *value) {
-    if (value == NULL) return;
-    switch (value->tag) {
-        case TAIDA_ADDON_TAG_UNIT:
-            break;
-        case TAIDA_ADDON_TAG_INT:
-        case TAIDA_ADDON_TAG_FLOAT:
-        case TAIDA_ADDON_TAG_BOOL:
-            free(value->payload);
-            break;
-        case TAIDA_ADDON_TAG_STR:
-        case TAIDA_ADDON_TAG_BYTES: {
-            TaidaAddonBytesPayloadV1 *p = (TaidaAddonBytesPayloadV1 *)value->payload;
-            if (p != NULL) {
-                free((void *)p->ptr);
-                free(p);
-            }
-            break;
+/* Work stack for releasing a value tree without recursion. */
+typedef struct {
+    TaidaAddonValueV1 **items;
+    size_t len;
+    size_t cap;
+} TaidaAddonReleaseStack;
+
+static void taida_addon_release_stack_push(TaidaAddonReleaseStack *st, TaidaAddonValueV1 *v) {
+    if (v == NULL) return;
+    if (st->len == st->cap) {
+        size_t new_cap = st->cap ? taida_safe_mul(st->cap, 2, "addon_release_stack") : 16;
+        TaidaAddonValueV1 **grown = (TaidaAddonValueV1 **)realloc(
+            st->items, taida_safe_mul(new_cap, sizeof(TaidaAddonValueV1 *), "addon_release_stack"));
+        if (grown == NULL) {
+            fprintf(stderr, "taida: out of memory (addon value release)\n");
+            exit(1);
         }
-        case TAIDA_ADDON_TAG_LIST: {
-            TaidaAddonListPayloadV1 *p = (TaidaAddonListPayloadV1 *)value->payload;
-            if (p != NULL) {
-                for (size_t i = 0; i < p->len; i++) {
-                    taida_addon_host_value_release_inner(p->items[i]);
-                }
-                free(p->items);
-                free(p);
-            }
-            break;
-        }
-        case TAIDA_ADDON_TAG_PACK: {
-            TaidaAddonPackPayloadV1 *p = (TaidaAddonPackPayloadV1 *)value->payload;
-            if (p != NULL) {
-                for (size_t i = 0; i < p->len; i++) {
-                    free((void *)p->entries[i].name);
-                    taida_addon_host_value_release_inner(p->entries[i].value);
-                }
-                free(p->entries);
-                free(p);
-            }
-            break;
-        }
-        default:
-            break;
+        st->items = grown;
+        st->cap = new_cap;
     }
-    free(value);
+    st->items[st->len++] = v;
+}
+
+/* Free a host-owned value tree. Iterative, so a deeply nested value an
+ * addon returns cannot exhaust the C stack while it is released. */
+static void taida_addon_host_value_release_inner(TaidaAddonValueV1 *root) {
+    if (root == NULL) return;
+    TaidaAddonReleaseStack st = { NULL, 0, 0 };
+    taida_addon_release_stack_push(&st, root);
+    while (st.len > 0) {
+        TaidaAddonValueV1 *value = st.items[--st.len];
+        switch (value->tag) {
+            case TAIDA_ADDON_TAG_UNIT:
+                break;
+            case TAIDA_ADDON_TAG_INT:
+            case TAIDA_ADDON_TAG_FLOAT:
+            case TAIDA_ADDON_TAG_BOOL:
+                free(value->payload);
+                break;
+            case TAIDA_ADDON_TAG_STR:
+            case TAIDA_ADDON_TAG_BYTES: {
+                TaidaAddonBytesPayloadV1 *p = (TaidaAddonBytesPayloadV1 *)value->payload;
+                if (p != NULL) {
+                    free((void *)p->ptr);
+                    free(p);
+                }
+                break;
+            }
+            case TAIDA_ADDON_TAG_LIST: {
+                TaidaAddonListPayloadV1 *p = (TaidaAddonListPayloadV1 *)value->payload;
+                if (p != NULL) {
+                    for (size_t i = 0; i < p->len; i++) {
+                        taida_addon_release_stack_push(&st, p->items[i]);
+                    }
+                    free(p->items);
+                    free(p);
+                }
+                break;
+            }
+            case TAIDA_ADDON_TAG_PACK: {
+                TaidaAddonPackPayloadV1 *p = (TaidaAddonPackPayloadV1 *)value->payload;
+                if (p != NULL) {
+                    for (size_t i = 0; i < p->len; i++) {
+                        free((void *)p->entries[i].name);
+                        taida_addon_release_stack_push(&st, p->entries[i].value);
+                    }
+                    free(p->entries);
+                    free(p);
+                }
+                break;
+            }
+            default:
+                break;
+        }
+        free(value);
+    }
+    free(st.items);
 }
 
 static void taida_addon_host_value_release(const TaidaHostV1 *host, TaidaAddonValueV1 *value) {
@@ -4226,6 +4267,45 @@ static void taida_addon_fail(const char *pkg, const char *detail) {
     exit(1);
 }
 
+/* Upper bound on `function_count`, shared with the interpreter's loader. */
+#define TAIDA_ADDON_MAX_FUNCTIONS 4096u
+
+/* Whether the NUL-terminated string `s` is valid UTF-8. */
+static int taida_addon_utf8_valid(const char *s) {
+    const unsigned char *p = (const unsigned char *)s;
+    size_t len = strlen(s);
+    while (len > 0) {
+        size_t consumed = 0;
+        uint32_t cp = 0;
+        if (!taida_utf8_decode_one(p, len, &consumed, &cp)) return 0;
+        p += consumed;
+        len -= consumed;
+    }
+    return 1;
+}
+
+/* Structural check of a descriptor whose ABI version already matched,
+ * run before any other field is used (the same checks as the
+ * interpreter's loader). Returns NULL when the descriptor is sound, or
+ * the reason it is not. */
+static const char *taida_addon_descriptor_problem(const TaidaAddonDescriptorV1 *desc) {
+    if (desc->function_count > 0 && desc->functions == NULL) {
+        return "function_count > 0 but functions pointer is null";
+    }
+    if (desc->function_count > TAIDA_ADDON_MAX_FUNCTIONS) {
+        return "function_count exceeds supported maximum 4096";
+    }
+    if (desc->addon_name == NULL) return "addon_name pointer is null";
+    if (!taida_addon_utf8_valid(desc->addon_name)) return "addon_name is not valid UTF-8";
+    for (uint32_t i = 0; i < desc->function_count; i++) {
+        if (desc->functions[i].name == NULL) return "a function name pointer is null";
+        if (!taida_addon_utf8_valid(desc->functions[i].name)) {
+            return "a function name is not valid UTF-8";
+        }
+    }
+    return NULL;
+}
+
 /* RC2.5-3a: Build a Taida `AddonError` pack and longjmp out via
  * taida_throw. This is the deterministic "addon returned Status::Error"
  * path; the user can catch it with `|== AddonError` (typed) or `|==
@@ -4340,6 +4420,13 @@ static TaidaAddonEntry *taida_addon_ensure_loaded(
         pthread_mutex_unlock(&taida_addon_registry_mu);
         taida_addon_fail(package_id, "ABI version mismatch");
     }
+    const char *problem = taida_addon_descriptor_problem(desc);
+    if (problem != NULL) {
+        char detail[160];
+        snprintf(detail, sizeof(detail), "invalid descriptor (%s)", problem);
+        pthread_mutex_unlock(&taida_addon_registry_mu);
+        taida_addon_fail(package_id, detail);
+    }
     entry->descriptor = desc;
     taida_addon_registry_len += 1;
 
@@ -4365,158 +4452,269 @@ static TaidaAddonEntry *taida_addon_ensure_loaded(
     return entry;
 }
 
-/* ---------------- Value bridge (Taida Pack ↔ addon ABI v1) ---------------- */
+/* ---------------- Value bridge (native runtime value <-> addon ABI v1) ---------------- */
 
-/* Convert a single taida runtime boxed value into an addon ABI Value.
- * `raw` is the raw taida_val as stored in the pack cell; `tag` is the
- * TAIDA_TAG_* (runtime internal) tag. Stack-allocated; caller must keep
- * stable until the call returns. */
-static void taida_addon_val_from_raw(
-    taida_val raw, taida_val internal_tag,
-    TaidaAddonValueV1 *out,
-    TaidaAddonIntPayloadV1 *int_scratch,
-    TaidaAddonBytesPayloadV1 *str_scratch,
-    TaidaAddonBoolPayloadV1 *bool_scratch,
-    TaidaAddonFloatPayloadV1 *float_scratch)
+/* Nesting bound for values crossing the addon boundary in either
+ * direction. The conversions recurse once per level; the bound keeps a
+ * pathological value from exhausting the C stack. */
+#define TAIDA_ADDON_MAX_DEPTH 1024
+
+/* Kind of a native value read from its header: TAIDA_TAG_STR / BYTES /
+ * LIST / PACK / HMAP / SET / CLOSURE, TAIDA_ADDON_KIND_ASYNC, or
+ * TAIDA_TAG_UNKNOWN when `raw` is not a recognised heap object. */
+#define TAIDA_ADDON_KIND_ASYNC (-10)
+static taida_val taida_addon_heap_kind(taida_val raw) {
+    if (taida_is_string_value(raw)) return TAIDA_TAG_STR;
+    if (TAIDA_IS_ANY_BYTES(raw)) return TAIDA_TAG_BYTES;
+    if (TAIDA_IS_LIST(raw)) return TAIDA_TAG_LIST;
+    if (TAIDA_IS_PACK(raw)) return TAIDA_TAG_PACK;
+    if (TAIDA_IS_HMAP(raw)) return TAIDA_TAG_HMAP;
+    if (TAIDA_IS_SET(raw)) return TAIDA_TAG_SET;
+    if (TAIDA_IS_CLOSURE(raw)) return TAIDA_TAG_CLOSURE;
+    if (TAIDA_IS_ASYNC(raw)) return TAIDA_ADDON_KIND_ASYNC;
+    return TAIDA_TAG_UNKNOWN;
+}
+
+/* Build a host-owned ABI value from a native runtime value. `tag` is the
+ * value's TAIDA_TAG_* kind as known where it is stored (a statically
+ * typed argument, a pack field, a list element). Heap objects are
+ * identified by their header whenever the tag does not pin a scalar
+ * kind, so a List / Pack / Bytes is never passed as its address.
+ * Returns NULL and sets `*unsupported` to a kind name when the value
+ * cannot cross the ABI (the interpreter rejects the same kinds). */
+static TaidaAddonValueV1 *taida_addon_value_from_native(
+    taida_val raw, taida_val tag, int depth, const char **unsupported)
 {
-    out->_reserved = 0;
-    switch (internal_tag) {
-        case TAIDA_TAG_INT:
-            int_scratch->value = (int64_t)raw;
-            out->tag = TAIDA_ADDON_TAG_INT;
-            out->payload = int_scratch;
-            return;
-        case TAIDA_TAG_BOOL:
-            bool_scratch->value = raw ? 1u : 0u;
-            out->tag = TAIDA_ADDON_TAG_BOOL;
-            out->payload = bool_scratch;
-            return;
+    if (depth > TAIDA_ADDON_MAX_DEPTH) {
+        *unsupported = "value nested too deeply";
+        return NULL;
+    }
+    taida_val kind = tag;
+    if (kind != TAIDA_TAG_FLOAT && kind != TAIDA_TAG_BOOL && kind != TAIDA_TAG_STR
+        && kind != TAIDA_TAG_ENUM && kind != TAIDA_TAG_CLOSURE) {
+        /* Int-tagged container slots included: a pack field is Int-tagged
+         * until something records its kind, so a heap object there is
+         * still read from its header. */
+        taida_val heap = taida_addon_heap_kind(raw);
+        kind = heap == TAIDA_TAG_UNKNOWN ? TAIDA_TAG_INT : heap;
+    }
+    switch (kind) {
         case TAIDA_TAG_FLOAT: {
-            /* The runtime stores Float as f64 bits inside a taida_val;
-             * undo the bitcast so the addon sees a genuine double.
-             * Previously the lowering never tagged Float arguments (they
-             * fell through as TAIDA_TAG_INT) and the raw bit pattern
-             * leaked across the ABI as a bogus Int. */
             union { taida_val l; double d; } u;
             u.l = raw;
-            float_scratch->value = u.d;
-            out->tag = TAIDA_ADDON_TAG_FLOAT;
-            out->payload = float_scratch;
-            return;
+            return taida_addon_host_new_float(&taida_addon_host_table, u.d);
         }
+        case TAIDA_TAG_BOOL:
+            return taida_addon_host_new_bool(&taida_addon_host_table, raw ? 1u : 0u);
         case TAIDA_TAG_STR: {
             const char *s = (const char *)(taida_ptr)raw;
-            str_scratch->ptr = (const uint8_t *)(s ? s : "");
-            str_scratch->len = s ? strlen(s) : 0;
-            out->tag = TAIDA_ADDON_TAG_STR;
-            out->payload = str_scratch;
-            return;
+            size_t len = 0;
+            if (s == NULL) {
+                s = "";
+            } else if (!taida_str_byte_len(s, &len)) {
+                len = strlen(s);
+            }
+            return taida_addon_host_new_str(&taida_addon_host_table, (const uint8_t *)s, len);
         }
+        case TAIDA_TAG_BYTES: {
+            taida_val len = taida_bytes_len(raw);
+            if (TAIDA_IS_BYTES_CONTIG(raw)) {
+                return taida_addon_host_new_bytes(&taida_addon_host_table,
+                                                  taida_bytes_contig_data(raw), (size_t)len);
+            }
+            /* Legacy layout: one taida_val slot per byte. */
+            uint8_t *buf = (uint8_t *)TAIDA_MALLOC(len > 0 ? (size_t)len : 1, "addon_bytes_arg");
+            const taida_val *slots = (const taida_val *)(taida_ptr)raw;
+            for (taida_val i = 0; i < len; i++) buf[i] = (uint8_t)slots[2 + i];
+            TaidaAddonValueV1 *v = taida_addon_host_new_bytes(&taida_addon_host_table, buf, (size_t)len);
+            free(buf);
+            return v;
+        }
+        case TAIDA_TAG_LIST: {
+            const taida_val *list = (const taida_val *)(taida_ptr)raw;
+            size_t n = (size_t)list[2];
+            TaidaAddonValueV1 **items = (TaidaAddonValueV1 **)TAIDA_MALLOC(
+                taida_safe_mul(n > 0 ? n : 1, sizeof(TaidaAddonValueV1 *), "addon_list_arg"),
+                "addon_list_arg");
+            for (size_t i = 0; i < n; i++) {
+                uint32_t ek = taida_elem_kind_at(list, (taida_val)i);
+                items[i] = taida_addon_value_from_native(list[4 + i], taida_ekind_to_tag(ek),
+                                                         depth + 1, unsupported);
+                if (items[i] == NULL) {
+                    for (size_t j = 0; j < i; j++) taida_addon_host_value_release_inner(items[j]);
+                    free(items);
+                    return NULL;
+                }
+            }
+            TaidaAddonValueV1 *v = taida_addon_host_new_list(&taida_addon_host_table, items, n);
+            free(items);
+            return v;
+        }
+        case TAIDA_TAG_PACK: {
+            const taida_val *pack = (const taida_val *)(taida_ptr)raw;
+            size_t count = (size_t)pack[1];
+            size_t slots = count > 0 ? count : 1;
+            const char **names = (const char **)TAIDA_MALLOC(
+                taida_safe_mul(slots, sizeof(char *), "addon_pack_arg_names"), "addon_pack_arg_names");
+            TaidaAddonValueV1 **values = (TaidaAddonValueV1 **)TAIDA_MALLOC(
+                taida_safe_mul(slots, sizeof(TaidaAddonValueV1 *), "addon_pack_arg_values"),
+                "addon_pack_arg_values");
+            size_t m = 0;
+            for (size_t i = 0; i < count; i++) {
+                /* A field whose name was never registered cannot be named
+                 * on the ABI side; it is left out. */
+                const char *name = taida_lookup_field_name(pack[2 + i * 3]);
+                if (name == NULL) continue;
+                TaidaAddonValueV1 *child = taida_addon_value_from_native(
+                    pack[2 + i * 3 + 2], pack[2 + i * 3 + 1], depth + 1, unsupported);
+                if (child == NULL) {
+                    for (size_t j = 0; j < m; j++) taida_addon_host_value_release_inner(values[j]);
+                    free(names);
+                    free(values);
+                    return NULL;
+                }
+                names[m] = name;
+                values[m] = child;
+                m++;
+            }
+            TaidaAddonValueV1 *v =
+                taida_addon_host_new_pack(&taida_addon_host_table, names, values, m);
+            free(names);
+            free(values);
+            return v;
+        }
+        case TAIDA_TAG_CLOSURE:
+            *unsupported = "Function";
+            return NULL;
+        case TAIDA_TAG_HMAP:
+            *unsupported = "HashMap";
+            return NULL;
+        case TAIDA_TAG_SET:
+            *unsupported = "Set";
+            return NULL;
+        case TAIDA_ADDON_KIND_ASYNC:
+            *unsupported = "Async";
+            return NULL;
         default:
-            /* Unit / unsupported — carry across as Unit so the addon can
-             * reject with UNSUPPORTED_VALUE if it matters. Phase 1 scope. */
-            out->tag = TAIDA_ADDON_TAG_UNIT;
-            out->payload = NULL;
-            return;
+            /* Int, and Enum (its ordinal, as in the interpreter). */
+            return taida_addon_host_new_int(&taida_addon_host_table, (int64_t)raw);
     }
 }
 
-/* Convert an addon ABI Value back into a taida runtime boxed value.
- * Phase 1 scope: Int / Bool / Str / Unit / Pack-of-scalars.
- * Caller is responsible for releasing the source value afterwards. */
-static taida_val taida_addon_val_to_raw(const TaidaAddonValueV1 *v) {
+/* Name registered for a pack field hash, registering a heap copy of
+ * `name` the first time it is seen (field names an addon returns are
+ * not known at compile time). The registry keeps the pointer. */
+static void taida_addon_register_field_name(taida_val hash, const char *name) {
+    if (taida_lookup_field_name(hash) != NULL) return;
+    size_t len = strlen(name);
+    char *copy = (char *)TAIDA_MALLOC(len + 1, "addon_field_name");
+    memcpy(copy, name, len + 1);
+    taida_register_field_name(hash, (taida_val)(taida_ptr)copy);
+}
+
+/* Convert an addon-built value into a native runtime value and report
+ * its kind in `*tag_out` (Bytes report TAIDA_TAG_PACK, like every heap
+ * object that is not a Str / List). Unit, a null value and an unknown
+ * ABI tag become Int 0. Sets `*too_deep` and returns 0 when the value is
+ * nested more than TAIDA_ADDON_MAX_DEPTH levels. The source value is not
+ * released. */
+static taida_val taida_addon_value_to_native(
+    const TaidaAddonValueV1 *v, taida_val *tag_out, int depth, int *too_deep)
+{
+    *tag_out = TAIDA_TAG_INT;
     if (v == NULL) return 0;
+    if (depth > TAIDA_ADDON_MAX_DEPTH) {
+        *too_deep = 1;
+        return 0;
+    }
     switch (v->tag) {
-        case TAIDA_ADDON_TAG_UNIT:
-            return 0;
         case TAIDA_ADDON_TAG_INT: {
             const TaidaAddonIntPayloadV1 *p = (const TaidaAddonIntPayloadV1 *)v->payload;
             return (taida_val)(p ? p->value : 0);
         }
         case TAIDA_ADDON_TAG_BOOL: {
             const TaidaAddonBoolPayloadV1 *p = (const TaidaAddonBoolPayloadV1 *)v->payload;
+            *tag_out = TAIDA_TAG_BOOL;
             return (taida_val)(p && p->value ? 1 : 0);
         }
         case TAIDA_ADDON_TAG_FLOAT: {
-            /* Mirror of the argv direction: re-bitcast the double into the
-             * runtime's f64-bits-in-taida_val representation. */
+            /* The runtime keeps a Float as its f64 bits in a taida_val. */
             const TaidaAddonFloatPayloadV1 *p = (const TaidaAddonFloatPayloadV1 *)v->payload;
             union { taida_val l; double d; } u;
             u.d = p ? p->value : 0.0;
+            *tag_out = TAIDA_TAG_FLOAT;
             return u.l;
         }
         case TAIDA_ADDON_TAG_STR: {
             const TaidaAddonBytesPayloadV1 *p = (const TaidaAddonBytesPayloadV1 *)v->payload;
-            if (p == NULL) return (taida_val)taida_str_new_copy("");
-            /* taida_str_new copies into a taida-managed allocation. */
-            char *tmp = (char *)TAIDA_MALLOC(p->len + 1, "addon_str_tmp");
-            if (p->len > 0) memcpy(tmp, p->ptr, p->len);
-            tmp[p->len] = '\0';
-            taida_val r = (taida_val)taida_str_new_copy(tmp);
-            free(tmp);
-            return r;
+            size_t len = p != NULL && p->ptr != NULL ? p->len : 0;
+            char *s = taida_str_alloc(len);
+            if (len > 0) memcpy(s, p->ptr, len);
+            *tag_out = TAIDA_TAG_STR;
+            return (taida_val)(taida_ptr)s;
+        }
+        case TAIDA_ADDON_TAG_BYTES: {
+            const TaidaAddonBytesPayloadV1 *p = (const TaidaAddonBytesPayloadV1 *)v->payload;
+            size_t len = p != NULL && p->ptr != NULL ? p->len : 0;
+            *tag_out = TAIDA_TAG_PACK;
+            return taida_bytes_from_raw(len > 0 ? p->ptr : NULL, (taida_val)len);
+        }
+        case TAIDA_ADDON_TAG_LIST: {
+            const TaidaAddonListPayloadV1 *p = (const TaidaAddonListPayloadV1 *)v->payload;
+            taida_ptr list = taida_list_new();
+            size_t n = p != NULL && p->items != NULL ? p->len : 0;
+            for (size_t i = 0; i < n; i++) {
+                taida_val child_tag = TAIDA_TAG_INT;
+                taida_val child =
+                    taida_addon_value_to_native(p->items[i], &child_tag, depth + 1, too_deep);
+                if (*too_deep) return 0;
+                taida_list_set_elem_tag(list, child_tag);
+                list = taida_list_push(list, child);
+            }
+            *tag_out = TAIDA_TAG_LIST;
+            return (taida_val)list;
         }
         case TAIDA_ADDON_TAG_PACK: {
-            /* Minimal pack marshalling: each field becomes a raw int/str entry.
-             * Uses hash-indexed storage compatible with the runtime pack. */
             const TaidaAddonPackPayloadV1 *p = (const TaidaAddonPackPayloadV1 *)v->payload;
-            if (p == NULL || p->len == 0) return (taida_val)taida_pack_new(0);
-            taida_val pack = (taida_val)taida_pack_new((taida_val)p->len);
-            for (size_t i = 0; i < p->len; i++) {
-                taida_val field_hash = taida_str_hash((taida_ptr)p->entries[i].name);
-                taida_pack_set_hash((taida_ptr)pack, (taida_val)i, field_hash);
-                TaidaAddonValueV1 *child = p->entries[i].value;
-                if (child == NULL) {
-                    taida_pack_set((taida_ptr)pack, (taida_val)i, 0);
-                    taida_pack_set_tag((taida_ptr)pack, (taida_val)i, TAIDA_TAG_INT);
-                    continue;
-                }
-                switch (child->tag) {
-                    case TAIDA_ADDON_TAG_INT: {
-                        const TaidaAddonIntPayloadV1 *ip = (const TaidaAddonIntPayloadV1 *)child->payload;
-                        taida_pack_set((taida_ptr)pack, (taida_val)i, (taida_val)(ip ? ip->value : 0));
-                        taida_pack_set_tag((taida_ptr)pack, (taida_val)i, TAIDA_TAG_INT);
-                        break;
-                    }
-                    case TAIDA_ADDON_TAG_BOOL: {
-                        const TaidaAddonBoolPayloadV1 *bp = (const TaidaAddonBoolPayloadV1 *)child->payload;
-                        taida_pack_set((taida_ptr)pack, (taida_val)i, (taida_val)(bp && bp->value ? 1 : 0));
-                        taida_pack_set_tag((taida_ptr)pack, (taida_val)i, TAIDA_TAG_BOOL);
-                        break;
-                    }
-                    case TAIDA_ADDON_TAG_FLOAT: {
-                        const TaidaAddonFloatPayloadV1 *fp = (const TaidaAddonFloatPayloadV1 *)child->payload;
-                        union { taida_val l; double d; } u;
-                        u.d = fp ? fp->value : 0.0;
-                        taida_pack_set((taida_ptr)pack, (taida_val)i, u.l);
-                        taida_pack_set_tag((taida_ptr)pack, (taida_val)i, TAIDA_TAG_FLOAT);
-                        break;
-                    }
-                    case TAIDA_ADDON_TAG_STR: {
-                        const TaidaAddonBytesPayloadV1 *sp = (const TaidaAddonBytesPayloadV1 *)child->payload;
-                        if (sp == NULL) {
-                            taida_pack_set((taida_ptr)pack, (taida_val)i, (taida_val)taida_str_new_copy(""));
-                        } else {
-                            char *tmp = (char *)TAIDA_MALLOC(sp->len + 1, "addon_pack_str_tmp");
-                            if (sp->len > 0) memcpy(tmp, sp->ptr, sp->len);
-                            tmp[sp->len] = '\0';
-                            taida_pack_set((taida_ptr)pack, (taida_val)i, (taida_val)taida_str_new_copy(tmp));
-                            free(tmp);
-                        }
-                        taida_pack_set_tag((taida_ptr)pack, (taida_val)i, TAIDA_TAG_STR);
-                        break;
-                    }
-                    default:
-                        taida_pack_set((taida_ptr)pack, (taida_val)i, 0);
-                        taida_pack_set_tag((taida_ptr)pack, (taida_val)i, TAIDA_TAG_INT);
-                        break;
-                }
+            size_t n = p != NULL && p->entries != NULL ? p->len : 0;
+            taida_ptr pack = taida_pack_new((taida_val)n);
+            for (size_t i = 0; i < n; i++) {
+                const char *name = p->entries[i].name != NULL ? p->entries[i].name : "";
+                taida_val hash = taida_str_hash((taida_val)(taida_ptr)name);
+                taida_addon_register_field_name(hash, name);
+                taida_val child_tag = TAIDA_TAG_INT;
+                taida_val child = taida_addon_value_to_native(p->entries[i].value, &child_tag,
+                                                              depth + 1, too_deep);
+                if (*too_deep) return 0;
+                taida_pack_set_hash(pack, (taida_val)i, hash);
+                taida_pack_set(pack, (taida_val)i, child);
+                taida_pack_set_tag(pack, (taida_val)i, child_tag);
             }
-            return pack;
+            *tag_out = TAIDA_TAG_PACK;
+            return (taida_val)pack;
         }
         default:
+            /* Unit and unknown tags. */
             return 0;
     }
+}
+
+/* Throw a catchable error for a failed addon call, shaped like the
+ * interpreter's (`<type>` / "addon call failed: '<addon>::<fn>' ..."). */
+static void taida_addon_throw_bridge_error(const char *error_type,
+                                            const TaidaAddonDescriptorV1 *desc,
+                                            const char *function_name,
+                                            const char *detail) __attribute__((noreturn));
+static void taida_addon_throw_bridge_error(const char *error_type,
+                                            const TaidaAddonDescriptorV1 *desc,
+                                            const char *function_name,
+                                            const char *detail) {
+    char composed[1024];
+    snprintf(composed, sizeof(composed), "addon call failed: '%s::%s' %s",
+             desc->addon_name, function_name, detail);
+    taida_throw(taida_make_error(error_type, composed));
+    /* unreachable */
+    abort();
 }
 
 /* ---------------- Dispatcher ---------------- */
@@ -4565,73 +4763,52 @@ int64_t taida_addon_call(
         taida_addon_fail(package_id, detail);
     }
 
-    /* Marshal argv. Up to 16 scalars inline on the stack; larger payloads
-     * fall back to heap allocation. */
-    TaidaAddonValueV1 inline_values[16];
-    TaidaAddonIntPayloadV1 inline_ints[16];
-    TaidaAddonBytesPayloadV1 inline_strs[16];
-    TaidaAddonBoolPayloadV1 inline_bools[16];
-    TaidaAddonFloatPayloadV1 inline_floats[16];
-    TaidaAddonValueV1 *values_ptr = inline_values;
-    TaidaAddonIntPayloadV1 *ints_ptr = inline_ints;
-    TaidaAddonBytesPayloadV1 *strs_ptr = inline_strs;
-    TaidaAddonBoolPayloadV1 *bools_ptr = inline_bools;
-    TaidaAddonFloatPayloadV1 *floats_ptr = inline_floats;
-    int heap_allocated = 0;
-    if (argc > 16) {
-        values_ptr = (TaidaAddonValueV1 *)TAIDA_MALLOC(
-            taida_safe_mul((size_t)argc, sizeof(TaidaAddonValueV1), "addon_argv"),
-            "addon_argv");
-        ints_ptr = (TaidaAddonIntPayloadV1 *)TAIDA_MALLOC(
-            taida_safe_mul((size_t)argc, sizeof(TaidaAddonIntPayloadV1), "addon_argv_int"),
-            "addon_argv_int");
-        strs_ptr = (TaidaAddonBytesPayloadV1 *)TAIDA_MALLOC(
-            taida_safe_mul((size_t)argc, sizeof(TaidaAddonBytesPayloadV1), "addon_argv_str"),
-            "addon_argv_str");
-        bools_ptr = (TaidaAddonBoolPayloadV1 *)TAIDA_MALLOC(
-            taida_safe_mul((size_t)argc, sizeof(TaidaAddonBoolPayloadV1), "addon_argv_bool"),
-            "addon_argv_bool");
-        floats_ptr = (TaidaAddonFloatPayloadV1 *)TAIDA_MALLOC(
-            taida_safe_mul((size_t)argc, sizeof(TaidaAddonFloatPayloadV1), "addon_argv_float"),
-            "addon_argv_float");
-        heap_allocated = 1;
-    }
-
+    /* Marshal argv. Every argument becomes a host-owned ABI value built
+     * from its runtime kind (the tag lowering recorded, or the value's
+     * header); the addon reads a borrowed array of their headers whose
+     * payloads alias the built values. */
+    TaidaAddonValueV1 **built = NULL;
+    TaidaAddonValueV1 *args = NULL;
     if (argc > 0) {
         taida_val *pack = (taida_val *)(taida_ptr)argv_pack;
         if (pack == NULL) {
-            if (heap_allocated) {
-                free(values_ptr); free(ints_ptr); free(strs_ptr); free(bools_ptr);
-                free(floats_ptr);
-            }
             taida_addon_fail(package_id, "argv pack is null");
         }
+        built = (TaidaAddonValueV1 **)TAIDA_MALLOC(
+            taida_safe_mul((size_t)argc, sizeof(TaidaAddonValueV1 *), "addon_argv"),
+            "addon_argv");
+        args = (TaidaAddonValueV1 *)TAIDA_MALLOC(
+            taida_safe_mul((size_t)argc, sizeof(TaidaAddonValueV1), "addon_argv_view"),
+            "addon_argv_view");
         /* Pack internal layout: [magic+rc, count, hash0, tag0, val0, hash1, tag1, val1, ...] */
         for (int64_t i = 0; i < argc; i++) {
-            taida_val tag = pack[2 + i * 3 + 1];
-            taida_val raw = pack[2 + i * 3 + 2];
-            taida_addon_val_from_raw(raw, tag, &values_ptr[i],
-                                     &ints_ptr[i], &strs_ptr[i], &bools_ptr[i],
-                                     &floats_ptr[i]);
+            const char *unsupported = NULL;
+            built[i] = taida_addon_value_from_native(pack[2 + i * 3 + 2], pack[2 + i * 3 + 1],
+                                                     0, &unsupported);
+            if (built[i] == NULL) {
+                for (int64_t j = 0; j < i; j++) taida_addon_host_value_release_inner(built[j]);
+                free(built);
+                free(args);
+                char detail[256];
+                snprintf(detail, sizeof(detail), "received unsupported input kind '%s'",
+                         unsupported ? unsupported : "?");
+                taida_addon_throw_bridge_error("AddonUnsupportedInput", desc, function_name,
+                                               detail);
+            }
+            args[i] = *built[i];
         }
     }
 
     TaidaAddonValueV1 *out_value = NULL;
     TaidaAddonErrorV1 *out_error = NULL;
-    TaidaAddonStatusV1 status = fn->call(values_ptr, (uint32_t)argc, &out_value, &out_error);
+    TaidaAddonStatusV1 status = fn->call(args, (uint32_t)argc, &out_value, &out_error);
 
-    /* Free argv scratch eagerly so the upcoming taida_throw branch (which
-     * longjmps and never returns) does not leak the heap-allocated
-     * fallback buffers when argc > 16. The inline (stack) buffers are
-     * always reclaimed by stack unwinding regardless of which path we
-     * take below. */
-    if (heap_allocated) {
-        free(values_ptr); free(ints_ptr); free(strs_ptr); free(bools_ptr);
-        free(floats_ptr);
-        heap_allocated = 0;
-    }
+    /* The addon is done with its arguments; release them before any of
+     * the error paths below longjmps. */
+    for (int64_t i = 0; i < argc; i++) taida_addon_host_value_release_inner(built[i]);
+    free(built);
+    free(args);
 
-    taida_val result = 0;
     if (status == TAIDA_ADDON_STATUS_OK) {
         /* Defensive: addon may have written to out_error even on success.
          * Release it so we don't leak. */
@@ -4639,9 +4816,17 @@ int64_t taida_addon_call(
             taida_addon_host_error_release(&taida_addon_host_table, out_error);
             out_error = NULL;
         }
+        taida_val result = 0;
         if (out_value != NULL) {
-            result = taida_addon_val_to_raw(out_value);
+            taida_val result_tag = TAIDA_TAG_INT;
+            int too_deep = 0;
+            result = taida_addon_value_to_native(out_value, &result_tag, 0, &too_deep);
             taida_addon_host_value_release(&taida_addon_host_table, out_value);
+            if (too_deep) {
+                taida_addon_throw_bridge_error(
+                    "AddonMalformedOutput", desc, function_name,
+                    "produced malformed output (value nested more than 1024 levels deep)");
+            }
         }
         return (int64_t)result;
     }

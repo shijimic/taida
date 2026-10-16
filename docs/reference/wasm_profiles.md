@@ -109,6 +109,30 @@ manifest reader が常時注入します ([`docs/api/abi.md`](../api/abi.md) §3
 
 ---
 
+## プレリュード関数の対応範囲
+
+OS に依存しないプレリュード関数とモールド (`range`、Enum 型のフィールドを
+持つ型、Bytes と Str のモールド、ビット演算とシフトのモールド、Float の
+`Div` / `Mod` など) は、すべての WASM プロファイルでインタプリタと同じ結果を
+返します。
+
+OS に依存する次の機能は WASM では提供せず、コンパイル時に決定的な診断で
+拒否します。
+
+| 機能 | 利用できないプロファイル |
+|------|--------------------------|
+| `stdin` / `stdinLine` (標準入力) | WASM 全プロファイル |
+| `sleep` (実時間の待機) | WASM 全プロファイル |
+| `nowMs` (実時計) | `wasm-min` |
+| `argv` (コマンド引数、`taida-lang/os`) | WASM 全プロファイル |
+
+`Regex` は OS に依存しませんが、WASM ランタイムには正規表現エンジンが
+ないため、すべての WASM プロファイルで `[E1617]` により拒否します。
+プレリュード関数ごとの例外は [`docs/api/prelude.md`](../api/prelude.md) §11
+を参照してください。
+
+---
+
 ## Handler Mode
 
 すべての WASM プロファイルは `taida build wasm-* --handler <SYMBOL>` を

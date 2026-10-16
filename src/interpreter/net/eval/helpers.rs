@@ -339,12 +339,29 @@ pub(crate) fn parse_request_head(bytes: &[u8]) -> Value {
     }
 }
 
+/// Build the `httpParseRequestHead` result for a complete or partial head.
+///
+/// The framing checks run in a fixed order that the native runtime
+/// (`taida_net_h1_parse_result`) mirrors, so both backends report the same
+/// error for the same head:
+///
+/// 1. method / path / `Host` wire-byte limits (16 / 2048 / 256 bytes);
+/// 2. per header, in order: `Transfer-Encoding` codings, `Content-Length`
+///    (a single header, `1*DIGIT`, at most 2^53-1);
+/// 3. on a complete head, a `Transfer-Encoding` whose final coding is not
+///    `chunked` (RFC 9112 §6.3: the body length cannot be determined, and
+///    accepting it would let the body be read as the next request);
+/// 4. `Content-Length` together with `chunked`.
 pub(crate) fn build_parse_result(
     req: &httparse::Request,
     bytes: &[u8],
     consumed: usize,
     complete: bool,
 ) -> Value {
+    use super::h1::{
+        HTTP_WIRE_MAX_AUTHORITY_LEN, HTTP_WIRE_MAX_METHOD_LEN, HTTP_WIRE_MAX_PATH_LEN,
+    };
+
     // D29B-008: pointer arithmetic via raw `as usize - base` is replaced
     // with `bytes_subslice_offset` which performs a range check on the
     // subslice pointer before computing the offset. This eliminates the
@@ -352,6 +369,7 @@ pub(crate) fn build_parse_result(
     // `Arc<Vec<u8>>` and cloning it) would produce garbage offsets.
 
     // method span
+    let method_len = req.method.map_or(0, |m| m.len());
     let method_span = if let Some(method) = req.method {
         match bytes_subslice_offset(bytes, method.as_bytes()) {
             Some(start) => make_span(start, method.len()),
@@ -362,6 +380,7 @@ pub(crate) fn build_parse_result(
     };
 
     // path + query spans (split on '?')
+    let path_len = req.path.map_or(0, |p| p.find('?').unwrap_or(p.len()));
     let (path_span, query_span) = if let Some(full_path) = req.path {
         match bytes_subslice_offset(bytes, full_path.as_bytes()) {
             Some(path_start) => {
@@ -380,6 +399,22 @@ pub(crate) fn build_parse_result(
         (make_span(0, 0), make_span(0, 0))
     };
 
+    // The H2 / H3 request structs of the native runtime back these fields
+    // with fixed-size buffers, so over-limit values are rejected at the
+    // parser (docs/api/net.md §4.3) instead of being truncated later.
+    if method_len > HTTP_WIRE_MAX_METHOD_LEN {
+        return make_result_failure_msg(
+            "ParseError",
+            "Malformed HTTP request: method exceeds wire-byte limit",
+        );
+    }
+    if path_len > HTTP_WIRE_MAX_PATH_LEN {
+        return make_result_failure_msg(
+            "ParseError",
+            "Malformed HTTP request: path exceeds wire-byte limit",
+        );
+    }
+
     // version
     let version = Value::pack(vec![
         ("major".into(), Value::Int(1)),
@@ -391,8 +426,8 @@ pub(crate) fn build_parse_result(
     // Stop at the first empty header name to avoid pointer arithmetic on unrelated memory.
     let mut content_length: i64 = 0;
     let mut cl_count: usize = 0;
-    let mut has_transfer_encoding_chunked = false;
-    let mut has_content_length = false;
+    let mut has_transfer_encoding = false;
+    let mut final_coding_chunked = false;
     let mut headers_list = Vec::new();
     for header in req.headers.iter() {
         if header.name.is_empty() {
@@ -414,18 +449,27 @@ pub(crate) fn build_parse_result(
             ("name".into(), name_span),
             ("value".into(), value_span),
         ]));
-        // NET2-2a: Detect Transfer-Encoding: chunked
+        if header.name.eq_ignore_ascii_case("host")
+            && header.value.len() > HTTP_WIRE_MAX_AUTHORITY_LEN
+        {
+            return make_result_failure_msg(
+                "ParseError",
+                "Malformed HTTP request: authority exceeds wire-byte limit",
+            );
+        }
+        // The codings of every Transfer-Encoding line form one
+        // list; empty list elements are ignored (RFC 9110 §5.6.1). Only the
+        // final coding decides the framing.
         if header.name.eq_ignore_ascii_case("transfer-encoding") {
-            // Scan comma-separated tokens for "chunked"
+            has_transfer_encoding = true;
             for token in header.value.split(|&b| b == b',') {
                 let trimmed = trim_ascii(token);
-                if trimmed.eq_ignore_ascii_case(b"chunked") {
-                    has_transfer_encoding_chunked = true;
+                if !trimmed.is_empty() {
+                    final_coding_chunked = trimmed.eq_ignore_ascii_case(b"chunked");
                 }
             }
         }
         if header.name.eq_ignore_ascii_case("content-length") {
-            has_content_length = true;
             cl_count += 1;
             if cl_count > 1 {
                 return make_result_failure_msg(
@@ -433,46 +477,42 @@ pub(crate) fn build_parse_result(
                     "Malformed HTTP request: duplicate Content-Length header",
                 );
             }
-            let raw_val = match std::str::from_utf8(header.value) {
-                Ok(s) => s.trim(),
-                Err(_) => {
-                    return make_result_failure_msg(
-                        "ParseError",
-                        "Malformed HTTP request: invalid Content-Length value",
-                    );
-                }
-            };
-            // Strict: entire trimmed value must be ASCII digits only (no leading +/-, no mixed chars).
-            // This matches the JS backend's /^\d+$/ validation for cross-backend parity.
-            if raw_val.is_empty() || !raw_val.bytes().all(|b| b.is_ascii_digit()) {
+            // Content-Length = 1*DIGIT. httparse already dropped the SP /
+            // HTAB around the value; no other trimming is applied, so a
+            // value padded with other (e.g. non-ASCII) whitespace is
+            // rejected like on the native backend.
+            let raw_val = header.value;
+            if raw_val.is_empty() || !raw_val.iter().all(|b| b.is_ascii_digit()) {
                 return make_result_failure_msg(
                     "ParseError",
                     "Malformed HTTP request: invalid Content-Length value",
                 );
             }
-            // Safe to parse: we already validated all-digits, so parse::<i64>() cannot fail
-            // (unless the number overflows i64, which we still want to reject).
-            match raw_val.parse::<i64>() {
-                Ok(len) => {
-                    // Cap at Number.MAX_SAFE_INTEGER (2^53 - 1 = 9007199254740991) for
-                    // cross-backend parity. JS Number loses precision beyond this value,
-                    // so both backends must reject to keep contentLength identical.
-                    if len > 9_007_199_254_740_991 {
-                        return make_result_failure_msg(
-                            "ParseError",
-                            "Malformed HTTP request: invalid Content-Length value",
-                        );
-                    }
-                    content_length = len;
-                }
-                Err(_) => {
+            // Cap at Number.MAX_SAFE_INTEGER (2^53 - 1 = 9007199254740991) for
+            // cross-backend parity. JS Number loses precision beyond this value,
+            // so all backends reject to keep contentLength identical.
+            let mut len: i64 = 0;
+            for &b in raw_val {
+                let digit = (b - b'0') as i64;
+                if len > (9_007_199_254_740_991 - digit) / 10 {
                     return make_result_failure_msg(
                         "ParseError",
                         "Malformed HTTP request: invalid Content-Length value",
                     );
                 }
+                len = len * 10 + digit;
             }
+            content_length = len;
         }
+    }
+    let has_content_length = cl_count > 0;
+    let has_transfer_encoding_chunked = has_transfer_encoding && final_coding_chunked;
+
+    if complete && has_transfer_encoding && !has_transfer_encoding_chunked {
+        return make_result_failure_msg(
+            "ParseError",
+            "Malformed HTTP request: Transfer-Encoding must end with chunked",
+        );
     }
 
     // NET2-2e: Reject Content-Length + Transfer-Encoding: chunked (RFC 7230 section 3.3.3)
@@ -1000,25 +1040,7 @@ pub(crate) fn encode_response(response: &Value) -> Value {
     // NB6-5: write!() directly into Vec<u8> to eliminate per-header intermediate String allocs.
     // Status line
     let _ = write!(buf, "HTTP/1.1 {} {}\r\n", status, reason);
-
-    // User headers (skip Content-Length for no-body statuses)
-    for (name, value) in &headers {
-        if no_body && name.eq_ignore_ascii_case("Content-Length") {
-            continue;
-        }
-        let _ = write!(buf, "{}: {}\r\n", name, value);
-    }
-
-    // Auto-append Content-Length for statuses that allow a body
-    if !no_body {
-        let has_content_length = headers
-            .iter()
-            .any(|(n, _)| n.eq_ignore_ascii_case("Content-Length"));
-        if !has_content_length {
-            let _ = write!(buf, "Content-Length: {}\r\n", body_bytes.len());
-        }
-    }
-
+    write_response_header_lines(&mut buf, &headers, body_bytes.len(), no_body, false);
     buf.extend_from_slice(b"\r\n");
     if !no_body {
         buf.extend_from_slice(&body_bytes);
@@ -1028,12 +1050,63 @@ pub(crate) fn encode_response(response: &Value) -> Value {
     make_result_success(result)
 }
 
+/// Write the header lines of a one-shot response (without the status line
+/// and the blank line that ends the head).
+///
+/// The body is always framed by its real length: a handler-supplied
+/// `Content-Length` is dropped for statuses without a body; otherwise the
+/// first one keeps its place and spelling but carries the real body length,
+/// and any further ones are dropped. A handler value that disagreed with the
+/// body used to go out as is, so on a keep-alive connection the rest of the
+/// body was read as the next response.
+///
+/// `keep_handler_content_length` is set for a response to a `HEAD` request:
+/// that response carries no body, and its `Content-Length` describes the
+/// representation a `GET` would return (RFC 9110 §8.6), so the handler's
+/// headers are written unchanged.
+pub(crate) fn write_response_header_lines(
+    out: &mut Vec<u8>,
+    headers: &[(String, String)],
+    body_len: usize,
+    no_body: bool,
+    keep_handler_content_length: bool,
+) {
+    use std::io::Write as _;
+    let mut has_content_length = false;
+    for (name, value) in headers {
+        if name.eq_ignore_ascii_case("Content-Length") {
+            if no_body {
+                continue;
+            }
+            if keep_handler_content_length {
+                has_content_length = true;
+                let _ = write!(out, "{}: {}\r\n", name, value);
+                continue;
+            }
+            if has_content_length {
+                continue;
+            }
+            has_content_length = true;
+            let _ = write!(out, "{}: {}\r\n", name, body_len);
+            continue;
+        }
+        let _ = write!(out, "{}: {}\r\n", name, value);
+    }
+    // Auto-append Content-Length for statuses that allow a body
+    if !no_body && !has_content_length {
+        let _ = write!(out, "Content-Length: {}\r\n", body_len);
+    }
+}
+
 /// Scatter-gather send for internal one-shot response path.
 /// Builds head and body as separate buffers and sends them via vectored I/O,
 /// avoiding the aggregate buffer concatenation of encode_response().
+/// `head_request` is true when the response answers a `HEAD` request (see
+/// [`write_response_header_lines`]).
 pub(crate) fn send_response_scatter(
     stream: &mut ConnStream,
     response: &Value,
+    head_request: bool,
 ) -> Result<(), String> {
     use std::io::Write as _;
 
@@ -1050,23 +1123,7 @@ pub(crate) fn send_response_scatter(
     let reason = status_reason(status);
     let mut head = Vec::with_capacity(256);
     let _ = write!(head, "HTTP/1.1 {} {}\r\n", status, reason);
-
-    for (name, value) in &headers {
-        if no_body && name.eq_ignore_ascii_case("Content-Length") {
-            continue;
-        }
-        let _ = write!(head, "{}: {}\r\n", name, value);
-    }
-
-    if !no_body {
-        let has_content_length = headers
-            .iter()
-            .any(|(n, _)| n.eq_ignore_ascii_case("Content-Length"));
-        if !has_content_length {
-            let _ = write!(head, "Content-Length: {}\r\n", body_bytes.len());
-        }
-    }
-
+    write_response_header_lines(&mut head, &headers, body_bytes.len(), no_body, head_request);
     head.extend_from_slice(b"\r\n");
 
     // NB6-1: Send head and body as separate IoSlices — no aggregate buffer.
@@ -1199,11 +1256,10 @@ pub(crate) fn extract_response_fields(response: &Value) -> Result<ResponseFields
             ));
         }
         // NB: Content-Length is intentionally not rejected on the eager
-        // path. The encoder coalesces handler-supplied Content-Length
-        // with the runtime-computed one (no double-emit) and strips it
-        // for bodyless statuses, preserving legacy behaviour. The
-        // streaming validator is stricter because the runtime always
-        // emits chunked there.
+        // path. The encoder replaces a handler-supplied value with the real
+        // body length (`write_response_header_lines`) and strips it for
+        // bodyless statuses. The streaming validator is stricter because the
+        // runtime always emits chunked there.
         headers.push((name, value));
     }
 

@@ -239,7 +239,7 @@ api <= @(
 
 ### 定数 (SCREAMING_SNAKE_CASE)
 
-```taida
+```taida fragment
 MAX_RETRY_COUNT <= 3
 DEFAULT_TIMEOUT <= 5000
 PI <= 3.14159
@@ -263,7 +263,7 @@ ApiError => RateLimited = @(retry_after: Int)
 
 ## モジュール / ファイル名 (snake_case + kebab-case)
 
-```taida
+```taida fragment
 // ファイル: net_http_hello.td
 >>> ./http_client.td => @(httpGet, httpPost)
 >>> ./json_parser.td => @(parseJson)
@@ -294,7 +294,7 @@ import / export ではモジュール path は **kebab-case** (GitHub URL 準拠
 - アンダースコア (`_`)
 - Unicode 文字 (対応予定)
 
-```taida
+```taida fragment
 // OK
 pilot_name <= "Misato"
 pilot2 <= getPilot(2)
@@ -360,7 +360,7 @@ calcTotPrc items: @[Item] = ...
 
 ### 真偽値には is / has / can プレフィックス (慣習)
 
-```taida
+```taida fragment
 is_valid <= validateInput(data)
 has_permission <= checkPermission(pilot)
 can_proceed <= is_valid && has_permission

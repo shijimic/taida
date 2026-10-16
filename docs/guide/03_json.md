@@ -355,7 +355,7 @@ stdout(jsonEncode(payload))  // {"state_id":1}
 
 ### API レスポンスの処理
 
-```taida
+```taida fragment
 Pilot = @(name: Str, age: Int)
 
 fetchPilot id: Int =
@@ -376,7 +376,7 @@ fetchPilot id: Int =
 
 ### 設定ファイルの読み込み
 
-```taida
+```taida fragment
 Config = @(host: Str, port: Int)
 
 loadConfig path: Str =
@@ -395,7 +395,7 @@ loadConfig path: Str =
 
 同じ生データから、異なるスキーマで必要な情報だけを取り出せます。
 
-```taida
+```taida fragment
 UserInfo = @(name: Str, email: Str)
 BillingInfo = @(plan: Str, amount: Int)
 

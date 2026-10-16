@@ -258,7 +258,8 @@ pub enum AddonManifestError {
     AbiUnsupported {
         path: PathBuf,
         expected: u32,
-        actual: u32,
+        /// The integer as written in the manifest (not narrowed).
+        actual: i64,
     },
     /// `entry` did not match [`TAIDA_ADDON_ENTRY_SYMBOL`].
     EntryMismatch {
@@ -656,19 +657,14 @@ pub fn parse_addon_manifest_str(
     }
 
     // Validate top-level required keys.
+    // Compare the integer as written: narrowing it first would let
+    // `abi = 4294967297` (2^32 + 1) pass as ABI 1.
     let abi = require_int(&raw.top_level, "abi", path)?;
-    if (abi as u32) != TAIDA_ADDON_ABI_VERSION {
+    if abi != i64::from(TAIDA_ADDON_ABI_VERSION) {
         return Err(AddonManifestError::AbiUnsupported {
             path: path.to_path_buf(),
             expected: TAIDA_ADDON_ABI_VERSION,
-            actual: abi as u32,
-        });
-    }
-    if abi < 0 {
-        return Err(AddonManifestError::AbiUnsupported {
-            path: path.to_path_buf(),
-            expected: TAIDA_ADDON_ABI_VERSION,
-            actual: 0,
+            actual: abi,
         });
     }
 
@@ -961,7 +957,7 @@ pub fn parse_addon_manifest_str(
 
     Ok(AddonManifest {
         manifest_path: path.to_path_buf(),
-        abi: abi as u32,
+        abi: TAIDA_ADDON_ABI_VERSION,
         entry,
         package,
         library,
@@ -1820,6 +1816,27 @@ noop = 0
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn rejects_abi_that_only_matches_after_narrowing() {
+        // 2^32 + 1 and -(2^32 - 1) both become 1 as a u32; the check
+        // compares the integer as written and reports it unchanged.
+        for (abi, shown) in [("4294967297", 4294967297i64), ("-4294967295", -4294967295)] {
+            let src = format!(
+                "abi = {abi}\nentry = \"taida_addon_get_v1\"\npackage = \"x/y\"\nlibrary = \"z\"\n[functions]\nnoop = 0\n"
+            );
+            let err = parse(&src).expect_err("abi other than 1 must be rejected");
+            assert!(
+                matches!(err, AddonManifestError::AbiUnsupported { expected: 1, actual, .. } if actual == shown),
+                "abi = {abi}: {err}"
+            );
+            assert!(
+                err.to_string()
+                    .contains(&format!("unsupported abi {shown}")),
+                "{err}"
+            );
+        }
     }
 
     #[test]

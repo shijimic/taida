@@ -11,9 +11,9 @@
 //       addon.toml              <-- function table, library stem
 //       libtaida_addon_sample.so <-- the cdylib
 //
-// Native interpreter only: this example fails on JS / WASM / Cranelift
-// native backends with a deterministic compile-time error
-// (`addon-backed package '...' is not supported on backend '...'`).
+// The interpreter and the native backend run it. The JS and WASM
+// backends reject addon-backed packages at build time with a
+// deterministic error.
 //
 // To run this example end-to-end:
 //
@@ -28,5 +28,5 @@
 
 >>> taida-lang/addon-rs-sample => @(echo)
 
-result <= echo("hello from taida")
+result: Str <= echo("hello from taida")
 stdout(result)

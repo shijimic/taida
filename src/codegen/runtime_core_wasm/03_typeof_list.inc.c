@@ -22,7 +22,7 @@ int64_t taida_typeof(int64_t val, int64_t tag) {
         case 3: return WSTR("Str");
         case 4: return WSTR("BuchiPack");
         case 5: return WSTR("List");
-        case 6: return WSTR("Closure");
+        case 6: return WSTR("Function");
         default: return WSTR("Int");
     }
 }
@@ -44,38 +44,33 @@ int64_t taida_type_name(int64_t val, int64_t tag) {
  * WC-2a: Float mold functions (prelude — all profiles)
  * ========================================================================= */
 
+/* The f64.floor / f64.ceil / f64.trunc opcodes: exact for every double,
+   including magnitudes past the Int range, infinities and NaN (a round
+   trip through `long long` is not). */
+double __builtin_floor(double);
+double __builtin_ceil(double);
+double __builtin_trunc(double);
+
 /// Floor[f]() -- floor(x), returns float (bit-punned int64_t)
 int64_t taida_float_floor(int64_t a) {
-    double d = _to_double(a);
-    double t = (double)(long long)d;
-    if (t > d) t -= 1.0;
-    return _d2l(t);
+    return _d2l(__builtin_floor(_to_double(a)));
 }
 
 /// Ceil[f]() -- ceil(x), returns float (bit-punned int64_t)
 int64_t taida_float_ceil(int64_t a) {
-    double d = _to_double(a);
-    double t = (double)(long long)d;
-    if (t < d) t += 1.0;
-    return _d2l(t);
+    return _d2l(__builtin_ceil(_to_double(a)));
 }
 
-/// Round[f]() -- round(x) to nearest, ties away from zero
+/// Round[f]() -- round(x) to nearest, ties away from zero. Exact for every
+/// input (adding 0.5 first rounded 0.49999999999999994 up to 1).
 int64_t taida_float_round(int64_t a) {
-    double d = _to_double(a);
-    double t;
-    if (d >= 0.0) {
-        t = (double)(long long)(d + 0.5);
-    } else {
-        t = (double)(long long)(d - 0.5);
-    }
-    return _d2l(t);
+    return _d2l(_tm_round(_to_double(a)));
 }
 
 /// Abs[f]() -- absolute value of float
 int64_t taida_float_abs(int64_t a) {
-    double d = _to_double(a);
-    return _d2l(d < 0.0 ? -d : d);
+    /* Clear the sign bit: `-0.0 < 0.0` is false, and Abs[-0.0]() is 0.0. */
+    return a & 0x7fffffffffffffffLL;
 }
 
 /// Clamp[f, lo, hi]() -- clamp float to range [lo, hi]
@@ -83,462 +78,60 @@ int64_t taida_float_clamp(int64_t a, int64_t lo, int64_t hi) {
     double da = _to_double(a);
     double dlo = _to_double(lo);
     double dhi = _to_double(hi);
-    if (da < dlo) return lo;
+    /* Reversed bounds (lo > hi) give lo, like the reference. */
+    if (dlo > dhi || da < dlo) return lo;
     if (da > dhi) return hi;
     return a;
 }
 
-// ── Math mold family (C25B-025 Phase 5-I, 2026-04-23) ────
+// ── Math mold family ─────────────────────────────────────
 //
-// Freestanding (`-nostdlib`) implementations for the math mold family.
-// Unlike the native backend (which links glibc libm) and V8 JS
-// (which uses the host's math implementation), the WASM runtime
-// must implement these without access to libm — clang compiles
-// `__builtin_sin(x)` etc. to a call to extern `sin`, which would
-// fail to link under `wasm-ld -nostdlib`.
-//
-// Strategy:
-//  - Sqrt uses the `f64.sqrt` WASM opcode via `__builtin_sqrt`
-//    (wasm-ld resolves this to the opcode, no extern needed).
-//  - Exp / Ln use range reduction to [-ln(2)/2, ln(2)/2] then a
-//    truncated Taylor / log-reduction Horner polynomial.
-//  - Sin / Cos reduce to [-pi/4, pi/4] via Cody-Waite then use a
-//    ~12-term Taylor series.
-//  - Tan = Sin / Cos. Asin / Acos / Atan use the CORDIC-free
-//    power series with range-reduction identities. Atan2 resolves
-//    quadrant via sign tests.
-//  - Pow = Exp(y * Ln(x)) for positive x, with integer-exp fast
-//    path for x^n when y is an integer (matches Rust's `powi`
-//    behaviour for integer exponents and avoids ln-of-negative
-//    issues for `Pow[-2.0, 3]()`).
-//  - Log(val, base) = Ln(val) / Ln(base).
-//  - Sinh / Cosh / Tanh via (exp(x) ± exp(-x)) / 2 or the stable
-//    Tanh form for large |x|.
-//
-// These are NOT guaranteed bit-exact with glibc libm / V8 / Rust
-// `f64::exp` — the parity test in `tests/c25b_025_math_molds.rs`
-// compares wasm vs interpreter with a relative-ULP tolerance
-// (bit-exact is enforced for native-vs-interpreter). This trade
-// is documented in that test file; the interpreter remains the
-// source of truth and native matches it bit-for-bit because both
-// delegate to the same libm on Linux / macOS targets.
+// The molds run on the math kernel (05_numeric.inc.c), which returns the
+// reference libm's results: bit-identical for Exp / Ln / Log2 / Log10 /
+// Log / Pow / Sinh / Cosh / Tanh, and the correctly rounded value for the
+// trigonometric family (the reference is correctly rounded except on a
+// small fraction of arguments). Sqrt is the exact `f64.sqrt` instruction.
 
-/* Compiler intrinsic: wasm `f64.sqrt` opcode. Resolved by LLVM
-   without emitting an extern reference. */
 double __builtin_sqrt(double);
-double __builtin_fabs(double);
 
 int64_t taida_float_sqrt(int64_t a) {
     double d = _to_double(a);
     return _d2l(__builtin_sqrt(d));
 }
 
-/* ── exp / ln helpers ────────────────────────────────────── */
-
-/* Constants: ln(2), ln(2) halves, 1/ln(2) for log2, 1/ln(10) for log10 */
-#define _C25B_025_LN2       0.6931471805599453
-#define _C25B_025_INV_LN2   1.4426950408889634
-#define _C25B_025_INV_LN10  0.43429448190325176
-#define _C25B_025_PI        3.141592653589793
-#define _C25B_025_HALF_PI   1.5707963267948966
-#define _C25B_025_QUARTER_PI 0.7853981633974483
-
-/* exp(x) for x in [-ln(2)/2, ln(2)/2]. 13-term Taylor gives ~1 ULP.
-   Outside this range, use range reduction: x = n*ln(2) + r with
-   |r| <= ln(2)/2, then exp(x) = 2^n * exp(r). */
-static double _wc_exp(double x) {
-    if (x != x) return x;  /* NaN */
-    if (x > 709.782712893384) {
-        /* overflow to +inf */
-        double big = 1e308;
-        return big * big;
-    }
-    if (x < -745.13321910194116) {
-        return 0.0;
-    }
-    /* n = round(x / ln(2)) */
-    double n_f = x * _C25B_025_INV_LN2;
-    long long n = (long long)(n_f >= 0.0 ? n_f + 0.5 : n_f - 0.5);
-    double r = x - (double)n * _C25B_025_LN2;
-    /* Taylor: 1 + r(1 + r/2 * (1 + r/3 * (1 + r/4 * ...))) — Horner. */
-    double t = 1.0 / 13.0;
-    t = 1.0 + r * t / 12.0;
-    t = 1.0 + r * t / 11.0;
-    t = 1.0 + r * t / 10.0;
-    t = 1.0 + r * t / 9.0;
-    t = 1.0 + r * t / 8.0;
-    t = 1.0 + r * t / 7.0;
-    t = 1.0 + r * t / 6.0;
-    t = 1.0 + r * t / 5.0;
-    t = 1.0 + r * t / 4.0;
-    t = 1.0 + r * t / 3.0;
-    t = 1.0 + r * t / 2.0;
-    double exp_r = 1.0 + r * t;
-    /* Multiply by 2^n via bit manipulation on the exponent. */
-    union { double d; int64_t l; } u;
-    u.d = exp_r;
-    /* IEEE 754 double: exponent is bits 52..62 (11 bits, bias 1023). */
-    int64_t exp_bits = ((u.l >> 52) & 0x7ff) + n;
-    if (exp_bits <= 0) {
-        /* Subnormal or underflow — fall back to explicit multiply for
-           the few cases this path fires; Phase 5-I fixture values are
-           all in the normal range so this branch is unexercised. */
-        double pow2 = 1.0;
-        if (n > 0) { for (long long i = 0; i < n; i++) pow2 *= 2.0; }
-        else { for (long long i = 0; i < -n; i++) pow2 *= 0.5; }
-        return exp_r * pow2;
-    }
-    if (exp_bits >= 0x7ff) {
-        double big = 1e308;
-        return big * big;
-    }
-    u.l = (u.l & ~((int64_t)0x7ff << 52)) | (exp_bits << 52);
-    return u.d;
-}
-
-/* ln(x) for x > 0. Reduce x = 2^k * m with m in [sqrt(2)/2, sqrt(2)],
-   then use the series ln(m) = 2 * atanh((m-1)/(m+1)) truncated to
-   ~12 terms. */
-static double _wc_ln(double x) {
-    if (x != x) return x;
-    if (x < 0.0) { double z = 0.0; return z / z; }  /* NaN */
-    if (x == 0.0) { double z = -1.0; return z / 0.0; }  /* -inf */
-    union { double d; int64_t l; } u;
-    u.d = x;
-    /* Extract exponent. */
-    int64_t exp_bits = (u.l >> 52) & 0x7ff;
-    int64_t k = exp_bits - 1023;
-    /* Set exponent to 0 (i.e. mantissa in [1, 2)). */
-    u.l = (u.l & ~((int64_t)0x7ff << 52)) | ((int64_t)1023 << 52);
-    double m = u.d;
-    /* Shift m into [sqrt(2)/2, sqrt(2)] for tighter series. */
-    if (m > 1.4142135623730951) { m *= 0.5; k += 1; }
-    /* ln(m) = 2 * atanh(t) where t = (m-1)/(m+1). atanh(t) series:
-       t + t^3/3 + t^5/5 + t^7/7 + ... */
-    double t = (m - 1.0) / (m + 1.0);
-    double t2 = t * t;
-    double sum = 1.0 / 21.0;
-    sum = 1.0 / 19.0 + t2 * sum;
-    sum = 1.0 / 17.0 + t2 * sum;
-    sum = 1.0 / 15.0 + t2 * sum;
-    sum = 1.0 / 13.0 + t2 * sum;
-    sum = 1.0 / 11.0 + t2 * sum;
-    sum = 1.0 / 9.0 + t2 * sum;
-    sum = 1.0 / 7.0 + t2 * sum;
-    sum = 1.0 / 5.0 + t2 * sum;
-    sum = 1.0 / 3.0 + t2 * sum;
-    sum = 1.0 + t2 * sum;
-    double ln_m = 2.0 * t * sum;
-    return (double)k * _C25B_025_LN2 + ln_m;
-}
-
-int64_t taida_float_exp(int64_t a) {
-    return _d2l(_wc_exp(_to_double(a)));
-}
-int64_t taida_float_ln(int64_t a) {
-    return _d2l(_wc_ln(_to_double(a)));
-}
-int64_t taida_float_log2(int64_t a) {
-    return _d2l(_wc_ln(_to_double(a)) * _C25B_025_INV_LN2);
-}
-int64_t taida_float_log10(int64_t a) {
-    return _d2l(_wc_ln(_to_double(a)) * _C25B_025_INV_LN10);
-}
+int64_t taida_float_exp(int64_t a) { return _d2l(_crm_exp(_to_double(a))); }
+int64_t taida_float_ln(int64_t a) { return _d2l(_crm_ln(_to_double(a))); }
+int64_t taida_float_log2(int64_t a) { return _d2l(_crm_log2(_to_double(a))); }
+int64_t taida_float_log10(int64_t a) { return _d2l(_crm_log10(_to_double(a))); }
 int64_t taida_float_log(int64_t a, int64_t b) {
-    return _d2l(_wc_ln(_to_double(a)) / _wc_ln(_to_double(b)));
+    return _d2l(_crm_ln(_to_double(a)) / _crm_ln(_to_double(b)));
 }
-
-/* Pow: use integer fast path for integer exponents, otherwise
-   exp(y * ln(x)). Integer fast path matches `Pow[2.0, 10]() = 1024`
-   bit-exactly; otherwise we accept the ~1 ULP of the exp/ln series. */
 int64_t taida_float_pow(int64_t a, int64_t b) {
-    double base = _to_double(a);
-    double ex = _to_double(b);
-    /* Integer exponent fast path (covers Pow[2.0, 10] = 1024 exactly). */
-    if (ex == (double)(long long)ex && __builtin_fabs(ex) < 1e18) {
-        long long n = (long long)ex;
-        double abs_base = base;
-        int inv = 0;
-        if (n < 0) { n = -n; inv = 1; }
-        double result = 1.0;
-        double acc = abs_base;
-        while (n > 0) {
-            if (n & 1) result *= acc;
-            acc *= acc;
-            n >>= 1;
-        }
-        return _d2l(inv ? 1.0 / result : result);
-    }
-    if (base == 0.0) return _d2l(ex > 0.0 ? 0.0 : (ex == 0.0 ? 1.0 : 1.0 / 0.0));
-    if (base < 0.0) {
-        /* Non-integer exponent on negative base → NaN (matches libm). */
-        double z = 0.0;
-        return _d2l(z / z);
-    }
-    return _d2l(_wc_exp(ex * _wc_ln(base)));
+    return _d2l(_crm_pow(_to_double(a), _to_double(b)));
 }
-
-/* ── sin / cos / tan ────────────────────────────────────── */
-
-/* Cody-Waite range reduction: split pi/2 into high + low parts
-   to preserve precision when reducing large angles. For the
-   Phase 5-I fixture (|x| <= 1) the reduction is trivial. */
-static double _wc_sin(double x) {
-    if (x != x) return x;
-    /* Reduce to [-pi, pi]. */
-    double tp = 2.0 * _C25B_025_PI;
-    while (x > _C25B_025_PI) x -= tp;
-    while (x < -_C25B_025_PI) x += tp;
-    /* Now |x| <= pi. Reduce further via sin(pi - x) = sin(x) for the
-       positive half, sin(-pi - x) = sin(x) mirrored for the negative. */
-    if (x > _C25B_025_HALF_PI) { x = _C25B_025_PI - x; }
-    else if (x < -_C25B_025_HALF_PI) { x = -_C25B_025_PI - x; }
-    /* |x| <= pi/2. 13-term Taylor of sin(x)/x = 1 - x^2/3! + x^4/5! - ...
-       via Horner on x^2; then multiply by x. Coefficients stored as
-       reciprocal factorials. */
-    double x2 = x * x;
-    static const double c1 = -1.0 / 6.0;              /* -1/3! */
-    static const double c2 =  1.0 / 120.0;            /*  1/5! */
-    static const double c3 = -1.0 / 5040.0;           /* -1/7! */
-    static const double c4 =  1.0 / 362880.0;         /*  1/9! */
-    static const double c5 = -1.0 / 39916800.0;       /* -1/11! */
-    static const double c6 =  1.0 / 6227020800.0;     /*  1/13! */
-    double result = ((((c6 * x2 + c5) * x2 + c4) * x2 + c3) * x2 + c2) * x2 + c1;
-    result = 1.0 + result * x2;
-    return x * result;
-}
-
-static double _wc_cos(double x) {
-    if (x != x) return x;
-    /* Direct Taylor for cos(x) = 1 - x^2/2! + x^4/4! - ...
-       using range reduction to [-pi, pi] then |x| <= pi/2 (via
-       cos(pi - x) = -cos(x)), matching _wc_sin's reduction. This
-       avoids the precision loss from sin(pi/2 - x) when x is near 0. */
-    double tp = 2.0 * _C25B_025_PI;
-    while (x > _C25B_025_PI) x -= tp;
-    while (x < -_C25B_025_PI) x += tp;
-    int neg = 0;
-    if (x > _C25B_025_HALF_PI) { x = _C25B_025_PI - x; neg = 1; }
-    else if (x < -_C25B_025_HALF_PI) { x = -_C25B_025_PI - x; neg = 1; }
-    double x2 = x * x;
-    static const double d1 = -1.0 / 2.0;                 /* -1/2! */
-    static const double d2 =  1.0 / 24.0;                /*  1/4! */
-    static const double d3 = -1.0 / 720.0;               /* -1/6! */
-    static const double d4 =  1.0 / 40320.0;             /*  1/8! */
-    static const double d5 = -1.0 / 3628800.0;           /* -1/10! */
-    static const double d6 =  1.0 / 479001600.0;         /*  1/12! */
-    static const double d7 = -1.0 / 87178291200.0;       /* -1/14! */
-    double poly = ((((((d7 * x2 + d6) * x2 + d5) * x2 + d4) * x2 + d3) * x2 + d2) * x2 + d1);
-    double result = 1.0 + poly * x2;
-    return neg ? -result : result;
-}
-
-static double _wc_tan(double x) {
-    double c = _wc_cos(x);
-    if (c == 0.0) { double z = 1.0; return z / 0.0; }
-    return _wc_sin(x) / c;
-}
-
-int64_t taida_float_sin(int64_t a) { return _d2l(_wc_sin(_to_double(a))); }
-int64_t taida_float_cos(int64_t a) { return _d2l(_wc_cos(_to_double(a))); }
-int64_t taida_float_tan(int64_t a) { return _d2l(_wc_tan(_to_double(a))); }
-
-/* ── asin / acos / atan / atan2 ───────────────────────────── */
-
-/* atan(x) for |x| <= 1 via Maclaurin series:
-   atan(x) = x - x^3/3 + x^5/5 - ...  — 20 terms gives ~1 ULP
-   for |x| <= tan(pi/8). For |x| > 1, use atan(x) = pi/2 - atan(1/x). */
-static double _wc_atan(double x) {
-    if (x != x) return x;
-    int neg = 0;
-    if (x < 0.0) { x = -x; neg = 1; }
-    int complement = 0;
-    if (x > 1.0) { x = 1.0 / x; complement = 1; }
-    /* Further reduce using atan(x) = pi/8 + atan((x-tan(pi/8))/(1+x*tan(pi/8)))
-       for faster convergence when x close to 1. tan(pi/8) = sqrt(2) - 1. */
-    const double tan_pi_8 = 0.41421356237309503;
-    int add_pi_8 = 0;
-    if (x > tan_pi_8) {
-        x = (x - tan_pi_8) / (1.0 + x * tan_pi_8);
-        add_pi_8 = 1;
-    }
-    /* Now |x| < tan(pi/8) ≈ 0.414. Series converges fast. */
-    double x2 = x * x;
-    static const double a1 =  1.0 / 21.0;
-    static const double a2 = -1.0 / 19.0;
-    static const double a3 =  1.0 / 17.0;
-    static const double a4 = -1.0 / 15.0;
-    static const double a5 =  1.0 / 13.0;
-    static const double a6 = -1.0 / 11.0;
-    static const double a7 =  1.0 / 9.0;
-    static const double a8 = -1.0 / 7.0;
-    static const double a9 =  1.0 / 5.0;
-    static const double a10 = -1.0 / 3.0;
-    double p = a1;
-    p = a2 + p * x2;
-    p = a3 + p * x2;
-    p = a4 + p * x2;
-    p = a5 + p * x2;
-    p = a6 + p * x2;
-    p = a7 + p * x2;
-    p = a8 + p * x2;
-    p = a9 + p * x2;
-    p = a10 + p * x2;
-    p = 1.0 + p * x2;
-    double result = x * p;
-    if (add_pi_8) result += 0.39269908169872414;  /* pi/8 */
-    if (complement) result = _C25B_025_HALF_PI - result;
-    return neg ? -result : result;
-}
-
-int64_t taida_float_atan(int64_t a) { return _d2l(_wc_atan(_to_double(a))); }
-
-int64_t taida_float_asin(int64_t a) {
-    double x = _to_double(a);
-    if (x != x || x > 1.0 || x < -1.0) { double z = 0.0; return _d2l(z / z); }
-    if (x == 1.0) return _d2l(_C25B_025_HALF_PI);
-    if (x == -1.0) return _d2l(-_C25B_025_HALF_PI);
-    /* asin(x) = atan(x / sqrt(1 - x^2)). */
-    double denom = __builtin_sqrt(1.0 - x * x);
-    return _d2l(_wc_atan(x / denom));
-}
-
-int64_t taida_float_acos(int64_t a) {
-    double x = _to_double(a);
-    if (x != x || x > 1.0 || x < -1.0) { double z = 0.0; return _d2l(z / z); }
-    if (x == 1.0) return _d2l(0.0);
-    if (x == -1.0) return _d2l(_C25B_025_PI);
-    /* acos(x) = pi/2 - asin(x). */
-    double denom = __builtin_sqrt(1.0 - x * x);
-    return _d2l(_C25B_025_HALF_PI - _wc_atan(x / denom));
-}
-
+int64_t taida_float_sin(int64_t a) { return _d2l(_crm_sin(_to_double(a))); }
+int64_t taida_float_cos(int64_t a) { return _d2l(_crm_cos(_to_double(a))); }
+int64_t taida_float_tan(int64_t a) { return _d2l(_crm_tan(_to_double(a))); }
+int64_t taida_float_asin(int64_t a) { return _d2l(_crm_asin(_to_double(a))); }
+int64_t taida_float_acos(int64_t a) { return _d2l(_crm_acos(_to_double(a))); }
+int64_t taida_float_atan(int64_t a) { return _d2l(_crm_atan(_to_double(a))); }
 int64_t taida_float_atan2(int64_t y_raw, int64_t x_raw) {
-    double y = _to_double(y_raw);
-    double x = _to_double(x_raw);
-    if (x > 0.0) return _d2l(_wc_atan(y / x));
-    if (x < 0.0) {
-        if (y >= 0.0) return _d2l(_wc_atan(y / x) + _C25B_025_PI);
-        return _d2l(_wc_atan(y / x) - _C25B_025_PI);
-    }
-    /* x == 0 */
-    if (y > 0.0) return _d2l(_C25B_025_HALF_PI);
-    if (y < 0.0) return _d2l(-_C25B_025_HALF_PI);
-    return _d2l(0.0);
+    return _d2l(_crm_atan2(_to_double(y_raw), _to_double(x_raw)));
 }
+int64_t taida_float_sinh(int64_t a) { return _d2l(_crm_sinh(_to_double(a))); }
+int64_t taida_float_cosh(int64_t a) { return _d2l(_crm_cosh(_to_double(a))); }
+int64_t taida_float_tanh(int64_t a) { return _d2l(_crm_tanh(_to_double(a))); }
 
-/* ── sinh / cosh / tanh ─────────────────────────────────── */
-
-int64_t taida_float_sinh(int64_t a) {
-    double x = _to_double(a);
-    /* sinh(x) = (e^x - e^-x) / 2. For small |x|, this has catastrophic
-       cancellation; use the series x + x^3/6 + ... instead when |x| < 1. */
-    if (__builtin_fabs(x) < 1.0) {
-        double x2 = x * x;
-        double p = 1.0 / 39916800.0;
-        p = 1.0 / 362880.0 + x2 * p;
-        p = 1.0 / 5040.0 + x2 * p;
-        p = 1.0 / 120.0 + x2 * p;
-        p = 1.0 / 6.0 + x2 * p;
-        p = 1.0 + x2 * p;
-        return _d2l(x * p);
-    }
-    double ex = _wc_exp(x);
-    return _d2l((ex - 1.0 / ex) * 0.5);
-}
-
-int64_t taida_float_cosh(int64_t a) {
-    double x = _to_double(a);
-    double ex = _wc_exp(__builtin_fabs(x));
-    return _d2l((ex + 1.0 / ex) * 0.5);
-}
-
-int64_t taida_float_tanh(int64_t a) {
-    double x = _to_double(a);
-    /* tanh(x) = (e^2x - 1) / (e^2x + 1). Handle large |x| to avoid overflow. */
-    if (x > 20.0) return _d2l(1.0);
-    if (x < -20.0) return _d2l(-1.0);
-    double e2x = _wc_exp(2.0 * x);
-    return _d2l((e2x - 1.0) / (e2x + 1.0));
-}
-
-// --- Manual float-to-string helper for ToFixed ---
-
-/// Write the integer part of |val| into buf, return number of chars written.
-static int _wc_write_uint64(char *buf, uint64_t val) {
-    if (val == 0) { buf[0] = '0'; return 1; }
-    char tmp[20];
-    int n = 0;
-    while (val > 0) {
-        tmp[n++] = '0' + (int)(val % 10);
-        val /= 10;
-    }
-    for (int i = 0; i < n; i++) buf[i] = tmp[n - 1 - i];
-    return n;
-}
-
-/// ToFixed[f, digits]() -- format float to string with N decimal places
+/// ToFixed[f, digits]() -- Rust `format!("{:.digits$}", f)`: the exact
+/// binary value rounded half-to-even, digits clamped to 0..=20.
 int64_t taida_float_to_fixed(int64_t a, int64_t digits_raw) {
-    double d = _to_double(a);
-    int digits = (int)digits_raw;
-    if (digits < 0) digits = 0;
-    if (digits > 20) digits = 20;
-
-    // Handle NaN
-    if (d != d) {
-        char *r = _wasm_str_alloc(4);
-        r[0] = 'N'; r[1] = 'a'; r[2] = 'N'; r[3] = '\0';
-        return (int64_t)r;
-    }
-
-    int negative = 0;
-    if (d < 0.0) { negative = 1; d = -d; }
-
-    // Check infinity
-    double zero_test = d * 0.0;
-    if (zero_test != 0.0 || (d > 0.0 && d == d + d)) {
-        if (negative) {
-            char *r = _wasm_str_alloc(5);
-            r[0] = '-'; r[1] = 'i'; r[2] = 'n'; r[3] = 'f'; r[4] = '\0';
-            return (int64_t)r;
-        } else {
-            char *r = _wasm_str_alloc(4);
-            r[0] = 'i'; r[1] = 'n'; r[2] = 'f'; r[3] = '\0';
-            return (int64_t)r;
-        }
-    }
-
-    // Round to `digits` decimal places
-    double multiplier = 1.0;
-    for (int i = 0; i < digits; i++) multiplier *= 10.0;
-    double rounded = d * multiplier;
-    rounded = (double)(long long)(rounded + 0.5);
-    uint64_t total = (uint64_t)rounded;
-    uint64_t int_part = total;
-    uint64_t frac_part = 0;
-    if (digits > 0) {
-        uint64_t divisor = (uint64_t)multiplier;
-        int_part = total / divisor;
-        frac_part = total % divisor;
-    }
-
-    char buf[80];
-    int pos = 0;
-    if (negative) buf[pos++] = '-';
-    pos += _wc_write_uint64(buf + pos, int_part);
-    if (digits > 0) {
-        buf[pos++] = '.';
-        for (int i = digits - 1; i >= 0; i--) {
-            uint64_t p = 1;
-            for (int j = 0; j < i; j++) p *= 10;
-            int digit = (int)((frac_part / p) % 10);
-            buf[pos++] = '0' + digit;
-        }
-    }
-    buf[pos] = '\0';
-
-    char *r = _wasm_str_alloc((unsigned int)(pos + 1));
-    _wf_memcpy(r, buf, pos + 1);
+    int digits = digits_raw < 0 ? 0 : (digits_raw > 20 ? 20 : (int)digits_raw);
+    char tmp[TAIDA_WASM_FLOAT_TEXT_MAX];
+    int len = _tf_fixed(_to_double(a), digits, tmp);
+    char *r = _wasm_str_alloc((unsigned int)(len + 1));
+    if (!r) return 0;
+    _wf_memcpy(r, tmp, len);
+    r[len] = '\0';
     return (int64_t)r;
 }
 
@@ -587,7 +180,7 @@ int64_t taida_float_is_zero(int64_t a) {
  * ========================================================================= */
 
 int64_t taida_int_clamp(int64_t a, int64_t lo, int64_t hi) {
-    if (a < lo) return lo;
+    if (lo > hi || a < lo) return lo;
     if (a > hi) return hi;
     return a;
 }
@@ -638,7 +231,9 @@ int64_t taida_int_mold_auto(int64_t v) {
     return taida_lax_new(v, 0);
 }
 
-/// Int[str, base]() -- parse string in given base
+/// Int[str, base]() -- parse string in given base (native twin): one
+/// optional sign, then digits of the base; a value past the Int range fails
+/// and the smallest Int parses.
 int64_t taida_int_mold_str_base(int64_t v, int64_t base) {
     if (base < 2 || base > 36) return taida_lax_empty(0);
     const char *s = (const char *)(intptr_t)v;
@@ -647,22 +242,25 @@ int64_t taida_int_mold_str_base(int64_t v, int64_t base) {
 
     int negative = 0;
     int i = 0;
-    if (s[0] == '-') {
-        negative = 1;
+    if (s[0] == '-' || s[0] == '+') {
+        negative = s[0] == '-';
         i = 1;
         if (len == 1) return taida_lax_empty(0);
     }
 
     uint64_t acc = 0;
+    const uint64_t i64_max = 0x7fffffffffffffffULL;
+    uint64_t limit = negative ? i64_max + 1ULL : i64_max;
     for (; i < len; i++) {
         int d = _wc_char_to_digit((unsigned char)s[i]);
         if (d < 0 || d >= (int)base) return taida_lax_empty(0);
+        if (acc > (limit - (uint64_t)d) / (uint64_t)base) return taida_lax_empty(0);
         acc = acc * (uint64_t)base + (uint64_t)d;
     }
 
     int64_t out;
     if (negative) {
-        out = -(int64_t)acc;
+        out = acc == i64_max + 1ULL ? (int64_t)(i64_max + 1ULL) : -(int64_t)acc;
     } else {
         out = (int64_t)acc;
     }
@@ -671,12 +269,14 @@ int64_t taida_int_mold_str_base(int64_t v, int64_t base) {
 
 /// ToRadix[value, base]() -- convert int to string in given base
 int64_t taida_to_radix(int64_t value, int64_t base) {
-    if (base < 2 || base > 36) return taida_lax_empty((int64_t)"");
+    /* Lax[Str]: STR tags on value / default so display and jsonEncode
+       render the digits and the "" default as strings, not addresses. */
+    if (base < 2 || base > 36) return _wasm_str_lax_tagged(taida_lax_empty(WSTR("")));
     if (value == 0) {
         char *out = _wasm_str_alloc(2);
         out[0] = '0';
         out[1] = '\0';
-        return taida_lax_new((int64_t)out, (int64_t)"");
+        return _wasm_str_lax_tagged(taida_lax_new((int64_t)out, WSTR("")));
     }
 
     uint64_t mag = value < 0
@@ -696,7 +296,7 @@ int64_t taida_to_radix(int64_t value, int64_t base) {
         out[i] = tmp[pos - 1 - i];
     }
     out[pos] = '\0';
-    return taida_lax_new((int64_t)out, (int64_t)"");
+    return _wasm_str_lax_tagged(taida_lax_new((int64_t)out, WSTR("")));
 }
 
 /* ── WC-3d: Public callback invoke helpers (list HOF depends on these) ── */
@@ -704,6 +304,9 @@ int64_t taida_to_radix(int64_t value, int64_t base) {
    but with public linkage so runtime_full_wasm.c can also call them. */
 
 int64_t taida_invoke_callback1(int64_t fn_ptr, int64_t arg0) {
+    /* A pending throw ends the runtime loop that is calling back: no
+       further user code runs before the ceiling. */
+    if (__wasm_error_thrown) return 0;
     if (taida_is_closure_value(fn_ptr)) {
         int64_t *closure = (int64_t *)(intptr_t)fn_ptr;
         int64_t user_arity = closure[3];
@@ -724,6 +327,7 @@ int64_t taida_invoke_callback1(int64_t fn_ptr, int64_t arg0) {
 }
 
 int64_t taida_invoke_callback2(int64_t fn_ptr, int64_t arg0, int64_t arg1) {
+    if (__wasm_error_thrown) return 0;
     if (taida_is_closure_value(fn_ptr)) {
         int64_t *closure = (int64_t *)(intptr_t)fn_ptr;
         /* Closure with 2 user args: call with env + arg0 + arg1 */
@@ -918,75 +522,95 @@ static int _wasm_sort_gt(int64_t a, uint32_t eka, int64_t b, uint32_t ekb) {
     return a > b;
 }
 
-int64_t taida_list_sort(int64_t list_ptr) {
+/* One element being sorted (native twin: taida_sort_entry): the value and
+   its kind, and the key it is ordered by with the key's kind. */
+typedef struct {
+    int64_t item;
+    int64_t key;
+    uint32_t ek;
+    uint32_t kek;
+} _wasm_sort_entry;
+
+static int _wasm_sort_key_is_nan(const _wasm_sort_entry *e) {
+    if (WASM_EKIND_KIND(e->kek) != WASM_TAG_FLOAT) return 0;
+    double d;
+    __builtin_memcpy(&d, &e->key, sizeof(double));
+    return d != d;
+}
+
+/* Sort[list](by, reverse), the reference's steps (native twin:
+   taida_list_sort_kind): NaN keys go last in their original order in either
+   direction; the rest are merge-sorted ascending (stable) and reversed for a
+   descending sort. `key_fn` 0 orders by the elements themselves; otherwise
+   `key_tag` is the kind of the keys it returns (-1 when unknown). */
+int64_t taida_list_sort_kind(int64_t list_ptr, int64_t key_fn, int64_t key_tag, int64_t descending) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
     int src_tagged = _wasm_elem_slot_is_array(list[2]);
     int64_t elem_tag = _wasm_elem_tag_for_propagation(list);
     int64_t new_list = taida_list_new();
     if (!src_tagged) ((int64_t *)(intptr_t)new_list)[2] = elem_tag;
-    /* Copy items into temp array (on bump allocator); kinds ride the
-       permutation for array-carrying sources. */
-    int64_t *items = (int64_t *)wasm_alloc((unsigned int)(len * 8));
-    uint32_t *eks = src_tagged ? (uint32_t *)wasm_alloc((unsigned int)(len * 4)) : 0;
-    for (int64_t i = 0; i < len; i++) {
-        items[i] = list[WASM_LIST_ELEMS + i];
-        if (eks) eks[i] = _wasm_elem_kind_at(list, i);
-    }
-    /* Insertion sort ascending — kind-aware (homogeneous lists carry
-       their kind in the single elem tag). */
+    if (len == 0) return new_list;
     uint32_t homog_ek = elem_tag >= 0 ? WASM_EKIND((uint32_t)elem_tag, 0) : WASM_EKIND_UNKNOWN;
-    for (int64_t i = 1; i < len; i++) {
-        int64_t key = items[i];
-        uint32_t kek = eks ? eks[i] : homog_ek;
-        int64_t j = i - 1;
-        while (j >= 0 && _wasm_sort_gt(items[j], eks ? eks[j] : homog_ek, key, kek)) {
-            items[j+1] = items[j];
-            if (eks) eks[j+1] = eks[j];
-            j--;
-        }
-        items[j+1] = key;
-        if (eks) eks[j+1] = kek;
-    }
+    uint32_t key_ek = key_tag >= 0 ? WASM_EKIND((uint32_t)key_tag, 0) : WASM_EKIND_UNKNOWN;
+    unsigned int bytes = (unsigned int)(len * sizeof(_wasm_sort_entry));
+    _wasm_sort_entry *entries = (_wasm_sort_entry *)wasm_alloc(bytes);
+    _wasm_sort_entry *tmp = (_wasm_sort_entry *)wasm_alloc(bytes);
+    _wasm_sort_entry *nan_tail = (_wasm_sort_entry *)wasm_alloc(bytes);
+    int64_t n_keep = 0, n_nan = 0;
     for (int64_t i = 0; i < len; i++) {
-        if (src_tagged) _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)new_list, eks[i]);
-        new_list = taida_list_push(new_list, items[i]);
+        _wasm_sort_entry e;
+        e.item = list[WASM_LIST_ELEMS + i];
+        e.ek = src_tagged ? _wasm_elem_kind_at(list, i) : homog_ek;
+        if (key_fn) {
+            e.key = taida_invoke_callback1(key_fn, e.item);
+            e.kek = key_ek;
+        } else {
+            e.key = e.item;
+            e.kek = e.ek;
+        }
+        if (_wasm_sort_key_is_nan(&e)) nan_tail[n_nan++] = e;
+        else entries[n_keep++] = e;
+    }
+    /* Bottom-up merge sort (stable). */
+    _wasm_sort_entry *src = entries, *dst = tmp;
+    for (int64_t width = 1; width < n_keep; width *= 2) {
+        for (int64_t lo = 0; lo < n_keep; lo += 2 * width) {
+            int64_t mid = lo + width < n_keep ? lo + width : n_keep;
+            int64_t hi = lo + 2 * width < n_keep ? lo + 2 * width : n_keep;
+            int64_t i = lo, j = mid, k = lo;
+            while (i < mid && j < hi) {
+                if (_wasm_sort_gt(src[i].key, src[i].kek, src[j].key, src[j].kek)) dst[k++] = src[j++];
+                else dst[k++] = src[i++];
+            }
+            while (i < mid) dst[k++] = src[i++];
+            while (j < hi) dst[k++] = src[j++];
+        }
+        _wasm_sort_entry *swap = src;
+        src = dst;
+        dst = swap;
+    }
+    if (descending) {
+        for (int64_t i = 0, j = n_keep - 1; i < j; i++, j--) {
+            _wasm_sort_entry t = src[i];
+            src[i] = src[j];
+            src[j] = t;
+        }
+    }
+    for (int64_t i = 0; i < n_keep + n_nan; i++) {
+        _wasm_sort_entry *e = i < n_keep ? &src[i] : &nan_tail[i - n_keep];
+        if (src_tagged) _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)new_list, e->ek);
+        new_list = taida_list_push(new_list, e->item);
     }
     return new_list;
 }
 
+int64_t taida_list_sort(int64_t list_ptr) {
+    return taida_list_sort_kind(list_ptr, 0, -1, 0);
+}
+
 int64_t taida_list_sort_desc(int64_t list_ptr) {
-    int64_t *list = (int64_t *)(intptr_t)list_ptr;
-    int64_t len = list[1];
-    int src_tagged = _wasm_elem_slot_is_array(list[2]);
-    int64_t elem_tag = _wasm_elem_tag_for_propagation(list);
-    int64_t new_list = taida_list_new();
-    if (!src_tagged) ((int64_t *)(intptr_t)new_list)[2] = elem_tag;
-    int64_t *items = (int64_t *)wasm_alloc((unsigned int)(len * 8));
-    uint32_t *eks = src_tagged ? (uint32_t *)wasm_alloc((unsigned int)(len * 4)) : 0;
-    for (int64_t i = 0; i < len; i++) {
-        items[i] = list[WASM_LIST_ELEMS + i];
-        if (eks) eks[i] = _wasm_elem_kind_at(list, i);
-    }
-    /* Insertion sort descending — kind-aware, see _wasm_sort_gt. */
-    uint32_t homog_ek = elem_tag >= 0 ? WASM_EKIND((uint32_t)elem_tag, 0) : WASM_EKIND_UNKNOWN;
-    for (int64_t i = 1; i < len; i++) {
-        int64_t key = items[i];
-        uint32_t kek = eks ? eks[i] : homog_ek;
-        int64_t j = i - 1;
-        while (j >= 0 && _wasm_sort_gt(key, kek, items[j], eks ? eks[j] : homog_ek)) {
-            items[j+1] = items[j];
-            if (eks) eks[j+1] = eks[j];
-            j--;
-        }
-        items[j+1] = key;
-        if (eks) eks[j+1] = kek;
-    }
-    for (int64_t i = 0; i < len; i++) {
-        if (src_tagged) _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)new_list, eks[i]);
-        new_list = taida_list_push(new_list, items[i]);
-    }
-    return new_list;
+    return taida_list_sort_kind(list_ptr, 0, -1, 1);
 }
 
 /* Unique by key extraction function: fn_ptr maps each element to a key,
@@ -1041,43 +665,7 @@ int64_t taida_list_unique_by(int64_t list_ptr, int64_t fn_ptr) {
 /* Sort by key extraction function: fn_ptr maps each element to a sort key,
    then sort ascending by key. Matches interpreter's Sort[list](by <= fn). */
 int64_t taida_list_sort_by(int64_t list_ptr, int64_t fn_ptr) {
-    int64_t *list = (int64_t *)(intptr_t)list_ptr;
-    int64_t len = list[1];
-    int src_tagged = _wasm_elem_slot_is_array(list[2]);
-    int64_t elem_tag = _wasm_elem_tag_for_propagation(list);
-    int64_t new_list = taida_list_new();
-    if (!src_tagged) ((int64_t *)(intptr_t)new_list)[2] = elem_tag;
-    if (len == 0) return new_list;
-    /* Allocate parallel arrays: items and keys (+ kinds for carriers) */
-    int64_t *items = (int64_t *)wasm_alloc((unsigned int)(len * 8));
-    int64_t *keys = (int64_t *)wasm_alloc((unsigned int)(len * 8));
-    uint32_t *eks = src_tagged ? (uint32_t *)wasm_alloc((unsigned int)(len * 4)) : 0;
-    for (int64_t i = 0; i < len; i++) {
-        items[i] = list[WASM_LIST_ELEMS + i];
-        keys[i] = taida_invoke_callback1(fn_ptr, items[i]);
-        if (eks) eks[i] = _wasm_elem_kind_at(list, i);
-    }
-    /* Insertion sort ascending by key */
-    for (int64_t i = 1; i < len; i++) {
-        int64_t kkey = keys[i];
-        int64_t kitem = items[i];
-        uint32_t kek = eks ? eks[i] : 0;
-        int64_t j = i - 1;
-        while (j >= 0 && keys[j] > kkey) {
-            keys[j+1] = keys[j];
-            items[j+1] = items[j];
-            if (eks) eks[j+1] = eks[j];
-            j--;
-        }
-        keys[j+1] = kkey;
-        items[j+1] = kitem;
-        if (eks) eks[j+1] = kek;
-    }
-    for (int64_t i = 0; i < len; i++) {
-        if (src_tagged) _wasm_elem_tags_note_push_ek((int64_t *)(intptr_t)new_list, eks[i]);
-        new_list = taida_list_push(new_list, items[i]);
-    }
-    return new_list;
+    return taida_list_sort_kind(list_ptr, fn_ptr, -1, 0);
 }
 
 int64_t taida_list_unique(int64_t list_ptr) {
@@ -1125,13 +713,16 @@ int64_t taida_list_unique(int64_t list_ptr) {
     int64_t new_list = taida_list_new();
     int64_t *nl_init = (int64_t *)(intptr_t)new_list;
     nl_init[2] = elem_tag;
+    int raw = _wasm_tag_is_plain_number(elem_tag);
     _wasm_seen seen;
-    int use_hash = _wasm_list_all_hashable(list) && _wasm_seen_init(&seen, len);
+    int use_hash = (raw || _wasm_list_all_hashable(list)) && _wasm_seen_init(&seen, len);
     for (int64_t i = 0; i < len; i++) {
         int64_t item = list[WASM_LIST_ELEMS + i];
         int dup;
         if (use_hash) {
-            dup = !_wasm_seen_add(&seen, item);
+            dup = raw ? !_wasm_seen_add_raw(&seen, item) : !_wasm_seen_add(&seen, item);
+        } else if (raw) {
+            dup = _wasm_list_has_raw(new_list, item);
         } else {
             int64_t *nl = (int64_t *)(intptr_t)new_list;
             int64_t nlen = nl[1];
@@ -1200,6 +791,7 @@ int64_t taida_list_reverse(int64_t list_ptr) {
    Every other kind keeps the existing fallback. */
 static int64_t _wasm_elem_to_string_kinded(int64_t item, uint32_t ek) {
     uint32_t k = WASM_EKIND_KIND(ek);
+    if (k == WASM_TAG_INT) return taida_int_to_str(item);
     if (k == WASM_TAG_FLOAT) return taida_float_to_str(item);
     if (k == WASM_TAG_BOOL) {
         const char *s = item ? "true" : "false";
@@ -1232,11 +824,14 @@ int64_t taida_list_join(int64_t list_ptr, int64_t sep_raw) {
     int64_t total = 0;
     for (int64_t i = 0; i < len; i++) {
         int64_t elem = list[WASM_LIST_ELEMS + i];
-        if (_wasm_is_string_ptr(elem)) {
+        /* The element's recorded kind decides; only a Str or an element of
+           unknown kind is looked at as a possible string. */
+        uint32_t ek = _wasm_elem_kind_at(list, i);
+        uint32_t k = WASM_EKIND_KIND(ek);
+        if ((k == WASM_TAG_STR || k == WASM_EKIND_UNKNOWN) && _wasm_is_string_ptr(elem)) {
             strs[i] = (const char *)(intptr_t)elem;
         } else {
-            strs[i] = (const char *)(intptr_t)_wasm_elem_to_string_kinded(
-                elem, _wasm_elem_kind_at(list, i));
+            strs[i] = (const char *)(intptr_t)_wasm_elem_to_string_kinded(elem, ek);
         }
         lens[i] = _wf_strlen(strs[i]);
         total += lens[i];
@@ -1417,6 +1012,26 @@ static void _wasm_register_zip_enumerate_field_names(void) {
     taida_register_field_name((int64_t)WASM_HASH_VALUE2, WSTR("value"));
 }
 
+/// range(start, end) -- @[start, ..., end - 1]; empty when end <= start.
+/// More than a million items throws RangeError (the reference's limit,
+/// with its item count saturated to the Int range in the message).
+int64_t taida_range(int64_t start, int64_t end) {
+    int64_t list = taida_list_new();
+    taida_list_set_elem_tag(list, WASM_TAG_INT);
+    if (end <= start) return list;
+    uint64_t len = (uint64_t)end - (uint64_t)start;
+    if (len > 1000000ULL) {
+        if (len > 9223372036854775807ULL) len = 9223372036854775807ULL;
+        int64_t msg = taida_str_concat(
+            WSTR("range(start, end) would create "),
+            taida_str_concat(taida_int_to_str((int64_t)len),
+                             WSTR(" items; maximum is 1000000")));
+        return taida_throw(taida_make_error(WSTR("RangeError"), msg));
+    }
+    for (int64_t v = start; v < end; v++) list = taida_list_push(list, v);
+    return list;
+}
+
 int64_t taida_list_enumerate(int64_t list_ptr) {
     _wasm_register_zip_enumerate_field_names();
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
@@ -1508,15 +1123,15 @@ int64_t taida_list_to_display_string(int64_t list_ptr) {
 int64_t taida_list_first(int64_t list_ptr) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
-    if (len == 0) return taida_lax_empty(0);
-    return _wasm_lax_new_k(list[WASM_LIST_ELEMS], 0, _wasm_elem_kind_at(list, 0));
+    if (len == 0) return _wasm_list_lax(list, 0, 0, WASM_EKIND_UNKNOWN);
+    return _wasm_list_lax(list, 1, list[WASM_LIST_ELEMS], _wasm_elem_kind_at(list, 0));
 }
 
 int64_t taida_list_last(int64_t list_ptr) {
     int64_t *list = (int64_t *)(intptr_t)list_ptr;
     int64_t len = list[1];
-    if (len == 0) return taida_lax_empty(0);
-    return _wasm_lax_new_k(list[WASM_LIST_ELEMS + len - 1], 0, _wasm_elem_kind_at(list, len - 1));
+    if (len == 0) return _wasm_list_lax(list, 0, 0, WASM_EKIND_UNKNOWN);
+    return _wasm_list_lax(list, 1, list[WASM_LIST_ELEMS + len - 1], _wasm_elem_kind_at(list, len - 1));
 }
 
 /* min/max order with the same kind-aware comparator as Sort[] and
