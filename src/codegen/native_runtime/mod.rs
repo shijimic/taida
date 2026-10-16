@@ -1053,7 +1053,9 @@ mod tests {
         //   Molten as the reference does: 1,572,818 -> 1,574,290.
         // The top-level value table grows as needed: 1,574,290 ->
         //   1,576,186.
-        const EXPECTED_TOTAL_LEN: usize = 1_576_186;
+        // The math kernel keeps its FP_CONTRACT pragma for clang only:
+        //   1,576,186 -> 1,576,334.
+        const EXPECTED_TOTAL_LEN: usize = 1_576_334;
         let asm = *NATIVE_RUNTIME_C;
         assert_eq!(
             asm.len(),

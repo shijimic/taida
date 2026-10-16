@@ -16,13 +16,17 @@
  *
  * Freestanding: <stdint.h> only (no libm, no long double, no __int128, no
  * FMA instruction); sqrt is IEEE-exact.  Floating-point contraction must
- * stay off: the error-free transformations below depend on it.
+ * stay off: the error-free transformations below depend on it.  The build
+ * passes -ffp-contract=off; clang also honours the pragma below (GCC does
+ * not know it and would warn).
  *
  * The tables (runtime_crmath_tables.inc.c, generated with mpmath) are
  * concatenated in front of this file.
  */
 
+#if defined(__clang__)
 #pragma STDC FP_CONTRACT OFF
+#endif
 
 /* The WASM runtime is linked without libc: the in-place limb shifts
    disable builtins so they cannot become memmove calls. */

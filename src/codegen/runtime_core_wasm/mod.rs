@@ -417,7 +417,9 @@ mod tests {
         // Pointer checks do not wrap at 2^32; field names have no fixed
         //   limit; Molten and Stream show as the reference shows them:
         //   732,972 -> 734,753.
-        const EXPECTED_TOTAL_LEN: usize = 734_753;
+        // The math kernel keeps its FP_CONTRACT pragma for clang only:
+        //   734,753 -> 734,901.
+        const EXPECTED_TOTAL_LEN: usize = 734_901;
         let asm = *RUNTIME_CORE_WASM;
         assert_eq!(
             asm.len(),

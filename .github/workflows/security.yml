@@ -115,11 +115,14 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends cppcheck gcc
       - name: Assemble native_runtime TU
-        # Order must match src/codegen/native_runtime/mod.rs:91-105
-        # (CORE -> OS -> TLS -> NET_H1_H2 -> NET_H3_QUIC).
+        # Order must match `NATIVE_RUNTIME_C` in
+        # src/codegen/native_runtime/mod.rs (CORE -> CRMATH_TABLES ->
+        # CRMATH -> OS -> TLS -> NET_H1_H2 -> NET_H3_QUIC).
         run: |
           mkdir -p /tmp/c-analysis
           cat src/codegen/native_runtime/core.c \
+              src/codegen/runtime_crmath_tables.inc.c \
+              src/codegen/runtime_crmath.inc.c \
               src/codegen/native_runtime/os.c \
               src/codegen/native_runtime/tls.c \
               src/codegen/native_runtime/net_h1_h2.c \
